@@ -1,0 +1,11 @@
+# Regenerable output and local scratch.
+# Remote sync already excludes virtualenvs, tool caches, node_modules, and .env.
+
+build/
+dist/
+runs/
+results/
+logs/
+exports/
+*.egg-info/
+.pi/

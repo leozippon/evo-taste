@@ -1,0 +1,21 @@
+# Secrets and local state
+.env
+.pi/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Regenerable experiment output (kept on the compute host only)
+runs/
+results/
+logs/
+exports/
