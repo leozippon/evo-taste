@@ -153,6 +153,7 @@ def prepare(config_path: Path, attach: str | None) -> None:
                 sampler.close()
             if server:
                 server.stop()
+    run.check_probe_set()
     write_json(run.dir / "prepared.json", {"time": now(), "revision": revision(), "teachers": teachers(run.cfg)})
     log.info("run %s prepared", run.dir)
 
@@ -241,6 +242,7 @@ def run_worker(run_dir: Path, slots: list[str], attach: str | None) -> None:
     prepared = run.dir / "prepared.json"
     if not prepared.exists() or set(teachers(run.cfg)) - set(read_json(prepared)["teachers"]):
         raise SystemExit(f"{run.dir} is not prepared; run `python -m evotaste.worker prepare` first")
+    run.check_probe_set()
     locks = lock_slots(run, slots)
     log.info("worker pid %d, GPU %s, members %s, revision %s, log %s", os.getpid(),
              os.environ.get("CUDA_VISIBLE_DEVICES"), slots, revision(), log_path)

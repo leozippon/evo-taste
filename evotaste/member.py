@@ -61,6 +61,15 @@ class Run:
         system = SYSTEM_PROMPT if teacher == "plain" else system_prompt(self.scaffolds[teacher])
         return prompt_ids(self.tokenizer, question, system)
 
+    def check_probe_set(self) -> None:
+        """Members' probes are compared with the base model's: the probe set rebuilt by this code must be the one the
+        base model answered at prepare time (a code change that alters instances would otherwise go unnoticed)."""
+        base = [(r["suite"], r["uid"], r["question"]) for r in
+                read_jsonl_gz(self.dir / "base" / "probe_responses.jsonl.gz")]
+        if base != [(suite, t.uid, t.question) for suite, t in self.probe_tasks]:
+            raise RuntimeError(f"{self.dir}: the probe set differs from the one the base model answered at prepare "
+                               "time; the run was prepared by different code and cannot be continued with this one")
+
     @property
     def base_probe(self) -> dict:
         return read_json(self.dir / "base" / "probe_summary.json")
