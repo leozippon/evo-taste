@@ -232,8 +232,15 @@ def table():
         "errors": "Request or scoring errors during calibration (count; see the jsonl `error` field)",
     }
     note_md = "\n".join(f"- {labels[k]}: {', '.join(v)}." for k, v in notes.items() if v) or "- None."
+    overall = []
+    for m, d in runs.items():
+        done = d[d.finish_reason == "stop"]
+        overall.append(f"- {m}: mean score {d.score.mean():.2f}, exactly 1.0 {(d.score == 1).mean():.2f}, no answer "
+                       f"{d.extracted.isna().mean():.2f}, truncated at 1024 tokens {(d.finish_reason == 'length').mean():.2f}; "
+                       f"among completed samples: mean score {done.score.mean():.2f}, no answer {done.extracted.isna().mean():.2f}.")
     DOC.parent.mkdir(parents=True, exist_ok=True)
-    DOC.write_text(TEMPLATE.format(n=N, seed=SEED, table=to_md(df), examples=to_md(ex), notes=note_md))
+    DOC.write_text(TEMPLATE.format(n=N, seed=SEED, table=to_md(df), examples=to_md(ex), notes=note_md,
+                                   overall="\n".join(overall), ndatasets=len(rows)))
 
 
 TEMPLATE = """# reasoning-gym calibration
@@ -241,6 +248,12 @@ TEMPLATE = """# reasoning-gym calibration
 Base-model calibration of every reasoning-gym dataset at its default config: {n} instances per dataset (seed {seed}), one sample each at temperature 1.0 (top_p 1.0), max_tokens 1024, no thinking phase, reasoning-gym's `default` system prompt, answer taken from the last `<answer>…</answer>` and scored with the dataset's own `score_answer`. Models: Qwen3-1.7B (`enable_thinking=False`) and Qwen3-4B-Instruct-2507. Raw per-instance records are on the compute host under `results/calibration/` (`<model>.jsonl`, `catalogue.json`); regenerate this file with `scripts/dev/rg_calibrate.py`.
 
 Columns: `acc` is mean score; `=1` the fraction scoring exactly 1.0; `no-ans` the fraction without an extractable answer; `tok mean/p95` completion tokens (1024 means truncated). Scoring is classified from the scores of model outputs and of perturbed gold answers: `exact` gives only 0 or 1, `exact+ε` also gives a small format credit (at most 0.05) to wrong but parseable answers, `partial` gives larger fractional credit; `*` marks datasets that use the base-class scorer, which gives `len(gold)/len(answer)` credit whenever the gold answer is a substring of the answer. Difficulty knobs are the dataset's curriculum attributes with their default-config values (`lo–hi` for ranges).
+
+Over all {n} × {ndatasets} prompts:
+
+{overall}
+
+Almost every missing answer is a truncated sample: Qwen3-4B-Instruct-2507 writes long step-by-step solutions, so at max_tokens 1024 half of its samples never reach `<answer>`; its per-dataset accuracy here is a lower bound, and its RL runs need a larger token budget or a prompt that asks for brevity.
 
 {table}
 

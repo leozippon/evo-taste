@@ -62,7 +62,7 @@ Save every adapter version to a new directory and load it under a new name, for 
 | unload, then load same name from overwritten path | yes | 128 tokens (stale) | 0.16 s |
 | files overwritten, no reload call | no (old weights stay cached in vLLM) | n/a | n/a |
 
-Never reuse a path for changed weights: the request still gets KV computed with the old weights for every cached 64-token block of its prompt, silently. `load_inplace` with a new path is correct for new requests, but it swaps the weights of the GPU slot under the same internal adapter id, so sequences already running would continue under the new weights (inferred from vLLM's worker code; not tested). Unloading is API-level bookkeeping only (7 ms); the engine evicts old versions from its GPU slots and CPU cache by LRU, so many versions over a run need no cleanup beyond unloading names. Save and load latencies are under Throughput.
+Qwen3-4B-Instruct-2507 gave the same pattern, with latencies around 0.30 s for its 264 MB adapters. Never reuse a path for changed weights: the request still gets KV computed with the old weights for every cached 64-token block of its prompt, silently. `load_inplace` with a new path is correct for new requests, but it swaps the weights of the GPU slot under the same internal adapter id, so sequences already running would continue under the new weights (inferred from vLLM's worker code; not tested). Unloading is API-level bookkeeping only (7 ms); the engine evicts old versions from its GPU slots and CPU cache by LRU, so many versions over a run need no cleanup beyond unloading names. Save and load latencies are under Throughput.
 
 ## Prompt construction and sampling
 
@@ -92,7 +92,7 @@ Part (c) of `scripts/dev/lora_smoke.py` checks that the trainer scores the polic
 
 The check passes: vLLM is as close to the fp32 reference as HF bf16 is, the control shows the adapter is applied (10× the noise), and there is no systematic offset from chat template, BOS, think tags, LoRA scaling or dtype. A repeat with fresh samples gave the same picture (0.0133 / 0.0110 / 0.0123 per token). The small positive mean Δ is expected rather than a bug: tokens drawn from vLLM's distribution are on average ones vLLM scores slightly higher than an independent bf16 evaluation, so it estimates KL(vLLM ‖ HF) ≈ 1e-3 nats per token. Consequence for the trainer: in bf16 the per-sequence log importance ratio between trainer and sampler is typically 0.3–0.4 and reaches about 2.5 for 500-token sequences, so keep a ratio clip or truncated importance weights even for nominally on-policy updates, and use the trainer's own recomputed log-probabilities wherever an exact ratio of 1 is assumed.
 
-CONSISTENCY_4B
+The same test on Qwen3-4B-Instruct-2507 (64 sequences, 19,398 tokens, mean 303) also passes: vLLM vs HF bf16 0.0113 per token (mean Δ +0.0008), vLLM vs HF fp32 0.0086, HF bf16 vs fp32 0.0100, control 0.083; per-sequence mean abs ΔΣ 0.64 against bf16 for these longer sequences.
 
 ## Throughput
 
@@ -134,7 +134,7 @@ One vLLM server and one trainer process per GPU, started in that order, with the
 
 For 1.7B, KV 12G (18.9 GiB) loses nothing at today's short completions and frees 8.5 GiB, but the larger cache matters once training lengthens the answers. For 4B, micro-batch 8 also fits (42.7 GiB total) but leaves only 2.3 GiB for a 4% faster update, which is too little on a shared machine.
 
-Per adapter and iteration (128 prompts × 8 samples, then one update over 512 sequences of 600 tokens), the cost is roughly: Qwen3-1.7B, 10–15 s of rollout at current answer lengths (up to about 90 s if every sample ran to 512 tokens), 70–86 s of update, 2–5 s of hand-off; Qwen3-4B-Instruct-2507, about 120 s of rollout, 160 s of update. The trainer is the bottleneck. Batching several adapters into one rollout costs little, so the engine should batch rollouts for all adapters on a GPU and spend its effort on the update path; overlapping one adapter's update with the next adapter's rollout is possible memory-wise but untested (the two compete for the same SMs).
+Per adapter and iteration (128 prompts × 8 samples, then one update over 512 sequences of 600 tokens), the cost is roughly: Qwen3-1.7B, 10–15 s of rollout at current answer lengths (up to about 90 s if every sample ran to 512 tokens), 70–86 s of update, 2–5 s of hand-off; Qwen3-4B-Instruct-2507, about 120 s of rollout, 160 s of update. The 4B figure understates its rollout cost: in the calibration half of its samples did not finish within 1024 tokens, so it needs a larger budget or a brevity instruction. The trainer is the bottleneck. Batching several adapters into one rollout costs little, so the engine should batch rollouts for all adapters on a GPU and spend its effort on the update path; overlapping one adapter's update with the next adapter's rollout is possible memory-wise but untested (the two compete for the same SMs).
 
 ## Pitfalls
 
