@@ -313,10 +313,11 @@ def scaffold_recovery(members: pd.DataFrame, bias_of: dict[str, str]) -> pd.Data
             pred, _ = fit_predict(train["ctext"], train["lineage"].map(bias_of), test["ctext"], balanced=True)
             preds.append(test.assign(pred=pred, fold=k))
         pred = pd.concat(preds)
-        truth = pred["lineage"].map(bias_of)
-        rows.append({**row, "folds": folds, **accuracy_stats(pred["pred"] == truth,
-                                                             pred["fold"].astype(str) + "/" + pred["uid"],
-                                                             1 / len(usable))})
+        ok = pred["pred"] == pred["lineage"].map(bias_of)
+        per_lineage = ok.groupby(pred["lineage"], sort=False).mean()  # the spread over lineages, which the CI omits
+        rows.append({**row, "folds": folds,
+                     "per_lineage": " ".join(f"{lin} {a:.2f}" for lin, a in per_lineage.items()),
+                     **accuracy_stats(ok, pred["fold"].astype(str) + "/" + pred["uid"], 1 / len(usable))})
     return pd.DataFrame(rows)
 
 
@@ -431,7 +432,7 @@ def summary_lines(run, lineages, label, prof, sharp, ident, confusion, scaff, su
         lines.append("identifiability: predict the lineage across suites; 95% CI from a bootstrap over prompts")
         lines += _table(["train", "test", "lineages", "n", "acc", "chance", "95% CI", "p"],
                         [[f"{r.train_suite}@{r.train_step}", f"{r.test_suite}@{r.test_step}", r.members, r.n,
-                          f"{r.accuracy:.3f}", f"{r.chance:.3f}", f"{r.ci_lo:.3f}-{r.ci_hi:.3f}", f"{r.p_binom:.0e}"]
+                          f"{r.accuracy:.3f}", f"{r.chance:.3f}", f"{r.ci_lo:.3f}-{r.ci_hi:.3f}", _p(r.p_binom)]
                          for r in ident.itertuples() if "+" not in r.test_suite], left=2)
         step = confusion["step"].max()
         c = confusion[confusion["step"] == step].pivot_table(index="true", columns="pred", values="count",
@@ -449,9 +450,14 @@ def summary_lines(run, lineages, label, prof, sharp, ident, confusion, scaff, su
             lines.append(f"  step {int(r.step)}: {r.note}; lineages per bias: {' '.join([r.classes, r.excluded]).strip()}")
         else:
             lines.append(f"  step {int(r.step)}: {r.classes}; acc {r.accuracy:.3f} chance {r.chance:.3f} "
-                         f"CI {r.ci_lo:.3f}-{r.ci_hi:.3f} p {r.p_binom:.0e} (n {r.n}, {r.folds} folds"
+                         f"CI {r.ci_lo:.3f}-{r.ci_hi:.3f} p {_p(r.p_binom)} (n {r.n}, {r.folds:.0f} folds"
                          + (f"; excluded {r.excluded})" if r.excluded else ")"))
+            lines.append(f"    per held-out lineage: {r.per_lineage}")
     return lines
+
+
+def _p(p: float) -> str:
+    return "<1e-300" if p == 0 else f"{p:.0e}"
 
 
 def main(argv=None) -> None:
