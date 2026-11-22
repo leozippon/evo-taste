@@ -25,6 +25,12 @@ log = logging.getLogger(__name__)
 HANDOFF_ROOT = Path("/dev/shm/evotaste")
 READY_TIMEOUT_S = 1200
 MAX_CONNECTIONS = 512
+# A request whose connection fails at the transport level (reset, refused, dropped without a response) is resent
+# up to RETRIES times, RETRY_DELAY_S x attempt apart: one bad connection among millions of requests must not end a
+# job, while a dead server exhausts the bound within seconds. Timeouts and HTTP error statuses are never retried.
+RETRIES = 3
+RETRY_DELAY_S = 2.0
+_TRANSIENT = (httpx.NetworkError, httpx.RemoteProtocolError)
 
 
 def _die_with_parent():  # runs in the child before exec: SIGTERM it when the worker dies, even by SIGKILL
@@ -179,7 +185,17 @@ class Sampler:
         body = {"model": req.model, "prompt": req.prompt, "n": req.n, "max_tokens": req.max_tokens,
                 "temperature": 1.0, "top_p": 1.0, "logprobs": 0, "return_token_ids": True}
         async with slots:
-            r = await client.post("/v1/completions", json=body)
+            for attempt in range(RETRIES + 1):
+                try:
+                    r = await client.post("/v1/completions", json=body)
+                    break
+                except _TRANSIENT as e:
+                    if attempt == RETRIES:
+                        raise RuntimeError(f"completion via {req.model}: transport failed {RETRIES + 1} times "
+                                           f"({type(e).__name__}: {e}); is the server alive?") from e
+                    log.warning("completion via %s: %s (%s); retry %d/%d", req.model, type(e).__name__, e,
+                                attempt + 1, RETRIES)
+                    await asyncio.sleep(RETRY_DELAY_S * (attempt + 1))
         if r.status_code != 200:
             raise RuntimeError(f"completion via {req.model} failed: {r.status_code} {r.text[:300]}")
         out = []
