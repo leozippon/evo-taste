@@ -19,7 +19,7 @@ All commands run from the repository root after `source scripts/env.sh`, with ex
 
 A worker advances its members until each has finished its steps or its slot is exhausted. Killing it at any point and starting the same command again resumes every member from its last checkpoint. Logs go to `logs/<name>/`: one file per command invocation (`prepare-…`, `worker-<members>-…`, `eval-<suite>-…`) and one vLLM log per server.
 
-`evaluate run` accepts `base`, a lineage id (its last checkpoint, which is the final adapter of a finished lineage) or `<lineage>@<step>`. Sharding splits the (adapter, instance) job list; each shard writes its own record file and every invocation rewrites the summary over all record files of the tag, so the summary is complete once the last shard has finished. On `blind1` or `blind2` the evaluator first calls the blind guard (below). Never evaluate a trained adapter on a blind vault outside the protocol's final comparisons.
+`evaluate run` accepts `base`, a lineage id (its last checkpoint, which is the final adapter of a finished lineage) or `<lineage>@<step>`. Sharding splits the (adapter, instance) job list; each shard writes its own record file. After each invocation the summary is recomputed over all record files of the tag and written only if every label comes from a single adapter (one hash across all files) and covers the requested grid exactly, every (family, instance, sample) once; while records are only missing (shards still running) the summary is removed and a warning logged, and any other inconsistency stops with an error. Blind vaults get the same check. On `blind1` or `blind2` the evaluator first calls the blind guard (below). Never evaluate a trained adapter on a blind vault outside the protocol's final comparisons.
 
 ## Run configuration
 
@@ -116,7 +116,7 @@ Evaluation `summary.json`: `time, suite, per_family, samples` and `adapters` map
 
 Only `evaluate.py` opens a blind vault: the `Suites` class used by workers never reads the blind lists, and `tasks.blind_suite` and `external.items(..., part="blind1"|"blind2")` require the receipt returned by `evaluate.blind_guard`. The guard refuses unless `docs/harvest/<run>.json` is tracked in git, identical to `HEAD`, and lists every requested adapter's content hash (over `adapter_config.json` and `adapter_model.safetensors`, both of which vLLM reads). The base model is allowed without a manifest (calibration). Before returning, the guard appends `| time | vault | revision | manifest sha256 | adapters | per family x samples | run |` to `docs/blind-ledger.md`; commit the ledger with the results.
 
-`harvest` ranks lineages with status `done` by `macro` on the selection evaluation of the given tag (every finished lineage must have been evaluated completely with its final adapter) and writes `{run, time, revision, tag, outlier, top3, ranking: [{lineage, slot, arm, scaffold, selection_macro, adapter, sha256, rank}]}`.
+`harvest` recomputes the selection summary of the given tag from its records with the same checks, then ranks lineages with status `done` by `macro` (every finished lineage must have been evaluated with its final adapter) and writes `{run, time, revision, tag, outlier, top3, ranking: [{lineage, slot, arm, scaffold, selection_macro, adapter, sha256, rank}]}`.
 
 ## Measured costs
 

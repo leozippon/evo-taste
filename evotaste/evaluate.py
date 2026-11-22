@@ -105,10 +105,28 @@ def suite_tasks(run: Run, suite: str, per_family: int, receipt: BlindReceipt | N
         t for s in sources for t in external.items(s, suite, receipt)[:per_family]]
 
 
-def summarize(records: list[dict], external_sources: set[str]) -> dict:
-    out = {}
+class IncompleteEvaluation(Exception):
+    """Some label lacks records of the requested grid (for example while other shards are still running)."""
+
+
+def summarize(records: list[dict], tasks: list, samples: int) -> dict:
+    """Per-label accuracy, after checking that each label comes from a single adapter (one hash across all record
+    files) and covers the requested grid exactly: every (family, instance, sample) once. Raises IncompleteEvaluation
+    when records are only missing, ValueError for anything else."""
+    expected = {(t.family, t.uid, i) for t in tasks for i in range(samples)}
+    external_sources = {t.family for t in tasks if t.entry is None}
+    out, incomplete = {}, []
     for label in sorted({r["adapter"] for r in records}):
         rs = [r for r in records if r["adapter"] == label]
+        hashes = {r["adapter_sha256"] for r in rs}
+        if len(hashes) != 1:
+            raise ValueError(f"{label}: records from {len(hashes)} different adapters {sorted(map(str, hashes))}")
+        got = [(r["family"], r["uid"], r["sample"]) for r in rs]
+        if len(set(got)) != len(got) or not set(got) <= expected:
+            raise ValueError(f"{label}: duplicate records, or records outside the requested grid")
+        if len(got) < len(expected):
+            incomplete.append(f"{label}: {len(got)} of {len(expected)} records")
+            continue
         fams: dict[str, list[float]] = {}
         for r in rs:
             fams.setdefault(r["family"], []).append(r["reward"])
@@ -120,7 +138,13 @@ def summarize(records: list[dict], external_sources: set[str]) -> dict:
                       "by_family": acc, "parsed": sum(r["parsed"] for r in rs) / len(rs),
                       "truncated": sum(r["truncated"] for r in rs) / len(rs),
                       "completion_tokens": sum(r["completion_tokens"] for r in rs) / len(rs)}
+    if incomplete:
+        raise IncompleteEvaluation("; ".join(incomplete))
     return out
+
+
+def read_records(out: Path) -> list[dict]:
+    return [r for f in sorted(out.glob("records-*.jsonl.gz")) for r in read_jsonl_gz(f)]
 
 
 def evaluate(run_dir: Path, suite: str, adapter_specs: list[str], per_family: int, samples: int, shard: str,
@@ -165,31 +189,32 @@ def evaluate(run_dir: Path, suite: str, adapter_specs: list[str], per_family: in
                for (label, _, i, _), r in zip(pairs, scored)]
     key = hashlib.sha256(",".join(adapter_specs).encode()).hexdigest()[:8]
     write_jsonl_gz(out / f"records-{key}-{index}of{count}.jsonl.gz", records)
-    every = [r for f in sorted(out.glob("records-*.jsonl.gz")) for r in read_jsonl_gz(f)]
-    keys = [(r["adapter"], r["uid"], r["sample"]) for r in every]
-    if len(set(keys)) != len(keys):
-        raise SystemExit(f"{out}: duplicate records across invocations; evaluate each adapter once per tag")
-    sources = {s for s in external.PARTS}
-    write_json(out / "summary.json", {"time": now(), **params, "adapters": summarize(every, sources)})
+    try:
+        summary = summarize(read_records(out), tasks, samples)
+    except IncompleteEvaluation as e:
+        (out / "summary.json").unlink(missing_ok=True)
+        log.warning("no summary yet, the evaluation of %s is incomplete (shards still running?): %s", out, e)
+        return
+    write_json(out / "summary.json", {"time": now(), **params, "adapters": summary})
     log.info("summary written to %s", out / "summary.json")
 
 
 def harvest(run_dir: Path, tag: str) -> None:
     """Rank finished lineages by selection macro accuracy of their final adapters; write the harvest manifest."""
     run = Run(run_dir)
-    summary = read_json(run.dir / "eval" / "selection" / tag / "summary.json")
-    expected = summary["per_family"] * summary["samples"]
+    out = run.dir / "eval" / "selection" / tag
+    params = read_json(out / "params.json")
+    # Recomputed from the records with the same checks as the summary: one adapter per label, complete grid.
+    summary = summarize(read_records(out), suite_tasks(run, "selection", params["per_family"], None), params["samples"])
     ranking = []
     for path in sorted((run.dir / "members").glob("*/state.json")):
         lin = load_lineage(run, path.parent.name)
         if lin.status != "done":
             continue
-        s = summary["adapters"].get(lin.id)
+        s = summary.get(lin.id)
         adapter = resolve_adapter(run, lin.id)
         if s is None or s["adapter_sha256"] != adapter_sha256(adapter):
             raise SystemExit(f"{lin.id}: final adapter not evaluated on selection under tag {tag}")
-        if any(n != expected for f, n in s["n_by_family"].items() if f in run.suites.selection):
-            raise SystemExit(f"{lin.id}: incomplete selection evaluation under tag {tag}")
         ranking.append({"lineage": lin.id, "slot": lin.slot, "arm": lin.arm, "scaffold": lin.scaffold,
                         "selection_macro": s["macro"], "adapter": str(adapter), "sha256": s["adapter_sha256"]})
     if not ranking:
