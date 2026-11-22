@@ -25,11 +25,11 @@ A *member* is one LoRA adapter on a frozen base model, trained only on its own r
 
 ## Task suites
 
-All procedural tasks come from generators with exact verifiers, so instances are unlimited and the unit of distribution shift is the task family. Families are filtered by base-model calibration (not at floor or ceiling, prompt and answer of manageable length) and then assigned to suites by a seeded draw stratified by category, so that no suite is hand-picked. The assignment lives in one configuration file, which is the single source for every script.
+All procedural tasks come from generators with exact verifiers, so instances are unlimited and the unit of distribution shift is the task family. Families are excluded only for practical reasons — an unreliable verifier, an overlong prompt, a task the base model already solves almost always — and are then assigned to suites by a seeded draw, so that no suite is hand-picked. Families that are variants of one another are assigned together. Three whole categories are held out, one for selection and one for each blind vault, so that each of those suites also tests transfer to a kind of task never trained on; the remaining families are dealt across all four suites, stratified by category and by whether the base model can solve them at all. Families the base model cannot solve stay in every suite, including training: unlocking one is the kind of rare, self-reinforcing event the project looks for. The assignment lives in one configuration file, which is the single source for every script.
 
 | Suite | Content | Used for |
 |---|---|---|
-| Train | A mix of families covering all categories, each at several difficulty levels. Every member sees the same full mix and the same prompt stream. | Rollouts and updates. |
+| Train | A broad mix of families at their default difficulty. Every member sees the same full mix and the same prompt stream. | Rollouts and updates. |
 | Train-test | Fresh instances of the train families. | In-distribution fitness, the collapse floor, forgetting. |
 | Selection | Families never trained on, plus a natural-language foundation probe. | The collapse floor, harvest ranking, all development decisions. |
 | Blind, vault 1 and vault 2 | Families disjoint from train and selection, plus external benchmarks never touched elsewhere. Each vault holds different families and different benchmark items. | Verification only. |
