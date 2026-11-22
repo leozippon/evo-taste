@@ -78,14 +78,14 @@ def _task(source: str, item_id: str, r: dict) -> Task:
     uid = f"{source}/{item_id}"
     if source.startswith("gsm8k"):
         gold = r["answer"].split("####")[-1].strip().replace(",", "")
-        return Task(uid, source, r["question"], gold, lambda a: score_number(a, gold))
+        return Task(uid, source, r["question"], gold)
     if source == "math500":
         gold = r["answer"]
-        return Task(uid, source, r["problem"], gold, lambda a: score_math(a, gold))
+        return Task(uid, source, r["problem"], gold)
     options = "\n".join(f"{LETTERS[i]}. {o}" for i, o in enumerate(r["options"]))
     question = f"{r['question']}\n\nOptions:\n{options}\n\nAnswer with the letter of the correct option."
     gold = r["answer"]
-    return Task(uid, source, question, gold, lambda a: score_letter(a, gold))
+    return Task(uid, source, question, gold)
 
 
 @functools.lru_cache(maxsize=None)
@@ -142,3 +142,6 @@ def score_letter(answer: str, gold: str) -> float:
     """MMLU-Pro: the answer starts with the gold option letter (optionally in parentheses)."""
     m = _LETTER.match(answer.strip())
     return float(m is not None and m.group(1) == gold)
+
+
+SCORERS = {"gsm8k_train": score_number, "gsm8k_test": score_number, "math500": score_math, "mmlu_pro": score_letter}

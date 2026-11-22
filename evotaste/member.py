@@ -22,7 +22,7 @@ from evotaste import config
 from evotaste.records import (append_jsonl, filter_jsonl, now, read_json, read_jsonl_gz, write_json,
                               write_jsonl_gz)
 from evotaste.sampler import Request, Sample
-from evotaste.tasks import (SYSTEM_PROMPT, Streams, Suites, Task, load_scaffolds, prompt_ids, score, stable_seed,
+from evotaste.tasks import (SYSTEM_PROMPT, Streams, Suites, Task, load_scaffolds, prompt_ids, score_many, stable_seed,
                             system_prompt)
 from evotaste.trainer import MemberWeights, Sequence, group_weights, load_optimizer
 
@@ -93,8 +93,13 @@ def summarize_probe(records: list[dict]) -> dict:
             "completion_tokens": sum(r["completion_tokens"] for r in records) / n}
 
 
-def response_record(task: Task, sample: Sample) -> dict:
-    s = score(task, sample.text, sample.finish_reason)
+def response_records(pairs: list[tuple[Task, Sample]]) -> list[dict]:
+    """One record per (task, sample), all scored in one batch by the scorer processes."""
+    scores = score_many([(task, sample.text, sample.finish_reason) for task, sample in pairs])
+    return [_record(task, sample, s) for (task, sample), s in zip(pairs, scores)]
+
+
+def _record(task: Task, sample: Sample, s) -> dict:
     return {"uid": task.uid, "family": task.family, "question": task.question, "answer": task.answer,
             "text": sample.text, "completion_tokens": len(sample.token_ids), "finish_reason": sample.finish_reason,
             "extracted": s.extracted, "score": s.score, "reward": s.reward, "parsed": s.parsed,
@@ -230,8 +235,9 @@ class Member:
         t0 = time.perf_counter()
         seqs, sampler_lps, records = [], [], []
         groups = 0
+        flat = response_records([(task, s) for task, group in zip(tasks, samples) for s in group])
         for j, (task, group) in enumerate(zip(tasks, samples)):
-            recs = [response_record(task, s) for s in group]
+            recs, flat = flat[:len(group)], flat[len(group):]
             weights = group_weights([r["reward"] for r in recs])
             groups += any(w != 0.0 for w in weights)
             prompt = self.run.prompt(task.question)
@@ -292,8 +298,8 @@ class Member:
     def finish_probe(self, samples: list[list[Sample]]) -> None:
         """Record the probe at the current step, decide culling, write the checkpoint and commit the state."""
         s = self.lin.step
-        records = [{"step": s, "suite": suite, **response_record(t, group[0])}
-                   for (suite, t), group in zip(self.run.probe_tasks, samples)]
+        records = [{"step": s, "suite": suite, **r} for (suite, _), r in
+                   zip(self.run.probe_tasks, response_records([(t, g[0]) for (_, t), g in zip(self.run.probe_tasks, samples)]))]
         write_jsonl_gz(self.dir / "probe_responses" / f"step_{s:06d}.jsonl.gz", records)
         summary = {"step": s, "time": now(), **summarize_probe(records)}
         summary["cull"] = self.cull_reason(summary)

@@ -23,10 +23,10 @@ from pathlib import Path
 import yaml
 
 from evotaste import config
-from evotaste.member import Member, Run, current_lineage, response_record, summarize_probe
+from evotaste.member import Member, Run, current_lineage, response_records, summarize_probe
 from evotaste.records import now, read_json, write_json, write_jsonl_gz
 from evotaste.sampler import Request, Sampler, Server
-from evotaste.tasks import check_gold, score
+from evotaste.tasks import check_gold, score_many
 from evotaste.trainer import Policy
 
 log = logging.getLogger("evotaste.worker")
@@ -97,9 +97,10 @@ def build_pool(run: Run, sampler: Sampler, teacher: str, tasks) -> None:
     samples = sampler.generate([Request(run.cfg.model, run.prompt(t.question, teacher), s.samples, s.max_tokens)
                                 for t in tasks])
     records, families = [], {}
+    rewards = iter(s.reward for s in score_many([(t, x.text, x.finish_reason) for t, g in zip(tasks, samples) for x in g]))
     for task, group in zip(tasks, samples):
         fam = families.setdefault(task.family, {"prompts": 0, "samples": 0, "correct": 0, "prompts_with_correct": 0})
-        correct = [x for x in group if score(task, x.text, x.finish_reason).reward == 1.0]
+        correct = [x for x in group if next(rewards) == 1.0]
         fam["prompts"] += 1
         fam["samples"] += len(group)
         fam["correct"] += len(correct)
@@ -119,8 +120,8 @@ def build_pool(run: Run, sampler: Sampler, teacher: str, tasks) -> None:
 def base_probe(run: Run, sampler: Sampler) -> None:
     samples = sampler.generate([Request(run.cfg.model, run.prompt(t.question), 1, run.cfg.probes.max_tokens)
                                 for _, t in run.probe_tasks])
-    records = [{"step": None, "suite": suite, **response_record(t, g[0])} for (suite, t), g in
-               zip(run.probe_tasks, samples)]
+    records = [{"step": None, "suite": suite, **r} for (suite, _), r in
+               zip(run.probe_tasks, response_records([(t, g[0]) for (_, t), g in zip(run.probe_tasks, samples)]))]
     write_jsonl_gz(run.dir / "base" / "probe_responses.jsonl.gz", records)
     summary = {"time": now(), **summarize_probe(records)}
     write_json(run.dir / "base" / "probe_summary.json", summary)

@@ -20,7 +20,7 @@ import subprocess
 from pathlib import Path
 
 from evotaste import external
-from evotaste.member import Run, load_lineage, response_record
+from evotaste.member import Run, load_lineage, response_records
 from evotaste.records import now, read_json, read_jsonl_gz, write_json, write_jsonl_gz
 from evotaste.sampler import Request, Sampler
 from evotaste.tasks import BlindReceipt, blind_suite, check_gold, fixed_tasks
@@ -159,8 +159,10 @@ def evaluate(run_dir: Path, suite: str, adapter_specs: list[str], per_family: in
             sampler.close()
         if server:
             server.stop()
-    records = [{"adapter": label, "adapter_sha256": hashes[label], "suite": suite, "sample": i,
-                **response_record(t, s)} for (label, t), group in zip(jobs, results) for i, s in enumerate(group)]
+    pairs = [(label, t, i, s) for (label, t), group in zip(jobs, results) for i, s in enumerate(group)]
+    scored = response_records([(t, s) for _, t, _, s in pairs])
+    records = [{"adapter": label, "adapter_sha256": hashes[label], "suite": suite, "sample": i, **r}
+               for (label, _, i, _), r in zip(pairs, scored)]
     key = hashlib.sha256(",".join(adapter_specs).encode()).hexdigest()[:8]
     write_jsonl_gz(out / f"records-{key}-{index}of{count}.jsonl.gz", records)
     every = [r for f in sorted(out.glob("records-*.jsonl.gz")) for r in read_jsonl_gz(f)]

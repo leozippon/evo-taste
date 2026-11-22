@@ -65,9 +65,13 @@ def calibration_stats() -> dict[str, dict]:
 
 def reward_check(check_tasks: list[tasks.Task]) -> dict:
     """Engine reward of the wrapped gold answer (must be 1) and of empty / junk answers (must be 0)."""
-    gold = [tasks.score(t, f"<answer>{t.answer}</answer>", "stop").reward for t in check_tasks]
-    empty = [tasks.score(t, "<answer></answer>", "stop").reward for t in check_tasks if t.answer.strip()]
-    junk = [tasks.score(t, "<answer>zzz</answer>", "stop").reward for t in check_tasks if t.answer.strip() != "zzz"]
+    def rewards(answer_of, keep=lambda t: True):
+        kept = [t for t in check_tasks if keep(t)]
+        return [s.reward for s in tasks.score_many([(t, f"<answer>{answer_of(t)}</answer>", "stop") for t in kept])]
+
+    gold = rewards(lambda t: t.answer)
+    empty = rewards(lambda t: "", lambda t: t.answer.strip())
+    junk = rewards(lambda t: "zzz", lambda t: t.answer.strip() != "zzz")
     return {"instances": len(check_tasks), "gold_reward_min": min(gold), "gold_reward_mean": round(sum(gold) / len(gold), 4),
             "empty_reward_max": max(empty, default=0.0), "junk_reward_max": max(junk, default=0.0)}
 

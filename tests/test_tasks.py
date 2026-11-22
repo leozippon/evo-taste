@@ -31,9 +31,24 @@ def test_format_credit_is_not_reward():
 
 
 def test_scorer_exception_is_caught():
-    t = tasks.Task("x/0/0", "x", "q", "a", lambda a: 1 / 0)
-    s = score(t, "<answer>a</answer>", "stop")
-    assert s.reward == 0.0 and "ZeroDivisionError" in s.error
+    t = tasks.Task("gsm8k_train/x", "gsm8k_train", "q", "not a number")  # float(gold) raises inside the scorer
+    s = score(t, "<answer>5</answer>", "stop")
+    assert s.reward == 0.0 and "ValueError" in s.error
+
+
+def test_scoring_is_bounded_in_wall_time(monkeypatch):
+    """A scorer stuck in C code (sympy on a huge exponent) is killed at the timeout; the pool keeps working."""
+    import time
+
+    monkeypatch.setattr(tasks, "SCORE_TIMEOUT_S", 3)
+    bombs = [instance("eval", f, 0) for f in ("simple_integration", "intermediate_integration",
+                                              "polynomial_multiplication")]
+    t0 = time.monotonic()
+    scores = tasks.score_many([(t, "<answer>1e999999999</answer>", "stop") for t in bombs]
+                              + [(t, f"<answer>{t.answer}</answer>", "stop") for t in bombs])
+    assert time.monotonic() - t0 < 15
+    assert [(s.reward, s.error) for s in scores[:3]] == [(0.0, "timeout")] * 3
+    assert [s.reward for s in scores[3:]] == [1.0] * 3
 
 
 def test_external_scorers():
