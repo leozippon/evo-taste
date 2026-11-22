@@ -271,9 +271,12 @@ def load_optimizer(path: Path) -> dict | None:
 
 
 def adapter_sha256(path: str | Path) -> str:
-    """Content hash of an adapter directory's weights (the identity used by the harvest manifest)."""
+    """Content hash of everything vLLM reads from an adapter directory: adapter_config.json (rank, alpha, target
+    modules) and the weights. The identity used by evaluation records, the harvest manifest and the blind guard."""
     h = hashlib.sha256()
-    with open(Path(path) / "adapter_model.safetensors", "rb") as f:
-        for block in iter(lambda: f.read(1 << 20), b""):
-            h.update(block)
+    for name in ("adapter_config.json", "adapter_model.safetensors"):
+        h.update(f"{name}\0".encode())
+        with open(Path(path) / name, "rb") as f:
+            for block in iter(lambda: f.read(1 << 20), b""):
+                h.update(block)
     return h.hexdigest()

@@ -97,7 +97,7 @@ A *response record* has the fields `uid, family, question, answer` (gold, as tex
 |---|---|---|
 | `rollouts/step_T.jsonl.gz` | rollout | `step` (T), `prompt` (index within the step's batch), `k` (rollout index), `weight` (group weight used in the update) |
 | `probe_responses/step_S.jsonl.gz`, `base/probe_responses.jsonl.gz` | probe answer | `step` (S; null for the base model), `suite` (`train`, `selection` or `foundation`) |
-| `eval/<suite>/<tag>/records-*.jsonl.gz` | sample | `adapter` (label as given), `adapter_sha256` (null for base), `suite`, `sample` (index) |
+| `eval/<suite>/<tag>/records-*.jsonl.gz` | sample | `adapter` (label as given), `adapter_sha256` (SHA-256 over `adapter_config.json` and `adapter_model.safetensors`; null for base), `suite`, `sample` (index) |
 
 `history.jsonl`, one line per update:
 
@@ -114,7 +114,7 @@ Evaluation `summary.json`: `time, suite, per_family, samples` and `adapters` map
 
 ## Blind guard and harvest
 
-Only `evaluate.py` opens a blind vault: the `Suites` class used by workers never reads the blind lists, and `tasks.blind_suite` and `external.items(..., part="blind1"|"blind2")` require the receipt returned by `evaluate.blind_guard`. The guard refuses unless `docs/harvest/<run>.json` is tracked in git, identical to `HEAD`, and lists every requested adapter's `adapter_model.safetensors` SHA-256 in its `ranking`. The base model is allowed without a manifest (calibration). Before returning, the guard appends `| time | vault | revision | manifest sha256 | adapters | per family x samples | run |` to `docs/blind-ledger.md`; commit the ledger with the results.
+Only `evaluate.py` opens a blind vault: the `Suites` class used by workers never reads the blind lists, and `tasks.blind_suite` and `external.items(..., part="blind1"|"blind2")` require the receipt returned by `evaluate.blind_guard`. The guard refuses unless `docs/harvest/<run>.json` is tracked in git, identical to `HEAD`, and lists every requested adapter's content hash (over `adapter_config.json` and `adapter_model.safetensors`, both of which vLLM reads). The base model is allowed without a manifest (calibration). Before returning, the guard appends `| time | vault | revision | manifest sha256 | adapters | per family x samples | run |` to `docs/blind-ledger.md`; commit the ledger with the results.
 
 `harvest` ranks lineages with status `done` by `macro` on the selection evaluation of the given tag (every finished lineage must have been evaluated completely with its final adapter) and writes `{run, time, revision, tag, outlier, top3, ranking: [{lineage, slot, arm, scaffold, selection_macro, adapter, sha256, rank}]}`.
 

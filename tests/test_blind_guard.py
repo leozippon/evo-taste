@@ -7,6 +7,7 @@ import pytest
 
 from evotaste.evaluate import LEDGER, blind_guard, manifest_path
 from evotaste.tasks import BlindReceipt
+from evotaste.trainer import adapter_sha256
 
 
 def git(repo, *args):
@@ -29,6 +30,7 @@ def adapter(tmp_path):
     d = tmp_path / "adapter"
     d.mkdir()
     (d / "adapter_model.safetensors").write_bytes(b"weights")
+    (d / "adapter_config.json").write_text('{"r": 32}')
     return d
 
 
@@ -45,9 +47,7 @@ def ledger_lines(repo):
 
 
 def test_refusals(repo, adapter):
-    import hashlib
-
-    sha = hashlib.sha256(b"weights").hexdigest()
+    sha = adapter_sha256(adapter)
     with pytest.raises(PermissionError, match="not tracked"):  # no manifest
         blind_guard("blind1", "r", {"m0": adapter}, 4, 1, repo)
     path = write_manifest(repo, sha)
@@ -64,6 +64,10 @@ def test_refusals(repo, adapter):
         blind_guard("blind2", "r", {"m0": adapter}, 4, 1, repo)
     assert ledger_lines(repo) == 0  # nothing refused was logged as an opening
     (adapter / "adapter_model.safetensors").write_bytes(b"weights")
+    (adapter / "adapter_config.json").write_text('{"r": 64}')
+    with pytest.raises(PermissionError, match="matching content hash"):  # same weights, different LoRA config
+        blind_guard("blind2", "r", {"m0": adapter}, 4, 1, repo)
+    (adapter / "adapter_config.json").write_text('{"r": 32}')
     receipt = blind_guard("blind2", "r", {"m0": adapter, "base": None}, 4, 1, repo)
     assert isinstance(receipt, BlindReceipt) and receipt.vault == "blind2"
     assert ledger_lines(repo) == 1
