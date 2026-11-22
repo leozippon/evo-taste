@@ -114,6 +114,20 @@ def test_blind_vaults_need_the_guard():
             tasks.blind_suite(SUITES, vault, tasks.BlindReceipt("blind1" if vault == "blind2" else "blind2", ""))
 
 
+def test_identical_external_questions_share_a_part():
+    """Data only: a normalised question text maps to one part across all ids and all external sources."""
+    parts, counts = {}, {}
+    for src in external.PARTS:
+        for _, r in external._rows(src):
+            q = external.question_text(r)
+            part = external.part_of(src, q)
+            parts.setdefault(external.normalized(q), set()).add(part)
+            counts[(src, part)] = counts.get((src, part), 0) + 1
+    assert all(len(p) == 1 for p in parts.values())
+    mmlu = [counts[("mmlu_pro", p)] for p in ("foundation", "blind1", "blind2")]
+    assert min(mmlu) > 0.3 * sum(mmlu)
+
+
 def test_worker_code_never_names_blind_vaults():
     """Only evaluate.py (and the guarded accessors) may refer to blind vaults."""
     import pathlib

@@ -1,6 +1,7 @@
 """External benchmarks behind the task interface: GSM8K, MATH-500 and MMLU-Pro.
 
-Each item belongs to exactly one part (foundation, blind1, blind2), decided by a seeded hash of its stable id; which
+Each item belongs to exactly one part (foundation, blind1, blind2), decided by a seeded hash of its normalised question
+text, so identical questions under different ids (MMLU-Pro has 357 such texts) share a part, in every source. Which
 parts exist per source is fixed here, which suite uses which source is fixed in configs/suites.yaml. Blind parts are
 returned only with a receipt from the blind guard, and only the requested part is ever turned into tasks.
 """
@@ -30,13 +31,29 @@ _HF = {  # source -> (dataset id, config, split)
 LETTERS = "ABCDEFGHIJ"
 
 
-def _hash(source: str, item_id: str) -> int:
-    return int.from_bytes(hashlib.sha256(f"{SPLIT_SEED}/{source}/{item_id}".encode()).digest()[:8], "big")
+# MMLU-Pro questions that repeat a MATH-500 problem (normalised text); they stay in MATH-500 only, because MATH-500
+# has no foundation part to share. GSM8K train, GSM8K test and MATH-500 share no question text with each other.
+MMLU_PRO_DROPPED = {"7744", "8289", "8591", "8823", "8830"}
 
 
-def part_of(source: str, item_id: str) -> str:
-    parts = PARTS[source]
-    return parts[_hash(source, item_id) % len(parts)]
+def _hash(key: str) -> int:
+    return int.from_bytes(hashlib.sha256(f"{SPLIT_SEED}/{key}".encode()).digest()[:8], "big")
+
+
+def normalized(text: str) -> str:
+    return re.sub(r"\s+", " ", text.strip().lower())
+
+
+def part_of(source: str, question: str) -> str:
+    """Part of an item, a function of its question text only: the same text gets the same vault in every source,
+    and in MMLU-Pro a third of the texts go to the foundation part instead."""
+    h = _hash(normalized(question))
+    vault = ("blind1", "blind2")[h % 2]
+    if PARTS[source] == ("foundation",):
+        return "foundation"
+    if "foundation" in PARTS[source] and (h // 2) % 3 == 0:
+        return "foundation"
+    return vault
 
 
 def _rows(source: str):
@@ -50,7 +67,11 @@ def _rows(source: str):
         return [(str(i), r) for i, r in enumerate(ds)]
     if source == "math500":
         return [(r["unique_id"], r) for r in ds]
-    return [(str(r["question_id"]), r) for r in ds]
+    return [(str(r["question_id"]), r) for r in ds if str(r["question_id"]) not in MMLU_PRO_DROPPED]
+
+
+def question_text(r: dict) -> str:
+    return r["problem"] if "problem" in r else r["question"]
 
 
 def _task(source: str, item_id: str, r: dict) -> Task:
@@ -69,8 +90,8 @@ def _task(source: str, item_id: str, r: dict) -> Task:
 
 @functools.lru_cache(maxsize=None)
 def _part_tasks(source: str, part: str) -> tuple[Task, ...]:
-    rows = [(i, r) for i, r in _rows(source) if part_of(source, i) == part]
-    rows.sort(key=lambda x: _hash(source, x[0]))
+    rows = [(i, r) for i, r in _rows(source) if part_of(source, question_text(r)) == part]
+    rows.sort(key=lambda x: _hash(f"{source}/{x[0]}"))
     return tuple(_task(source, i, r) for i, r in rows)
 
 
