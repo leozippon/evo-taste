@@ -106,8 +106,9 @@ def test_suite_disjointness():
             seen[f] = name
     assert not set(seen) & set(data["excluded"])
     for f, info in data["families"].items():
-        assert {seen[g] for g in info["unit"]} == {seen[f]}, f"near-duplicate unit {info['unit']} split"
+        assert {seen[g] for g in info["unit"] if g in seen} == {seen[f]}, f"near-duplicate unit {info['unit']} split"
         assert info["reward_check"]["gold_reward_min"] == 1.0
+        assert info["adversarial_check"]["constant"][0] == 0 and info["adversarial_check"]["prefix"][0] == 0
         assert info["reward_check"]["empty_reward_max"] == 0.0 and info["reward_check"]["junk_reward_max"] == 0.0
     for suite, cat in data["held_out_categories"].items():
         if suite != "pooled":

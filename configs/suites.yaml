@@ -58,9 +58,7 @@ suites:
   selection:
   - advanced_geometry
   - basic_arithmetic
-  - coin_flip
   - color_cube_rotation
-  - complex_arithmetic
   - count_primes
   - decimal_arithmetic
   - futoshiki
@@ -96,7 +94,6 @@ suites:
   - string_insertion
   - sudoku
   - syllogism
-  - time_intervals
   - tower_of_hanoi
   - zebra_puzzles
   blind2:
@@ -139,12 +136,38 @@ external_foundation_reward_check:
     gold_reward_mean: 1.0
     empty_reward_max: 0.0
     junk_reward_max: 0.0
+    adversarial_check:
+      constant:
+      - 0
+      - 500
+      prefix:
+      - 0
+      - 416
+      hedge:
+      - 0
+      - 500
+      trailing_junk:
+      - 500
+      - 500
   mmlu_pro:
-    instances: 3930
+    instances: 4027
     gold_reward_min: 1.0
     gold_reward_mean: 1.0
     empty_reward_max: 0.0
     junk_reward_max: 0.0
+    adversarial_check:
+      constant:
+      - 0
+      - 500
+      prefix:
+      - 0
+      - 0
+      hedge:
+      - 0
+      - 500
+      trailing_junk:
+      - 500
+      - 500
 families:
   ab:
     category: algorithmic
@@ -169,6 +192,19 @@ families:
     - string_synthesis
     suite: train
     tier: floor
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   acre:
     category: induction
     instances: 60
@@ -189,6 +225,19 @@ families:
     - acre
     suite: train
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   advanced_geometry:
     category: geometry
     instances: 60
@@ -210,6 +259,19 @@ families:
     - simple_geometry
     suite: selection
     tier: floor
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   aiw:
     category: logic
     instances: 60
@@ -230,6 +292,19 @@ families:
     - aiw
     suite: blind1
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 0
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   arc_1d:
     category: arc
     instances: 60
@@ -250,6 +325,19 @@ families:
     - arc_1d
     suite: blind1
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   base_conversion:
     category: algorithmic
     instances: 60
@@ -270,6 +358,19 @@ families:
     - base_conversion
     suite: train
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 59
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   basic_arithmetic:
     category: arithmetic
     instances: 60
@@ -291,6 +392,19 @@ families:
     - decimal_arithmetic
     suite: selection
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 59
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   bf:
     category: code
     instances: 60
@@ -311,6 +425,19 @@ families:
     - bf
     suite: train
     tier: floor
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   binary_alternation:
     category: algorithmic
     instances: 60
@@ -331,6 +458,19 @@ families:
     - binary_alternation
     suite: train
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 13
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   binary_matrix:
     category: algorithmic
     instances: 60
@@ -351,6 +491,19 @@ families:
     - binary_matrix
     suite: blind1
     tier: floor
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   bitwise_arithmetic:
     category: arithmetic
     instances: 60
@@ -371,6 +524,19 @@ families:
     - bitwise_arithmetic
     suite: train
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 63
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   caesar_cipher:
     category: algorithmic
     instances: 60
@@ -391,6 +557,19 @@ families:
     - caesar_cipher
     suite: blind1
     tier: floor
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   calendar_arithmetic:
     category: arithmetic
     instances: 60
@@ -411,6 +590,19 @@ families:
     - calendar_arithmetic
     suite: train
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 56
+      hedge:
+      - 0
+      - 53
+      trailing_junk:
+      - 0
+      - 64
   chain_sum:
     category: arithmetic
     instances: 60
@@ -432,6 +624,19 @@ families:
     - decimal_chain_sum
     suite: train
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 60
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   circuit_logic:
     category: logic
     instances: 60
@@ -452,26 +657,19 @@ families:
     - circuit_logic
     suite: blind1
     tier: reachable
-  coin_flip:
-    category: probability
-    instances: 60
-    prompt_tokens_mean: 120.2
-    completion_tokens_mean: 60.5
-    exact_rate: 0.2667
-    score_mean: 0.3439
-    no_answer_rate: 0.0
-    truncated_rate: 0.0
-    reward_check:
-      instances: 64
-      gold_reward_min: 1.0
-      gold_reward_mean: 1.0
-      empty_reward_max: 0.0
-      junk_reward_max: 0.0
-    stratum: pooled/reachable
-    unit:
-    - coin_flip
-    suite: selection
-    tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 0
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   color_cube_rotation:
     category: cognition
     instances: 60
@@ -492,26 +690,19 @@ families:
     - color_cube_rotation
     suite: selection
     tier: reachable
-  complex_arithmetic:
-    category: algebra
-    instances: 60
-    prompt_tokens_mean: 130.0
-    completion_tokens_mean: 54.6
-    exact_rate: 0.65
-    score_mean: 0.6976
-    no_answer_rate: 0.0
-    truncated_rate: 0.0
-    reward_check:
-      instances: 64
-      gold_reward_min: 1.0
-      gold_reward_mean: 1.0
-      empty_reward_max: 0.0
-      junk_reward_max: 0.0
-    stratum: held-out:algebra
-    unit:
-    - complex_arithmetic
-    suite: selection
-    tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   count_bits:
     category: arithmetic
     instances: 60
@@ -532,6 +723,19 @@ families:
     - count_bits
     suite: blind2
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 63
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   count_primes:
     category: algorithmic
     instances: 60
@@ -552,6 +756,19 @@ families:
     - count_primes
     suite: selection
     tier: floor
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 59
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   countdown:
     category: games
     instances: 60
@@ -573,6 +790,19 @@ families:
     - puzzle24
     suite: blind2
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   course_schedule:
     category: graphs
     instances: 60
@@ -593,6 +823,19 @@ families:
     - course_schedule
     suite: blind2
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   cryptarithm:
     category: algorithmic
     instances: 60
@@ -613,6 +856,19 @@ families:
     - cryptarithm
     suite: train
     tier: floor
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   decimal_arithmetic:
     category: arithmetic
     instances: 60
@@ -632,6 +888,19 @@ families:
     unit: *id001
     suite: selection
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 63
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   decimal_chain_sum:
     category: arithmetic
     instances: 60
@@ -651,6 +920,19 @@ families:
     unit: *id002
     suite: train
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   dice:
     category: arithmetic
     instances: 60
@@ -671,6 +953,19 @@ families:
     - dice
     suite: blind2
     tier: floor
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   emoji_mystery:
     category: games
     instances: 60
@@ -691,6 +986,19 @@ families:
     - emoji_mystery
     suite: blind2
     tier: floor
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 59
+      trailing_junk:
+      - 0
+      - 64
   family_relationships:
     category: graphs
     instances: 60
@@ -711,6 +1019,19 @@ families:
     - family_relationships
     suite: blind2
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   figlet_font:
     category: cognition
     instances: 60
@@ -731,6 +1052,19 @@ families:
     - figlet_font
     suite: blind2
     tier: floor
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   fraction_simplification:
     category: arithmetic
     instances: 60
@@ -751,6 +1085,19 @@ families:
     - fraction_simplification
     suite: blind2
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 31
+      - 64
   futoshiki:
     category: games
     instances: 60
@@ -771,6 +1118,19 @@ families:
     - futoshiki
     suite: selection
     tier: floor
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   game_of_life:
     category: algorithmic
     instances: 60
@@ -791,6 +1151,19 @@ families:
     - game_of_life
     suite: train
     tier: floor
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   gcd:
     category: arithmetic
     instances: 60
@@ -812,6 +1185,19 @@ families:
     - lcm
     suite: selection
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 11
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   group_anagrams:
     category: algorithmic
     instances: 60
@@ -832,6 +1218,19 @@ families:
     - group_anagrams
     suite: selection
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   intermediate_integration:
     category: algebra
     instances: 60
@@ -853,6 +1252,19 @@ families:
     - simple_integration
     suite: selection
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 63
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   isomorphic_strings:
     category: algorithmic
     instances: 60
@@ -873,6 +1285,19 @@ families:
     - isomorphic_strings
     suite: blind1
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   jugs:
     category: algorithmic
     instances: 60
@@ -893,6 +1318,19 @@ families:
     - jugs
     suite: selection
     tier: floor
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   kakurasu:
     category: games
     instances: 60
@@ -913,6 +1351,19 @@ families:
     - kakurasu
     suite: train
     tier: floor
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 64
+      - 64
   knight_swap:
     category: games
     instances: 60
@@ -933,6 +1384,19 @@ families:
     - knight_swap
     suite: train
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 62
+      trailing_junk:
+      - 0
+      - 64
   knights_knaves:
     category: logic
     instances: 60
@@ -953,6 +1417,19 @@ families:
     - knights_knaves
     suite: blind1
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 64
+      - 64
   largest_island:
     category: graphs
     instances: 60
@@ -973,6 +1450,19 @@ families:
     - largest_island
     suite: blind2
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 25
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   lcm:
     category: arithmetic
     instances: 60
@@ -992,6 +1482,19 @@ families:
     unit: *id003
     suite: selection
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 63
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   leg_counting:
     category: arithmetic
     instances: 60
@@ -1012,6 +1515,19 @@ families:
     - leg_counting
     suite: train
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   letter_counting:
     category: algorithmic
     instances: 60
@@ -1032,6 +1548,19 @@ families:
     - letter_counting
     suite: blind2
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 0
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   letter_jumble:
     category: algorithmic
     instances: 60
@@ -1052,6 +1581,19 @@ families:
     - letter_jumble
     suite: train
     tier: floor
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 64
+      - 64
   list_functions:
     category: induction
     instances: 60
@@ -1072,6 +1614,19 @@ families:
     - list_functions
     suite: blind2
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   manipulate_matrix:
     category: algorithmic
     instances: 60
@@ -1094,6 +1649,19 @@ families:
     - spiral_matrix
     suite: train
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 53
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   maze:
     category: games
     instances: 60
@@ -1114,6 +1682,19 @@ families:
     - maze
     suite: train
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 2
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   mini_sudoku:
     category: games
     instances: 60
@@ -1135,6 +1716,19 @@ families:
     - sudoku
     suite: blind1
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   modulo_grid:
     category: cognition
     instances: 60
@@ -1155,6 +1749,19 @@ families:
     - modulo_grid
     suite: train
     tier: floor
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 0
+      hedge:
+      - 0
+      - 0
+      trailing_junk:
+      - 0
+      - 64
   n_queens:
     category: games
     instances: 60
@@ -1175,6 +1782,19 @@ families:
     - n_queens
     suite: train
     tier: floor
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 0
+      trailing_junk:
+      - 0
+      - 64
   needle_haystack:
     category: cognition
     instances: 60
@@ -1195,6 +1815,19 @@ families:
     - needle_haystack
     suite: train
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   number_filtering:
     category: algorithmic
     instances: 60
@@ -1215,6 +1848,19 @@ families:
     - number_filtering
     suite: train
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   number_format:
     category: arithmetic
     instances: 60
@@ -1235,6 +1881,19 @@ families:
     - number_format
     suite: train
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   number_sequence:
     category: cognition
     instances: 60
@@ -1255,6 +1914,19 @@ families:
     - number_sequence
     suite: blind1
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 49
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   number_sorting:
     category: algorithmic
     instances: 60
@@ -1276,6 +1948,19 @@ families:
     - word_sorting
     suite: selection
     tier: floor
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   palindrome_generation:
     category: algorithmic
     instances: 60
@@ -1296,6 +1981,19 @@ families:
     - palindrome_generation
     suite: selection
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   palindrome_partitioning:
     category: algorithmic
     instances: 60
@@ -1316,6 +2014,19 @@ families:
     - palindrome_partitioning
     suite: blind2
     tier: floor
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   path_star:
     category: graphs
     instances: 60
@@ -1336,6 +2047,19 @@ families:
     - path_star
     suite: blind2
     tier: floor
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   polynomial_equations:
     category: algebra
     instances: 60
@@ -1357,6 +2081,19 @@ families:
     - simple_equations
     suite: selection
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 53
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   polynomial_multiplication:
     category: algebra
     instances: 60
@@ -1377,6 +2114,19 @@ families:
     - polynomial_multiplication
     suite: selection
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   pool_matrix:
     category: algorithmic
     instances: 60
@@ -1397,6 +2147,19 @@ families:
     - pool_matrix
     suite: train
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 63
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   power_function:
     category: arithmetic
     instances: 60
@@ -1417,6 +2180,19 @@ families:
     - power_function
     suite: train
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 61
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   prime_factorization:
     category: arithmetic
     instances: 60
@@ -1437,6 +2213,19 @@ families:
     - prime_factorization
     suite: selection
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 63
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   products:
     category: arithmetic
     instances: 60
@@ -1457,6 +2246,19 @@ families:
     - products
     suite: blind1
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 53
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   puzzle24:
     category: games
     instances: 60
@@ -1476,6 +2278,19 @@ families:
     unit: *id004
     suite: blind2
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   quantum_lock:
     category: graphs
     instances: 60
@@ -1496,6 +2311,19 @@ families:
     - quantum_lock
     suite: blind2
     tier: floor
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 64
+      - 64
   ransom_note:
     category: algorithmic
     instances: 60
@@ -1516,6 +2344,19 @@ families:
     - ransom_note
     suite: blind1
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   rectangle_count:
     category: cognition
     instances: 60
@@ -1536,6 +2377,19 @@ families:
     - rectangle_count
     suite: blind1
     tier: floor
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 3
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   rotate_matrix:
     category: algorithmic
     instances: 60
@@ -1555,6 +2409,19 @@ families:
     unit: *id005
     suite: train
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   self_reference:
     category: logic
     instances: 60
@@ -1575,6 +2442,19 @@ families:
     - self_reference
     suite: blind1
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 0
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   sentence_reordering:
     category: algorithmic
     instances: 60
@@ -1595,6 +2475,19 @@ families:
     - sentence_reordering
     suite: train
     tier: floor
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 63
+      hedge:
+      - 0
+      - 60
+      trailing_junk:
+      - 0
+      - 64
   shortest_path:
     category: graphs
     instances: 60
@@ -1615,6 +2508,19 @@ families:
     - shortest_path
     suite: blind2
     tier: floor
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   simple_equations:
     category: algebra
     instances: 60
@@ -1634,6 +2540,19 @@ families:
     unit: *id006
     suite: selection
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 59
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   simple_geometry:
     category: geometry
     instances: 60
@@ -1653,6 +2572,19 @@ families:
     unit: *id007
     suite: selection
     tier: floor
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 62
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   simple_integration:
     category: algebra
     instances: 60
@@ -1672,6 +2604,19 @@ families:
     unit: *id008
     suite: selection
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   sokoban:
     category: games
     instances: 60
@@ -1692,6 +2637,19 @@ families:
     - sokoban
     suite: selection
     tier: floor
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 3
+      - 64
+      trailing_junk:
+      - 64
+      - 64
   spell_backward:
     category: algorithmic
     instances: 60
@@ -1713,6 +2671,19 @@ families:
     - word_sequence_reversal
     suite: blind2
     tier: floor
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 46
+      - 64
   spiral_matrix:
     category: algorithmic
     instances: 60
@@ -1732,6 +2703,19 @@ families:
     unit: *id005
     suite: train
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   string_insertion:
     category: algorithmic
     instances: 60
@@ -1752,6 +2736,19 @@ families:
     - string_insertion
     suite: blind1
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   string_manipulation:
     category: algorithmic
     instances: 60
@@ -1771,6 +2768,19 @@ families:
     unit: *id009
     suite: train
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   string_splitting:
     category: algorithmic
     instances: 60
@@ -1790,6 +2800,19 @@ families:
     unit: *id009
     suite: train
     tier: floor
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   string_synthesis:
     category: algorithmic
     instances: 60
@@ -1809,6 +2832,19 @@ families:
     unit: *id009
     suite: train
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   sudoku:
     category: games
     instances: 60
@@ -1828,6 +2864,19 @@ families:
     unit: *id010
     suite: blind1
     tier: floor
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   survo:
     category: games
     instances: 60
@@ -1848,6 +2897,19 @@ families:
     - survo
     suite: train
     tier: floor
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 64
+      - 64
   syllogism:
     category: logic
     instances: 60
@@ -1868,26 +2930,19 @@ families:
     - syllogism
     suite: blind1
     tier: reachable
-  time_intervals:
-    category: arithmetic
-    instances: 60
-    prompt_tokens_mean: 150.5
-    completion_tokens_mean: 60.1
-    exact_rate: 0.2833
-    score_mean: 0.5645
-    no_answer_rate: 0.0
-    truncated_rate: 0.0
-    reward_check:
-      instances: 64
-      gold_reward_min: 1.0
-      gold_reward_mean: 1.0
-      empty_reward_max: 0.0
-      junk_reward_max: 0.0
-    stratum: arithmetic/reachable
-    unit:
-    - time_intervals
-    suite: blind1
-    tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   tower_of_hanoi:
     category: games
     instances: 60
@@ -1908,6 +2963,19 @@ families:
     - tower_of_hanoi
     suite: blind1
     tier: floor
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   tsumego:
     category: games
     instances: 60
@@ -1928,6 +2996,19 @@ families:
     - tsumego
     suite: blind2
     tier: floor
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   word_ladder:
     category: algorithmic
     instances: 60
@@ -1948,6 +3029,19 @@ families:
     - word_ladder
     suite: blind2
     tier: floor
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
   word_sequence_reversal:
     category: algorithmic
     instances: 60
@@ -1967,6 +3061,19 @@ families:
     unit: *id011
     suite: blind2
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 59
+      trailing_junk:
+      - 0
+      - 64
   word_sorting:
     category: algorithmic
     instances: 60
@@ -1986,6 +3093,19 @@ families:
     unit: *id012
     suite: selection
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 63
+      hedge:
+      - 0
+      - 57
+      trailing_junk:
+      - 0
+      - 64
   zebra_puzzles:
     category: logic
     instances: 60
@@ -2006,6 +3126,19 @@ families:
     - zebra_puzzles
     suite: blind1
     tier: reachable
+    adversarial_check:
+      constant:
+      - 0
+      - 64
+      prefix:
+      - 0
+      - 64
+      hedge:
+      - 0
+      - 64
+      trailing_junk:
+      - 0
+      - 64
 excluded:
   arc_agi: mean prompt 2595 tokens > 700
   boxnet: mean prompt 1014 tokens > 700
@@ -2020,3 +3153,6 @@ excluded:
   rotten_oranges: mean prompt 1087 tokens > 700
   rubiks_cube: 'scorer defective: stored gold answer scores 0.01 on average'
   rush_hour: 'scorer defective: stored gold answer scores 0.01 on average'
+  coin_flip: 'scorer defective: rewards wrong answers (constant, prefix); removed after the deal from selection'
+  complex_arithmetic: 'scorer defective: rewards wrong answers (constant); removed after the deal from selection'
+  time_intervals: 'scorer defective: rewards wrong answers (prefix); removed after the deal from blind1'

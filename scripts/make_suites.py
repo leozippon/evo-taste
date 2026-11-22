@@ -4,7 +4,9 @@ Rules (docs/dev/ENGINE_SPEC.md, "Suite assignment"): exclude unusable families; 
 together; hold out one whole category each for selection, blind 1 and blind 2; deal the remaining units, stratified
 by category and tier, to train/selection/blind1/blind2 in the ratio 2:1:1:1. Besides the calibration statistics,
 every candidate family must pass the engine's own reward check on fresh instances: the gold answer wrapped in
-<answer> tags earns reward 1, an empty or junk answer earns 0.
+<answer> tags earns reward 1, an empty or junk answer earns 0. After the deal, an adversarial check removes families
+whose scorer rewards a constant (0, 1, nan, inf), a strict prefix that changes the gold answer, or the gold answer
+hedged between other candidates; the removal leaves every other family in the suite the deal gave it.
 
 Usage (compute host, from the repository root): python scripts/make_suites.py
 """
@@ -12,6 +14,7 @@ Usage (compute host, from the repository root): python scripts/make_suites.py
 import collections
 import json
 import random
+import re
 import sys
 from pathlib import Path
 
@@ -74,6 +77,53 @@ def reward_check(check_tasks: list[tasks.Task]) -> dict:
     junk = rewards(lambda t: "zzz", lambda t: t.answer.strip() != "zzz")
     return {"instances": len(check_tasks), "gold_reward_min": min(gold), "gold_reward_mean": round(sum(gold) / len(gold), 4),
             "empty_reward_max": max(empty, default=0.0), "junk_reward_max": max(junk, default=0.0)}
+
+
+_NUMBER = re.compile(r"-?\d+(?:\.\d+)?(?:e[-+]?\d+)?", re.IGNORECASE)
+
+
+def _equivalent(answer: str, gold: str) -> bool:
+    """Same answer up to formatting: for a gold answer with numbers, the same numbers within 1% (so "55" for
+    "55 days" or "-7.4" for "(0.000, -7.400)" are not wrong answers); otherwise the same letters and digits."""
+    golds = [float(x) for x in _NUMBER.findall(gold)]
+    if golds:
+        values = [float(x) for x in _NUMBER.findall(answer)]
+        return len(values) == len(golds) and all(abs(v - g) <= 0.01 * abs(g) for v, g in zip(values, golds))
+    alnum = lambda s: re.sub(r"[^a-z0-9]", "", s.lower())
+    return alnum(answer) == alnum(gold)
+
+
+def adversarial_check(check_tasks: list[tasks.Task]) -> dict:
+    """Rewards (number of instances) for answers that must not be accepted: a constant (0, 1, nan, inf), a strict
+    prefix of the gold answer that changes it, or the gold answer between two other instances' gold answers.
+    Gold followed by junk is recorded only: some scorers accept trailing words, which is no cheaper route."""
+    golds = [t.answer.strip() for t in check_tasks]
+    jobs, keys = [], []
+    for k, t in enumerate(check_tasks):
+        g = golds[k]
+        others = [o for o in golds[k + 1:] + golds[:k] if not _equivalent(o, g)][:2]
+        candidates = [("constant", c) for c in ("0", "1", "nan", "inf")]
+        candidates += [("prefix", g[:n]) for n in sorted({1, 2, 3, len(g) // 2, len(g) - 1}) if 0 < n < len(g)]
+        if len(others) == 2:
+            candidates.append(("hedge", f"{others[0]}, {g}, {others[1]}"))
+        candidates.append(("trailing_junk", f"{g} zzz"))
+        for kind, answer in candidates:
+            if answer.strip() and (kind == "trailing_junk" or not _equivalent(answer, g)):
+                jobs.append((t, f"<answer>{answer}</answer>", "stop"))
+                keys.append((kind, k))
+    rewarded = {key for key, s in zip(keys, tasks.score_many(jobs)) if s.reward == 1.0}
+    tested = {key for key in keys}
+    return {kind: [len({k for kk, k in rewarded if kk == kind}), len({k for kk, k in tested if kk == kind})]
+            for kind in ("constant", "prefix", "hedge", "trailing_junk")}
+
+
+def adversarial_failure(check: dict) -> str | None:
+    """Any accepted constant or changed prefix fails; a hedge fails when accepted on at least half the instances
+    (move-sequence scorers such as sokoban accept the concatenation when the extra moves happen not to matter)."""
+    accepted = [kind for kind in ("constant", "prefix") if check[kind][0]]
+    if check["hedge"][1] and check["hedge"][0] >= check["hedge"][1] / 2:
+        accepted.append("hedge")
+    return f"scorer defective: rewards wrong answers ({', '.join(accepted)})" if accepted else None
 
 
 def check_failure(check: dict) -> str | None:
@@ -155,11 +205,23 @@ def main():
         families[f]["suite"] = assignment[f]
         families[f]["tier"] = "reachable" if families[f]["exact_rate"] > 0 else "floor"
 
+    # Adversarial check after the deal: a failing family leaves its suite, nothing is re-dealt.
+    for f in sorted(families):
+        check = adversarial_check([tasks.instance("suitecheck", f, n) for n in range(CHECK_INSTANCES)])
+        families[f]["adversarial_check"] = check
+        reason = adversarial_failure(check)
+        print(f"{f}: adversarial {check}{' -> removed' if reason else ''}", flush=True)
+        if reason:
+            excluded[f] = f"{reason}; removed after the deal from {families[f]['suite']}"
+            del families[f]
     suites = {s: sorted(f for f in families if assignment[f] == s) for s in ("train", "selection", "blind1", "blind2")}
-    foundation_checks = {src: reward_check(external.items(src, "foundation")) for src in EXTERNAL["foundation"]}
-    for src, check in foundation_checks.items():
-        if check_failure(check):
-            sys.exit(f"external foundation source {src}: {check_failure(check)}")
+    foundation_checks = {}
+    for src in EXTERNAL["foundation"]:
+        items = external.items(src, "foundation")
+        foundation_checks[src] = {**reward_check(items), "adversarial_check": adversarial_check(items[:500])}
+        failure = check_failure(foundation_checks[src]) or adversarial_failure(foundation_checks[src]["adversarial_check"])
+        if failure:
+            sys.exit(f"external foundation source {src}: {failure}")
 
     header = (
         "# Generated by scripts/make_suites.py from the Qwen3-1.7B calibration; do not edit by hand.\n"
