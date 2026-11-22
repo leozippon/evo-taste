@@ -1,0 +1,28 @@
+[project]
+name = "evotaste"
+version = "0.1.0"
+description = "Population of LoRA adapters trained with on-policy RL from verifiable rewards on reasoning-gym"
+requires-python = "==3.12.*"
+# vLLM pins torch and bounds transformers; the other packages follow those constraints.
+dependencies = [
+    "vllm==0.34.0",
+    "torch",
+    "transformers",
+    "peft",
+    "accelerate",
+    "datasets",
+    "reasoning-gym",
+    "numpy",
+    "scipy",
+    "pandas",
+    "scikit-learn",
+    "httpx",
+    "openai",
+]
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.uv]
+# The PyPI torch wheel pinned by vLLM targets CUDA 13, which the installed driver (CUDA 13.2) supports.
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]

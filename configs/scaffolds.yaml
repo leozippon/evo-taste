@@ -1,0 +1,64 @@
+# Strategy scaffolds used only during seeding (see docs/design/protocol.md, "Life of a member").
+# Each scaffold describes one domain-general reasoning habit. It is appended to the system prompt of the
+# base model that produces a member's warm-up solutions; the member itself is never shown it.
+# Scaffolds deliberately contain no task-specific knowledge and are of similar length.
+
+preamble: "Reasoning habit you must follow on every problem:"
+
+# Control: a generic instruction to reason, with no particular habit. Members seeded with it differ only by seed,
+# which makes them the null for the style-specific scaffolds below.
+control:
+  cot:
+    text: >-
+      Reason step by step. Write out your reasoning in full before you give the answer, and do not give the answer
+      until the reasoning that supports it is on the page.
+
+scaffolds:
+  verify:
+    text: >-
+      After you reach a candidate answer, check it against every condition stated in the problem by plugging it back in,
+      one condition at a time. If any check fails, repair the answer and check again. Only answer once every check passes.
+  backward:
+    text: >-
+      Start from the goal. First state exactly what form the final answer must have, then work backwards from the goal
+      toward the given information, asking at each stage what would have to be true one step earlier.
+  enumerate:
+    text: >-
+      Be exhaustive. List the candidate cases or options in a fixed explicit order, test them one by one, and cross out
+      each one that fails with a short reason. Never skip a case and never jump to a conclusion before the list is finished.
+  formalize:
+    text: >-
+      Before any calculation, translate the problem into a formal representation: name the unknowns with symbols and write
+      the conditions as equations or constraints. Then obtain the answer only by manipulating that representation, never by guessing.
+  state_table:
+    text: >-
+      Track state explicitly. Write down the complete current state, apply exactly one operation, and write down the complete
+      new state. Repeat. Never perform two operations at once and never keep an intermediate result only in your head.
+  terse:
+    text: >-
+      Be economical. Use the fewest steps and the fewest words that still get the answer exactly right. Do not restate the
+      problem, do not comment on what you are doing, and do not write any step that the next step does not need.
+  plan:
+    text: >-
+      Plan first. Write a short numbered plan of the sub-goals needed to reach the answer before doing any of them. Then
+      carry out the sub-goals strictly in order, labelling each with its number and stating its result before moving on.
+  structure:
+    text: >-
+      Look for structure before computing. Search for a symmetry, an invariant, a repeating pattern or a shortcut that makes
+      brute force unnecessary. State the structure you found in one sentence, then use it to reach the answer directly.
+  small_case:
+    text: >-
+      Make it concrete first. Solve a smaller or simpler version of the problem to see how it behaves, note what you learned
+      from it, and then solve the real problem by applying the same procedure at full size.
+  two_ways:
+    text: >-
+      Solve the problem twice, by two genuinely different methods, and write both results side by side. If they agree, give
+      that answer. If they disagree, find the mistake in one of them before answering.
+  procedure:
+    text: >-
+      Think like a programmer. First write a short, precise step-by-step procedure that would solve any instance of this kind
+      of problem. Then execute that procedure by hand on this instance, tracing the value of every variable line by line.
+  skeptic:
+    text: >-
+      Distrust your first idea. State your first approach, then list the specific ways it could be wrong for this problem.
+      Resolve each doubt explicitly, changing the approach if a doubt holds, and only then give the answer.
