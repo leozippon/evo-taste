@@ -4,7 +4,7 @@ Internal operating notes for the first EvoTaste engine (`evotaste/`). The build 
 
 ## Commands
 
-All commands run from the repository root after `source scripts/env.sh`, with exactly one GPU visible. Pick a GPU whose `memory.used` is below 500 MiB immediately before launching and pin it with `CUDA_VISIBLE_DEVICES`. Each command that needs generation starts its own vLLM server (1–4 minutes with warm compile caches) and stops it on exit, including on SIGTERM; the server also receives SIGTERM if its parent is killed with SIGKILL. `--attach http://127.0.0.1:<port>` makes a command use an already running server of the same model instead (development only; the server must have been started with runtime LoRA updating, see `scripts/dev/serve_vllm.sh`).
+All commands run from the repository root after `source scripts/env.sh`, with exactly one GPU visible. The script also sets `PYTHONHASHSEED=0`, which child processes inherit: some reasoning-gym generators iterate sets of strings, so an instance would otherwise differ between processes, and `evotaste.tasks` refuses to import under any other value. Pick a GPU whose `memory.used` is below 500 MiB immediately before launching and pin it with `CUDA_VISIBLE_DEVICES`. Each command that needs generation starts its own vLLM server (1–4 minutes with warm compile caches) and stops it on exit, including on SIGTERM; the server also receives SIGTERM if its parent is killed with SIGKILL. `--attach http://127.0.0.1:<port>` makes a command use an already running server of the same model instead (development only; the server must have been started with runtime LoRA updating, see `scripts/dev/serve_vllm.sh`).
 
 | Step | Command |
 |---|---|
@@ -89,7 +89,7 @@ Every checkpoint keeps its adapter, a PEFT directory vLLM can load (139 MB for 1
 
 ## Record schemas
 
-Task uids are `<family>/<dataset seed>/<index>` for reasoning-gym instances (regenerate with `reasoning_gym.create_dataset(family, size=8192, seed=seed)[index]`) and `<source>/<item id>` for external items (GSM8K: row index in the split; MATH-500: `unique_id`; MMLU-Pro: `question_id`). All times are UTC ISO strings.
+Task uids are `<family>/<dataset seed>/<index>` for reasoning-gym instances (regenerate with `evotaste.tasks.procedural_task(family, seed, index)`, which also seeds the module-level `random` that `list_functions` draws from) and `<source>/<item id>` for external items (GSM8K: row index in the split; MATH-500: `unique_id`; MMLU-Pro: `question_id`). All times are UTC ISO strings.
 
 A *response record* has the fields `uid, family, question, answer` (gold, as text), `text` (completion text without special tokens), `completion_tokens` (sampled ids including the end-of-turn token), `finish_reason` (`stop` or `length`), `extracted` (content of the last answer span or null), `score` (raw scorer output; 0 when not scored), `reward` (0 or 1), `parsed`, `truncated`, `score_error` (null or message) and `logprob` (vLLM's summed log-probability of the sampled ids). Files built from it:
 

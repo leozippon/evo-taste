@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import os
 import random
 import signal
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -18,6 +20,12 @@ from typing import Callable
 import reasoning_gym
 import yaml
 from reasoning_gym.utils import SYSTEM_PROMPTS, extract_answer
+
+# Some generators (polynomial_multiplication, isomorphic_strings, ransom_note, knight_swap's gold) iterate sets of
+# strings, so an instance is a function of the interpreter's hash seed. Fixed at 0 by scripts/env.sh; the environment
+# variable is checked so that child processes inherit it, the flag so that this process really runs with it.
+if os.environ.get("PYTHONHASHSEED") != "0" or sys.flags.hash_randomization:
+    raise RuntimeError("evotaste.tasks needs PYTHONHASHSEED=0 set before Python starts (source scripts/env.sh)")
 
 SYSTEM_PROMPT = SYSTEM_PROMPTS["default"]
 REWARD_THRESHOLD = 0.999  # a scorer output at or above this counts as solved
@@ -64,6 +72,7 @@ def _dataset(family: str, seed: int):
 
 def procedural_task(family: str, seed: int, index: int) -> Task:
     ds = _dataset(family, seed)
+    random.seed(stable_seed("global-random", family, seed, index))  # list_functions also draws from module `random`
     entry = ds[index]
     return Task(f"{family}/{seed}/{index}", family, entry["question"], str(entry["answer"]),
                 lambda answer: ds.score_answer(answer, entry))
