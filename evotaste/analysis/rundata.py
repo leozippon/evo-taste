@@ -4,22 +4,49 @@ Everything here tolerates a run in progress: slots whose lineage has no state ye
 probes and seeding pools not yet written. Records after a lineage's last checkpoint are uncommitted (a resume
 deletes and redoes them): amplification history after it is kept only while the lineage is active and its worker
 runs, probe files after it are never used. Whether a worker runs is read from /proc/locks (the worker holds an
-flock on runs/<name>/locks/<slot>.lock); no lock is ever taken. Nothing under runs/<name>/eval is read (blind
-evaluations live there). Commands run from the repository root, like the engine's: the frozen config refers to its
-files by relative path.
+flock on runs/<name>/locks/<slot>.lock); no lock is ever taken. Final evaluations are read by `load_evaluation`,
+the only reader of runs/<name>/eval: it opens a blind vault only when the caller passes blind=True (the tools' explicit
+--blind flag) and the run's harvest manifest exists. Commands run from the repository root, like the engine's: the
+frozen config and the harvest manifest are found by relative path.
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
+
+import numpy as np
+import yaml
 
 from evotaste import config
 from evotaste.records import read_json, read_jsonl, read_jsonl_gz
 
 # The probe suites, in display order: evotaste.member.PROBE_SUITES (not imported because member pulls in torch).
 SUITES = ("train", "selection", "foundation")
+VAULTS = ("blind1", "blind2")  # evotaste.evaluate.VAULTS
+PROCEDURAL_UID = re.compile(r"^[^/]+/\d+/\d+$")  # <family>/<dataset seed>/<index>; external uids are <source>/<id>
+
+
+def manifest_path(run_name: str) -> Path:
+    """The harvest manifest, as evotaste.evaluate.manifest_path (not imported: evaluate pulls in torch)."""
+    return Path("docs") / "harvest" / f"{run_name}.json"
+
+
+def member_specs(run_dir: str | Path) -> tuple[str, dict[str, dict]]:
+    """Run name and the configured slots of the frozen config: id -> {arm, scaffold, role}. Read without the
+    engine's schema so that the optional member field `role` works for configs with and without it; `role: baseline`
+    marks a single-model baseline (a comparator), a missing role a population member."""
+    data = yaml.safe_load((Path(run_dir) / "config.yaml").read_text())
+    specs = {}
+    for m in data["members"]:
+        role = m.get("role", "member")
+        if role not in ("member", "baseline"):
+            raise ValueError(f"member {m['id']}: unknown role {role!r}")
+        specs[m["id"]] = {"arm": m["arm"], "scaffold": m.get("scaffold"), "role": role}
+    return data["name"], specs
 
 
 def held_locks() -> set[tuple[int, int, int]]:
@@ -122,3 +149,70 @@ class RunData:
 
     def pool_records(self, teacher: str) -> list[dict]:
         return read_jsonl_gz(self.dir / "seeding" / f"{teacher}.jsonl.gz")
+
+
+@dataclass(frozen=True)
+class Evaluation:
+    """One final evaluation (runs/<name>/eval/<suite>/<tag>/) as arrays over adapters, instances and samples."""
+    suite: str
+    tag: str
+    per_family: int
+    samples: int
+    adapters: tuple[str, ...]
+    uids: tuple[str, ...]  # instances, ordered by family, then uid
+    families: np.ndarray  # family or external source of each instance
+    procedural: np.ndarray  # per instance: a procedural family (True) or an external source (False)
+    reward: np.ndarray  # adapter x instance x sample, 0 or 1
+    tokens: np.ndarray  # completion tokens, same shape
+    dropped: tuple[str, ...]  # uids whose question text differs between adapters, left out
+
+
+def load_evaluation(run_dir: str | Path, suite: str, tag: str, blind: bool = False) -> Evaluation:
+    """Every record file of the evaluation. A blind vault is read only with blind=True and an existing harvest
+    manifest. Instances whose question text differs between adapters are dropped; an adapter missing any record of
+    the remaining instances and samples, or a duplicate record, is an error."""
+    run_dir = Path(run_dir)
+    if suite in VAULTS:
+        name, _ = member_specs(run_dir)
+        if not blind:
+            raise PermissionError(f"{suite} is a blind vault: it is read only when --blind {suite} is given")
+        if not manifest_path(name).exists():
+            raise PermissionError(f"refusing to read {suite}: no harvest manifest {manifest_path(name)}")
+    out = run_dir / "eval" / suite / tag
+    params = read_json(out / "params.json")
+    records = [r for path in sorted(out.glob("records-*.jsonl.gz")) for r in read_jsonl_gz(path)]
+    if not records:
+        raise FileNotFoundError(f"{out}: no record files")
+    keys = [(r["adapter"], r["uid"], r["sample"]) for r in records]
+    if len(set(keys)) != len(keys):
+        raise ValueError(f"{out}: duplicate (adapter, uid, sample) records")
+    questions: dict[str, set[str]] = {}
+    for r in records:
+        questions.setdefault(r["uid"], set()).add(hashlib.sha1(r["question"].encode()).hexdigest())
+    dropped = sorted(u for u, q in questions.items() if len(q) > 1)
+    family = {r["uid"]: r["family"] for r in records}
+    uids = sorted((u for u in questions if u not in set(dropped)), key=lambda u: (family[u], u))
+    adapters = sorted({r["adapter"] for r in records})
+    a_index, u_index = {a: i for i, a in enumerate(adapters)}, {u: i for i, u in enumerate(uids)}
+    s = params["samples"]
+    reward = np.full((len(adapters), len(uids), s), np.nan)
+    tokens = np.full_like(reward, np.nan)
+    for r in records:
+        if r["uid"] in u_index:
+            reward[a_index[r["adapter"]], u_index[r["uid"]], r["sample"]] = r["reward"]
+            tokens[a_index[r["adapter"]], u_index[r["uid"]], r["sample"]] = r["completion_tokens"]
+    missing = np.isnan(reward).any(axis=(1, 2))
+    if missing.any():
+        raise ValueError(f"{out}: incomplete evaluation; adapters without every instance x {s} samples: "
+                         f"{[a for a, m in zip(adapters, missing) if m]}")
+    ev = Evaluation(suite, tag, params["per_family"], s, tuple(adapters), tuple(uids),
+                    np.array([family[u] for u in uids]), np.array([bool(PROCEDURAL_UID.match(u)) for u in uids]),
+                    reward, tokens, tuple(dropped))
+    if not dropped:  # the procedural/external split must reproduce the engine's macro accuracy
+        engine = read_json(out / "summary.json")["adapters"]
+        fams = sorted(set(ev.families[ev.procedural]))
+        for i, a in enumerate(adapters):
+            macro = np.mean([reward[i, ev.families == f].mean() for f in fams])
+            if abs(macro - engine[a]["macro"]) > 1e-9:
+                raise ValueError(f"{out}: macro of {a} is {macro}, the engine's summary says {engine[a]['macro']}")
+    return ev
