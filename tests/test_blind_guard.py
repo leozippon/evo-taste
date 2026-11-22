@@ -34,10 +34,12 @@ def adapter(tmp_path):
     return d
 
 
-def write_manifest(repo, sha):
+def write_manifest(repo, sha, section="ranking"):
     path = manifest_path("r", repo)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"run": "r", "ranking": [{"lineage": "m0", "sha256": sha}]}))
+    manifest = {"run": "r", "ranking": [{"lineage": "m1", "sha256": "0" * 64}], "baselines": []}
+    manifest[section].append({"lineage": "m0", "sha256": sha})
+    path.write_text(json.dumps(manifest))
     return path
 
 
@@ -79,3 +81,21 @@ def test_base_model_is_exempt_but_logged(repo):
     assert ledger_lines(repo) == 1
     with pytest.raises(ValueError):
         blind_guard("selection", "r", {"base": None}, 8, 2, repo)
+
+
+def test_baselines_listed_in_the_manifest_are_accepted(repo, adapter):
+    path = write_manifest(repo, adapter_sha256(adapter), section="baselines")
+    git(repo, "add", str(path.relative_to(repo)))
+    git(repo, "commit", "-qm", "manifest")
+    assert blind_guard("blind1", "r", {"long": adapter}, 4, 1, repo).vault == "blind1"
+
+
+def test_member_roles():
+    from evotaste import config
+
+    base = {"name": "t", "model": "m", "seed": 0}
+    cfg = config.parse({**base, "members": [{"id": "a", "arm": "plain", "seed": 1},
+                                            {"id": "long", "arm": "plain", "seed": 2, "role": "baseline"}]}, set())
+    assert [m.role for m in cfg.members] == ["member", "baseline"]
+    with pytest.raises(ValueError, match="role"):
+        config.parse({**base, "members": [{"id": "a", "arm": "plain", "seed": 1, "role": "judge"}]}, set())

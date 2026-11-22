@@ -15,6 +15,7 @@ from pathlib import Path
 import yaml
 
 ARMS = ("plain", "scaffold", "perturb")
+ROLES = ("member", "baseline")
 _ID = re.compile(r"^[A-Za-z0-9_-]+$")  # '~' and '@' are reserved for lineage and adapter-version names
 
 
@@ -95,6 +96,7 @@ class MemberSpec:
     seed: int
     scaffold: str | None = None  # a name in configs/scaffolds.yaml (control or scaffolds); scaffold arm only
     overrides: Overrides = field(default_factory=Overrides)
+    role: str = "member"  # member: population, ranked by the harvest; baseline: single-model RL, listed but never ranked
 
 
 @dataclass(frozen=True)
@@ -169,6 +171,8 @@ def parse(data: dict, scaffold_names) -> RunConfig:
             raise ValueError(f"member id {m.id!r}: use letters, digits, '_' and '-' only")
         if m.arm not in ARMS:
             raise ValueError(f"member {m.id}: arm must be one of {ARMS}")
+        if m.role not in ROLES:
+            raise ValueError(f"member {m.id}: role must be one of {ROLES}")
         if (m.arm == "scaffold") != (m.scaffold is not None):
             raise ValueError(f"member {m.id}: a scaffold is required for, and only for, the scaffold arm")
         if m.scaffold is not None and m.scaffold not in scaffold_names:

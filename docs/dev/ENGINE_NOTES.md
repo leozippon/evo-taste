@@ -50,9 +50,9 @@ A run config is YAML; unknown keys and wrongly typed values are errors. Defaults
 | `probes.max_tokens` | 640 | also used by `evaluate` |
 | `culling.grace` | 40 | no culling at probes before this step |
 | `culling.max_replacements` | 2 | new lineages per slot before the slot is given up |
-| `members` | required | list of `{id, arm, seed, scaffold?, overrides?}` |
+| `members` | required | list of `{id, arm, seed, scaffold?, overrides?, role?}`; `role` is `member` (default) or `baseline` |
 
-`arm` is `plain`, `scaffold` (requires `scaffold`, a name from `control` or `scaffolds` in the scaffolds file, e.g. `cot` or `verify`) or `perturb`. Member ids use letters, digits, `_` and `-`. `overrides` may replace keys of `seeding` (except the pool keys), `amplification` and `culling` for one member; the long baseline is `overrides: {amplification: {steps: <N × steps>}}` and the wide one `overrides: {amplification: {prompts: <N × 64>}}`. Batch b of a member with `prompts: P` is items `[bP, (b+1)P)` of the run's training stream. `configs/run/toy.yaml` is the example.
+`arm` is `plain`, `scaffold` (requires `scaffold`, a name from `control` or `scaffolds` in the scaffolds file, e.g. `cot` or `verify`) or `perturb`. Member ids use letters, digits, `_` and `-`. `overrides` may replace keys of `seeding` (except the pool keys), `amplification` and `culling` for one member; the long baseline is `{role: baseline, overrides: {amplification: {steps: <N × steps>}}}` and the wide one `{role: baseline, overrides: {amplification: {prompts: <N × 64>}}}`. A `baseline` member trains, probes and evaluates like any other but is never ranked by the harvest. Batch b of a member with `prompts: P` is items `[bP, (b+1)P)` of the run's training stream. `configs/run/toy.yaml` is the example.
 
 ## Mechanisms worth knowing
 
@@ -116,7 +116,7 @@ Evaluation `summary.json`: `time, suite, per_family, samples` and `adapters` map
 
 Only `evaluate.py` opens a blind vault: the `Suites` class used by workers never reads the blind lists, and `tasks.blind_suite` and `external.items(..., part="blind1"|"blind2")` require the receipt returned by `evaluate.blind_guard`. The guard refuses unless `docs/harvest/<run>.json` is tracked in git, identical to `HEAD`, and lists every requested adapter's content hash (over `adapter_config.json` and `adapter_model.safetensors`, both of which vLLM reads). The base model is allowed without a manifest (calibration). Before returning, the guard appends `| time | vault | revision | manifest sha256 | adapters | per family x samples | run |` to `docs/blind-ledger.md`; commit the ledger with the results.
 
-`harvest` recomputes the selection summary of the given tag from its records with the same checks, then ranks lineages with status `done` by `macro` (every finished lineage must have been evaluated with its final adapter) and writes `{run, time, revision, tag, outlier, top3, ranking: [{lineage, slot, arm, scaffold, selection_macro, adapter, sha256, rank}]}`.
+`harvest` recomputes the selection summary of the given tag from its records with the same checks, then ranks population lineages (role `member`) with status `done` by `macro` (every finished lineage must have been evaluated with its final adapter) and writes `{run, time, revision, tag, outlier, top3, ranking: [{lineage, slot, arm, scaffold, selection_macro, adapter, sha256, rank}], baselines: [{lineage, slot, arm, scaffold, selection_macro, adapter, sha256}]}`. Baselines are never ranked or named outlier; the blind guard accepts hashes from `ranking` and `baselines`.
 
 ## Measured costs
 

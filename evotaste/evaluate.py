@@ -62,7 +62,7 @@ def blind_guard(vault: str, run_name: str, adapters: dict[str, Path | None], per
         if _git(repo, "diff", "--quiet", "HEAD", "--", rel).returncode != 0:
             raise PermissionError(f"blind evaluation refused: {rel} differs from the committed version")
         manifest = read_json(path)
-        listed = {e["sha256"] for e in manifest["ranking"]}
+        listed = {e["sha256"] for e in manifest["ranking"] + manifest.get("baselines", [])}
         for label, adapter in trained.items():
             if adapter_sha256(adapter) not in listed:
                 raise PermissionError(f"blind evaluation refused: adapter {label} ({adapter}) is not in {rel} "
@@ -200,13 +200,14 @@ def evaluate(run_dir: Path, suite: str, adapter_specs: list[str], per_family: in
 
 
 def harvest(run_dir: Path, tag: str) -> None:
-    """Rank finished lineages by selection macro accuracy of their final adapters; write the harvest manifest."""
+    """Rank finished population lineages by selection macro accuracy of their final adapters and write the harvest
+    manifest; finished baselines (role: baseline) are listed with their hashes but never ranked."""
     run = Run(run_dir)
     out = run.dir / "eval" / "selection" / tag
     params = read_json(out / "params.json")
     # Recomputed from the records with the same checks as the summary: one adapter per label, complete grid.
     summary = summarize(read_records(out), suite_tasks(run, "selection", params["per_family"], None), params["samples"])
-    ranking = []
+    ranking, baselines = [], []
     for path in sorted((run.dir / "members").glob("*/state.json")):
         lin = load_lineage(run, path.parent.name)
         if lin.status != "done":
@@ -215,15 +216,16 @@ def harvest(run_dir: Path, tag: str) -> None:
         adapter = resolve_adapter(run, lin.id)
         if s is None or s["adapter_sha256"] != adapter_sha256(adapter):
             raise SystemExit(f"{lin.id}: final adapter not evaluated on selection under tag {tag}")
-        ranking.append({"lineage": lin.id, "slot": lin.slot, "arm": lin.arm, "scaffold": lin.scaffold,
-                        "selection_macro": s["macro"], "adapter": str(adapter), "sha256": s["adapter_sha256"]})
+        entry = {"lineage": lin.id, "slot": lin.slot, "arm": lin.arm, "scaffold": lin.scaffold,
+                 "selection_macro": s["macro"], "adapter": str(adapter), "sha256": s["adapter_sha256"]}
+        (baselines if run.cfg.member(lin.slot).role == "baseline" else ranking).append(entry)
     if not ranking:
         raise SystemExit("no finished lineage to rank")
     ranking.sort(key=lambda e: -e["selection_macro"])
     for i, e in enumerate(ranking):
         e["rank"] = i + 1
     manifest = {"run": run.cfg.name, "time": now(), "revision": revision(), "tag": tag, "outlier": ranking[0]["lineage"],
-                "top3": [e["lineage"] for e in ranking[:3]], "ranking": ranking}
+                "top3": [e["lineage"] for e in ranking[:3]], "ranking": ranking, "baselines": baselines}
     write_json(manifest_path(run.cfg.name), manifest)
     print(f"wrote {manifest_path(run.cfg.name)}; commit it before any blind evaluation")
 
