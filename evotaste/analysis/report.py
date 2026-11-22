@@ -47,18 +47,25 @@ def ols_slope(x, y) -> tuple[float, float]:
 def paired_probe(records: list[dict], base_by_uid: dict[str, dict], suite: str) -> dict:
     """Macro accuracy (mean over families) of a member and of the base model on the same instances of one suite,
     their difference and its standard error: (1/F) sqrt(sum_f s_f^2 / n_f) with s_f^2 the sample variance of the
-    paired differences member - base over the n_f instances of family f (NaN if some family has one instance)."""
+    paired differences member - base over the n_f instances of family f (NaN if some family has one instance).
+    An instance is paired when the base model answered the same uid with the identical question; others are dropped."""
     by_family: dict[str, list[tuple[float, float]]] = {}
+    unpaired = []
     for r in records:
         if r["suite"] == suite:
-            by_family.setdefault(r["family"], []).append((r["reward"], base_by_uid[r["uid"]]["reward"]))
+            b = base_by_uid.get(r["uid"])
+            if b is None or b["question"] != r["question"]:
+                unpaired.append(r["family"])
+            else:
+                by_family.setdefault(r["family"], []).append((r["reward"], b["reward"]))
     pairs = [np.array(v) for v in by_family.values()]
     acc = mean([p[:, 0].mean() for p in pairs])
     base = mean([p[:, 1].mean() for p in pairs])
     var = [np.var(p[:, 0] - p[:, 1], ddof=1) / len(p) if len(p) > 1 else NAN for p in pairs]
     return {"accuracy": acc, "base_accuracy": base, "diff": acc - base,
             "se": math.sqrt(sum(var)) / len(pairs) if pairs else NAN,
-            "instances": sum(len(p) for p in pairs), "families": len(pairs)}
+            "instances": sum(len(p) for p in pairs), "families": len(pairs), "unpaired": len(unpaired),
+            "unpaired_families": " ".join(sorted(set(unpaired)))}
 
 
 def lineage_row(lin: Lineage, hist: list[dict]) -> dict:
@@ -68,7 +75,8 @@ def lineage_row(lin: Lineage, hist: list[dict]) -> dict:
     times = [datetime.fromisoformat(h["time"]).timestamp() for h in hist]
     return {"lineage": lin.id, "slot": lin.slot, "generation": lin.generation, "arm": lin.arm,
             "scaffold": lin.scaffold, "bias": lin.bias, "seeding_lr": lin.seeding_lr, "amp_lr": lin.amp_lr,
-            "status": lin.status, "checkpoint": lin.checkpoint, "steps_done": len(hist), "steps_target": lin.amp_steps,
+            "status": lin.status, "worker": lin.running, "checkpoint": lin.checkpoint, "steps_done": len(hist),
+            "steps_uncommitted": sum(h["step"] >= lin.checkpoint for h in hist), "steps_target": lin.amp_steps,
             "reward_first": mean([h["reward"] for h in first]), "reward_last": mean([h["reward"] for h in last]),
             "slope_per100": 100 * b, "slope_se_per100": 100 * se,
             "groups_mean": mean([h["groups"] for h in hist]), "prompts": hist[0]["prompts"] if hist else NAN,
@@ -122,8 +130,9 @@ def build(run: RunData) -> tuple[dict[str, pd.DataFrame], list[str], list[str]]:
     lines.append(f"run {cfg.name} | {cfg.model} | seed {cfg.seed} | revision {rev} | rates and accuracies in %")
     lines.append(f"seeding {s.pool_prompts} prompts x {s.samples} samples, {s.steps} updates x {s.batch}, lr "
                  f"{lr(s.lr)} | amplification {a.steps} steps x {a.prompts} prompts x {a.rollouts}, lr {lr(a.lr)}, "
-                 f"max {a.max_tokens} tokens | probes every {p.every}: {p.train_per_family}/{p.selection_per_family} "
-                 f"per train/selection family, {p.foundation_per_source} per foundation source")
+                 f"max {a.max_tokens} tokens")
+    lines.append(f"probes every {p.every} steps: {p.train_per_family}/{p.selection_per_family} per train/selection "
+                 f"family, {p.foundation_per_source} per foundation source")
 
     tables: dict[str, pd.DataFrame] = {}
     base_summary, base = run.base_summary(), run.base_responses()
@@ -171,8 +180,6 @@ def build(run: RunData) -> tuple[dict[str, pd.DataFrame], list[str], list[str]]:
             recs = lin.probe_responses(step)
             fmt_stats = {"parsed": mean([r["parsed"] for r in recs]), "truncated": mean([r["truncated"] for r in recs]),
                          "completion_tokens": mean([r["completion_tokens"] for r in recs])}
-            if base_by_uid is not None and {r["uid"] for r in recs} != set(base_by_uid):
-                raise ValueError(f"{lin.id} step {step}: probe instances differ from the base model's")
             for suite in SUITES:
                 stats = (paired_probe(recs, base_by_uid, suite) if base_by_uid is not None else
                          {"accuracy": mean([r["reward"] for r in recs if r["suite"] == suite])})
@@ -181,15 +188,18 @@ def build(run: RunData) -> tuple[dict[str, pd.DataFrame], list[str], list[str]]:
     tables["probes"] = pd.DataFrame(probe_rows)
 
     lines.append("")
-    lines.append(f"lineages: rew0/rew1, tok0/tok1 over the first/last {WINDOW} steps done; slope of reward per 100 "
-                 f"steps ± SE; groups: mean prompts with mixed rewards;")
+    lines.append(f"lineages: wk: worker running; steps: done/target, ckpt: last checkpoint (steps after it are shown "
+                 f"only while the worker runs);")
+    lines.append(f"  rew0/rew1, tok0/tok1 over the first/last {WINDOW} steps; slope of reward per 100 steps ± SE; "
+                 f"groups: mean prompts with mixed rewards;")
     lines.append(f"  pars/trunc over the last {WINDOW}; chk: max check.token_mean_abs; s/step: median interval "
                  f"between steps")
     lines += render(
-        ["lineage", "bias", "seedLR", "ampLR", "status", "steps", "rew0", "rew1", "slope±se", "groups", "tok0",
-         "tok1", "pars", "trunc", "chk", "s/step"],
+        ["lineage", "bias", "seedLR", "ampLR", "status", "wk", "steps", "ckpt", "rew0", "rew1", "slope±se", "groups",
+         "tok0", "tok1", "pars", "trunc", "chk", "s/step"],
         [[r["lineage"], r["bias"], lr(r["seeding_lr"]), lr(r["amp_lr"]), r["status"],
-          f"{r['steps_done']}/{r['steps_target']}", pct(r["reward_first"]), pct(r["reward_last"]),
+          ("on" if r["worker"] else "off") if r["status"] in ("new", "active") else "",
+          f"{r['steps_done']}/{r['steps_target']}", r["checkpoint"], pct(r["reward_first"]), pct(r["reward_last"]),
           pm(r["slope_per100"], r["slope_se_per100"]), fmt(r["groups_mean"]),
           fmt(r["tokens_first"], ".0f"), fmt(r["tokens_last"], ".0f"), pct(r["parsed_last"]),
           pct(r["truncated_last"]), fmt(r["check_token_mean_abs_max"], ".4f"), fmt(r["s_per_step"], ".0f")]
@@ -222,6 +232,13 @@ def build(run: RunData) -> tuple[dict[str, pd.DataFrame], list[str], list[str]]:
             if any(row[1:]):
                 rows.append(row)
         lines += render(["lineage"] + [f"{short[suite]}@{step}" for step in shown for suite in SUITES], rows)
+        unpaired = [r for r in probe_rows if r["unpaired"]]
+        if unpaired:
+            families = sorted({f for r in unpaired for f in r["unpaired_families"].split()})
+            lines.append(f"  dropped as unpaired (question differs from the base model's): "
+                         f"{sum(r['unpaired'] for r in unpaired)} items in "
+                         f"{len({(r['lineage'], r['step']) for r in unpaired})} lineage probes, families "
+                         f"{', '.join(families)}; differences use paired items only (probes.csv)")
 
     # Per train family: base probe accuracy and rollout reward over the first and the last steps.
     family_lines = []

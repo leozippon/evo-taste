@@ -1,5 +1,6 @@
 """Analysis tools: variance decomposition, lineage classifier, answer masking, and runs in progress."""
 
+import fcntl
 import re
 
 import numpy as np
@@ -105,7 +106,8 @@ def test_answer_spans_and_digits_are_removed_before_classification():
 # -- a run in progress ----------------------------------------------------------------------------------------------
 
 def _probe(step, suite, family, i, text, reward):
-    return {"step": step, "suite": suite, "uid": f"{family}/0/{i}", "family": family, "question": "q", "answer": "a",
+    return {"step": step, "suite": suite, "uid": f"{family}/0/{i}", "family": family, "question": f"q {family} {i}",
+            "answer": "a",
             "text": text, "completion_tokens": len(text.split()) + 1, "finish_reason": "stop", "extracted": "a",
             "score": reward, "reward": reward, "parsed": True, "truncated": False, "score_error": None, "logprob": -1.0}
 
@@ -125,7 +127,7 @@ def _state(path, lineage, slot, arm, scaffold, status, step, generation=0, cull=
 
 
 def _amp(path, lineage, steps):
-    for t in range(steps):
+    for t in steps:
         append_jsonl(path / "members" / lineage / "history.jsonl", {
             "phase": "amp", "step": t, "time": f"2026-11-22T10:{t:02d}:00+00:00", "reward": 0.2 + 0.01 * t,
             "reward_by_family": {"maze": 0.1, "n_queens": 0.3} if t % 2 else {"maze": 0.2},
@@ -151,45 +153,56 @@ def test_tools_run_on_a_run_in_progress(tmp_path, capsys):
                                                 "by_family": {"maze": {"correct": 4}, "n_queens": {"correct": 0}}})
     write_jsonl_gz(run / "seeding" / "verify.jsonl.gz", [])  # pool being written: no summary yet
     base = [{**r, "step": None} for r in _probes(None, "Base reply.", rng)]
+    base[6]["question"] = "another question"  # lcm/0/0: the base model saw a different question under this uid
     write_jsonl_gz(run / "base" / "probe_responses.jsonl.gz", base)
     write_json(run / "base" / "probe_summary.json", {
         "n": len(base), "accuracy": {"train": 0.5, "selection": 0.4, "foundation": 0.6}, "parsed": 1.0,
         "truncated": 0.0, "completion_tokens": 7.0})
-    # a: active, 14 amplification steps (4 past its step-10 checkpoint) and a line cut short by a kill.
+    # a: active with a running worker: 14 steps (4 past its step-10 checkpoint, step 3 written twice), a line cut
+    # short by a kill, and a probe file after the checkpoint (killed between probe and checkpoint).
     _state(run, "a", "a", "plain", None, "active", 10)
-    _amp(run, "a", 14)
+    _amp(run, "a", [0, 1, 2, 3, 3, *range(4, 14)])
     with open(run / "members" / "a" / "history.jsonl", "a") as f:
         f.write('{"phase": "amp", "st')
-    for s in (0, 10):
+    for s in (0, 10, 20):
         write_jsonl_gz(run / "members" / "a" / "probe_responses" / f"step_{s:06d}.jsonl.gz",
                        _probes(s, "Let me verify this.", rng))
-    # b: still seeding; c: not started; d: culled at step 10 and replaced by d~1, which has its step-0 probe.
+    # b: still seeding; c: not started; d: culled at step 10 with two uncommitted steps after it, replaced by d~1,
+    # which has its step-0 probe and two uncommitted steps but no running worker.
     _state(run, "b", "b", "scaffold", "verify", "new", 0)
     append_jsonl(run / "members" / "b" / "history.jsonl", {"phase": "seed", "step": 0})
     _state(run, "d", "d", "perturb", None, "culled", 10, cull="fewer than half of the probe answers are parseable",
            replaced_by="d~1")
-    _amp(run, "d", 10)
+    _amp(run, "d", range(12))
     _state(run, "d~1", "d", "perturb", None, "active", 0, generation=1)
-    _amp(run, "d~1", 2)
+    _amp(run, "d~1", range(2))
     for lineage, steps in (("d", (0, 10)), ("d~1", (0,))):
         for s in steps:
             write_jsonl_gz(run / "members" / lineage / "probe_responses" / f"step_{s:06d}.jsonl.gz",
                            _probes(s, "Case one, then case two.", rng))
 
-    report.main([str(run), "--families", "--out", str(tmp_path / "report")])
-    out = capsys.readouterr().out
-    for expected in ("pending", "new", "culled d at step 10", "replaced by d~1", "14/30", "d~1"):
+    (run / "locks").mkdir()
+    with open(run / "locks" / "a.lock", "w") as lock:  # the worker of slot a holds its lock, as evotaste.worker does
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        report.main([str(run), "--families", "--out", str(tmp_path / "report")])
+        out = capsys.readouterr().out
+        style.main([str(run), "--out", str(tmp_path / "style")])
+        style_out = capsys.readouterr().out
+    for expected in ("pending", "new", "culled d at step 10", "replaced by d~1", "14/30", "dropped as unpaired"):
         assert expected in out
     members = pd.read_csv(tmp_path / "report" / "members.csv")
     assert list(members["lineage"]) == ["a", "b", "c", "d", "d~1"]
-    assert list(members["steps_done"]) == [14, 0, 0, 10, 2]
+    assert list(members["steps_done"]) == [14, 0, 0, 10, 0]
+    assert list(members["steps_uncommitted"]) == [4, 0, 0, 0, 0]
+    assert list(members["worker"]) == [True, False, False, False, False]
     assert members.loc[3, "amp_lr"] == 2e-4
     probes = pd.read_csv(tmp_path / "report" / "probes.csv")
     assert set(zip(probes["lineage"], probes["step"])) == {("a", 0), ("a", 10), ("d", 0), ("d", 10), ("d~1", 0)}
+    assert set(probes.loc[probes["unpaired"] > 0, "suite"]) == {"selection"}
+    assert (probes.query("suite == 'selection'")["instances"] == 2).all()
     assert list(pd.read_csv(tmp_path / "report" / "seeding.csv")["teacher"]) == ["plain"]
 
-    style.main([str(run), "--out", str(tmp_path / "style")])
-    out = capsys.readouterr().out
-    assert "not possible" in out and "identifiability" in out
+    assert "not possible" in style_out and "step 0: 1 (lcm)" in style_out
     ident = pd.read_csv(tmp_path / "style" / "identifiability.csv")
     assert set(ident["members"]) == {2, 3}  # step 0: a, d, d~1; step 10: a, d
+    assert "lcm/0/0" not in set(pd.read_csv(tmp_path / "style" / "features.csv.gz").query("source == 'member'")["uid"])

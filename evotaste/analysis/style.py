@@ -13,6 +13,7 @@ results/<name>/style/ (a subset goes to a subdirectory named after it). Definiti
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import re
@@ -329,6 +330,8 @@ def response_frame(run: RunData, lineages) -> tuple[pd.DataFrame, pd.DataFrame, 
 
     def frame(records, **meta):
         return pd.DataFrame([{**meta, "step": r.get("step"), "suite": r.get("suite", "seeding"), "uid": r["uid"],
+                              "question": (hashlib.sha1(r["question"].encode()).hexdigest()[:16] if "question" in r
+                                           else None),
                               "family": r["family"], "reward": r.get("reward", 1.0), "ctext": classifier_text(r["text"]),
                               **features(r["text"], r["completion_tokens"] if "completion_tokens" in r
                                          else len(r["completion_ids"]))} for r in records])
@@ -341,6 +344,20 @@ def response_frame(run: RunData, lineages) -> tuple[pd.DataFrame, pd.DataFrame, 
     pools = pd.concat(pools, ignore_index=True) if pools else base.iloc[:0]
     members = pd.concat(members, ignore_index=True) if members else base.iloc[:0]
     return base, pools, members
+
+
+def align(members: pd.DataFrame, base: pd.DataFrame) -> tuple[pd.DataFrame, dict[int, list[str]]]:
+    """Keep, at each probe step, the prompts that every lineage present and the base model answered with the same
+    uid and the identical question text; return the kept responses and the dropped uids per step."""
+    base_keys = set(zip(base["uid"], base["question"]))
+    kept, dropped = [], {}
+    for step, at in members.groupby("step"):
+        lineages = at.groupby(["uid", "question"])["lineage"].nunique()
+        common = {k for k, n in lineages.items() if n == at["lineage"].nunique() and k in base_keys}
+        mask = np.array([k in common for k in zip(at["uid"], at["question"])])
+        kept.append(at[mask])
+        dropped[int(step)] = sorted(set(at.loc[~mask, "uid"]))
+    return (pd.concat(kept) if kept else members), dropped
 
 
 def profile(base: pd.DataFrame, pools: pd.DataFrame, members: pd.DataFrame) -> pd.DataFrame:
@@ -363,10 +380,14 @@ def _g(x: float) -> str:
     return f"{x:.0f}" if abs(x) >= 100 else f"{x:.2f}" if abs(x) >= 0.995 or x == 0 else f"{x:.3f}".lstrip("0")
 
 
-def summary_lines(run, lineages, label, prof, sharp, ident, confusion, scaff, suite, teachers) -> list[str]:
+def summary_lines(run, lineages, label, prof, sharp, ident, confusion, scaff, suite, teachers, dropped) -> list[str]:
     steps = sorted(prof.loc[prof["source"] == "member", "step"].dropna().astype(int).unique())
     lines = [f"style {run.name} ({label}): {len(lineages)} lineages with probes, probe steps "
              f"{', '.join(map(str, steps)) or 'none'}; {len(NAMES)} features"]
+    if any(dropped.values()):
+        lines.append("prompts dropped (not answered with the identical question by every lineage and the base): "
+                     + "; ".join(f"step {s}: {len(u)} ({', '.join(sorted({x.split('/')[0] for x in u}))})"
+                                 for s, u in dropped.items() if u))
     # Profile: base, each teacher pool with the lineages seeded from it at their first and last probe step.
     p = prof[(prof["suite"] == suite) | (prof["source"] == "pool")]
     lines.append(f"profile: means on the {suite} suite (pools: correct seeding samples, train-family prompts)")
@@ -422,7 +443,7 @@ def summary_lines(run, lineages, label, prof, sharp, ident, confusion, scaff, su
                         [[t] + [f"{100 * c.loc[t, q] / c.loc[t].sum():.0f}" for q in order] for t in order])
 
     lines.append("")
-    lines.append("bias recoverability on held-out lineages (all suites)")
+    lines.append("bias recoverability on held-out lineages (all suites)" + ("" if len(scaff) else ": no probes yet"))
     for r in scaff.itertuples():
         if isinstance(getattr(r, "note", None), str):
             lines.append(f"  step {int(r.step)}: {r.note}; lineages per bias: {' '.join([r.classes, r.excluded]).strip()}")
@@ -459,6 +480,7 @@ def main(argv=None) -> None:
     out.mkdir(parents=True, exist_ok=True)
 
     base, pools, members = response_frame(run, lineages)
+    members, dropped = align(members, base)
     bias_of = {lin.id: lin.bias for lin in lineages}
     prof = profile(base, pools, members)
     with threadpool_limits(THREADS):
@@ -467,7 +489,7 @@ def main(argv=None) -> None:
             pd.DataFrame(), pd.DataFrame(columns=["step", "true", "pred", "count"]), pd.DataFrame())
         scaff = scaffold_recovery(members, bias_of) if len(members) else pd.DataFrame()
 
-    pd.concat([base, pools, members]).drop(columns="ctext").to_csv(out / "features.csv.gz", index=False)
+    pd.concat([base, pools, members]).drop(columns=["ctext", "question"]).to_csv(out / "features.csv.gz", index=False)
     prof.to_csv(out / "profile.csv", index=False)
     sharp.to_csv(out / "sharpness.csv", index=False)
     ident.to_csv(out / "identifiability.csv", index=False)
@@ -479,11 +501,12 @@ def main(argv=None) -> None:
 
     summary = {"run": run.name, "subset": label, "lineages": {lin.id: lin.bias for lin in lineages},
                "features": {name: definition for name, (definition, _) in FEATURES.items()},
+               "dropped_prompts": dropped,
                "sharpness": records(sharp[sharp["feature"] == "mean"]) if len(sharp) else [],
                "identifiability": records(ident), "scaffold": records(scaff)}
     (out / "summary.json").write_text(json.dumps(summary, indent=1) + "\n")
     print("\n".join(summary_lines(run, lineages, label, prof, sharp, ident, confusion, scaff, args.suite,
-                                  run.teachers())))
+                                  run.teachers(), dropped)))
     print(f"\nCSV/JSON: {out}/")
 
 
