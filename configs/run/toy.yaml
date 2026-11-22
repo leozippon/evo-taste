@@ -1,0 +1,25 @@
+# Toy-size end-to-end run of the engine: three members (plain, one scaffold, perturbation), a short seeding,
+# a few amplification steps and probes. Schema and defaults: evotaste/config.py and docs/dev/ENGINE_NOTES.md.
+name: toy
+model: Qwen/Qwen3-1.7B
+seed: 1
+server:
+  kv_cache: 20G
+seeding:
+  pool_prompts: 128
+  samples: 4
+  steps: 4
+  batch: 32
+amplification:
+  steps: 6
+  prompts: 16
+  rollouts: 4
+probes:
+  every: 3
+  train_per_family: 1
+  selection_per_family: 1
+  foundation_per_source: 10
+members:
+  - {id: plain0, arm: plain, seed: 11}
+  - {id: verify0, arm: scaffold, scaffold: verify, seed: 12}
+  - {id: perturb0, arm: perturb, seed: 13}
