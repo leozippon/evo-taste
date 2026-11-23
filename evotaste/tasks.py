@@ -36,6 +36,9 @@ log = logging.getLogger(__name__)
 SYSTEM_PROMPT = SYSTEM_PROMPTS["default"]
 REWARD_THRESHOLD = 0.999  # a scorer output at or above this counts as solved
 SCORE_TIMEOUT_S = 10  # wall-clock bound per scorer call on arbitrary model text; past it the call scores 0
+BUILD_TIMEOUT_S = 300  # bound on building a family's dataset in a scorer process (acre precomputes 8,192 items)
+GOLD_TIMEOUT_S = 300  # scorer bound when checking gold answers; a timeout there is an error, never a verdict
+_READY = "ready"  # a scorer process's message: the dataset is built, the timed scorer call starts now
 SCORER_PROCESSES = 8  # persistent scorer processes per engine process
 
 # reasoning-gym datasets generate item i from Random(seed + i). Some precompute items as a function of `size`
@@ -130,12 +133,18 @@ def _serve(jobs: Connection, results: Connection, parent: int) -> None:
     ctypes.CDLL("libc.so.6").prctl(1, signal.SIGKILL)  # PR_SET_PDEATHSIG: die with the parent, even mid-scorer
     if os.getppid() != parent:  # the parent died before the line above
         return
+    built = set()
     while True:
         try:
             task, answer = jobs.recv()
         except EOFError:
             return
         try:
+            if task.entry is not None and task.uid.rsplit("/", 1)[0] not in built:
+                family, seed, _ = task.uid.split("/")
+                _dataset(family, int(seed))  # building is not part of the scorer's time limit
+                built.add(task.uid.rsplit("/", 1)[0])
+                results.send(_READY)
             results.send((raw_score(task, answer), None))
         except Exception as e:  # noqa: BLE001 - any scorer failure must score 0, never crash a worker
             results.send((0.0, f"{type(e).__name__}: {e}"[:200]))
@@ -149,6 +158,7 @@ class _ScorerProcess:
                                       str(os.getpid())], pass_fds=(jobs_r, results_w))
         os.close(jobs_r)
         os.close(results_w)
+        self.built: set = set()  # dataset keys this process has built (mirrors its own bookkeeping)
         self.jobs, self.results = Connection(jobs_w, readable=False), Connection(results_r, writable=False)
 
     def kill(self) -> None:
@@ -172,29 +182,43 @@ class ScorerPool:
             p.kill()
         self.procs = []
 
-    def run(self, jobs: list[tuple[Task, str]]) -> list[tuple[float, str | None]]:
+    def run(self, jobs: list[tuple[Task, str]], timeout: float | None = None) -> list[tuple[float, str | None]]:
+        """(raw score, error) per job; the scorer call itself is bounded by `timeout` (default SCORE_TIMEOUT_S),
+        a family's first dataset build in a process separately by BUILD_TIMEOUT_S."""
+        timeout = SCORE_TIMEOUT_S if timeout is None else timeout
         while len(self.procs) < min(self.size, len(jobs)):
             self.procs.append(_ScorerProcess())
         out: list = [None] * len(jobs)
         todo = list(range(len(jobs)))[::-1]
-        busy: dict[int, tuple[int, float]] = {}  # process slot -> (job index, start time)
+        busy: dict[int, tuple[int, float]] = {}  # process slot -> (job index, deadline)
         while todo or busy:
             for slot in range(len(self.procs)):
                 if slot not in busy and todo:
                     i = todo.pop()
-                    self.procs[slot].jobs.send(jobs[i])
-                    busy[slot] = (i, time.monotonic())
-            deadline = min(t0 for _, t0 in busy.values()) + SCORE_TIMEOUT_S
+                    proc, task = self.procs[slot], jobs[i][0]
+                    proc.jobs.send(jobs[i])
+                    key = task.uid.rsplit("/", 1)[0] if task.entry is not None else None
+                    builds = key is not None and key not in proc.built  # the process will build it and say so
+                    proc.built.add(key)
+                    busy[slot] = (i, time.monotonic() + (BUILD_TIMEOUT_S if builds else timeout))
+            deadline = min(d for _, d in busy.values())
             ready = wait([self.procs[s].results for s in busy], timeout=max(0.0, deadline - time.monotonic()))
             for slot in [s for s in busy if self.procs[s].results in ready]:
-                i, _ = busy.pop(slot)
+                i, _ = busy[slot]
                 try:
-                    out[i] = self.procs[slot].results.recv()
+                    message = self.procs[slot].results.recv()
                 except (EOFError, OSError):  # the process died (e.g. out of memory)
+                    busy.pop(slot)
                     out[i] = (0.0, f"scorer process died ({self.procs[slot].proc.poll()})")
                     self._replace(slot)
+                    continue
+                if message == _READY:  # dataset built: from now on the scorer's own limit applies
+                    busy[slot] = (i, time.monotonic() + timeout)
+                else:
+                    busy.pop(slot)
+                    out[i] = message
             now = time.monotonic()
-            for slot in [s for s, (_, t0) in busy.items() if now - t0 >= SCORE_TIMEOUT_S]:
+            for slot in [s for s, (_, d) in busy.items() if now >= d]:
                 i, _ = busy.pop(slot)
                 out[i] = (0.0, "timeout")
                 self._replace(slot)
@@ -208,7 +232,7 @@ class ScorerPool:
 _POOL: ScorerPool | None = None
 
 
-def score_many(jobs: list[tuple[Task, str, str]]) -> list[Score]:
+def score_many(jobs: list[tuple[Task, str, str]], timeout: float | None = None) -> list[Score]:
     """Binary rewards of (task, completion text, finish reason) triples: the last <answer> span is scored only if
     present and the completion stopped by itself; scorer exceptions and timeouts give 0 with `error` set."""
     global _POOL
@@ -217,7 +241,7 @@ def score_many(jobs: list[tuple[Task, str, str]]) -> list[Score]:
     raw = {}
     if to_score:
         _POOL = _POOL or ScorerPool()
-        raw = dict(zip(to_score, _POOL.run([(jobs[i][0], parsed[i][0]) for i in to_score])))
+        raw = dict(zip(to_score, _POOL.run([(jobs[i][0], parsed[i][0]) for i in to_score], timeout)))
     out = []
     for i, (extracted, truncated) in enumerate(parsed):
         if i not in raw:
@@ -232,9 +256,19 @@ def score(task: Task, text: str, finish_reason: str) -> Score:
     return score_many([(task, text, finish_reason)])[0]
 
 
+def gold_scores(tasks: list[Task]) -> list[Score]:
+    """Each task's own scorer on its gold answer. A scorer that times out decides nothing, so it is an error: whether
+    an instance is usable must not depend on the machine's load."""
+    scores = score_many([(t, f"<answer>{t.answer}</answer>", "stop") for t in tasks], GOLD_TIMEOUT_S)
+    slow = [t.uid for t, s in zip(tasks, scores) if s.error == "timeout"]
+    if slow:
+        raise RuntimeError(f"scoring the gold answers of {slow[:5]} timed out after {GOLD_TIMEOUT_S} s")
+    return scores
+
+
 def check_gold(tasks: list[Task]) -> None:
     """Reward integrity on real instances: every gold answer wrapped in <answer> tags must earn reward 1."""
-    scores = score_many([(t, f"<answer>{t.answer}</answer>", "stop") for t in tasks])
+    scores = gold_scores(tasks)
     bad = [t.uid for t, s in zip(tasks, scores) if s.reward != 1.0]
     if bad:
         raise RuntimeError(f"{len(bad)} of {len(tasks)} gold answers do not earn reward 1, e.g. {bad[:5]}")
@@ -315,7 +349,7 @@ _GOLD_FAILURES: set[str] = set()  # logged once per process
 
 def _gold_rejected(tasks: list[Task]) -> list[bool]:
     """Which tasks' own scorer refuses reward 1 to their gold answer (logged once per uid)."""
-    scores = score_many([(t, f"<answer>{t.answer}</answer>", "stop") for t in tasks])
+    scores = gold_scores(tasks)
     for t, s in zip(tasks, scores):
         if s.reward != 1.0 and t.uid not in _GOLD_FAILURES:
             _GOLD_FAILURES.add(t.uid)

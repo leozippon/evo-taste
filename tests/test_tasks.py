@@ -214,3 +214,33 @@ def test_usable_items_skip_bad_gold():
     assert [t.uid for t in tasks.usable_items(items, 2, from_end=True)] == ["gsm8k_train/4", "gsm8k_train/5"]
     assert [t.uid for t in tasks.usable_items(items, 5, from_end=True)] == [f"gsm8k_train/{i}" for i in (0, 2, 3, 4, 5)]
     assert len(tasks.usable_items(items, 100)) == 5  # more than the part: every usable item
+
+
+def test_dataset_build_is_not_part_of_the_scorer_time_limit():
+    """acre builds 8,192 items when a scorer process first meets it (about 2 s): that may not count as a timeout,
+    while a scorer that hangs on the answer still does."""
+    import time
+
+    pool = tasks.ScorerPool(1)
+    try:
+        acre = instance("buildtest", "acre", 0)
+        assert pool.run([(acre, acre.answer)], timeout=0.5) == [(1.0, None)]
+        bomb = instance("buildtest", "simple_integration", 0)
+        t0 = time.monotonic()
+        assert pool.run([(bomb, "1e999999999")], timeout=2)[0] == (0.0, "timeout")
+        assert time.monotonic() - t0 < 60
+        assert pool.run([(acre, acre.answer)], timeout=0.5) == [(1.0, None)]  # a replaced process rebuilds
+    finally:
+        pool.close()
+
+
+def test_gold_check_timeout_is_an_error_not_a_redraw(monkeypatch):
+    def slow(jobs, timeout=None):
+        assert timeout == tasks.GOLD_TIMEOUT_S
+        return [tasks.Score(0.0, 0.0, True, False, "x", "timeout") for _ in jobs]
+
+    monkeypatch.setattr(tasks, "score_many", slow)
+    with pytest.raises(RuntimeError, match="timed out"):
+        tasks.fixed_tasks(["chain_sum"], "evaly", 2)
+    with pytest.raises(RuntimeError, match="timed out"):
+        tasks.check_gold([instance("evaly", "chain_sum", 0)])
