@@ -102,11 +102,14 @@ while true; do
           if [ -n "${seen_ckpt[$key]:-}" ] && [ "$ck" -gt "${seen_ckpt[$key]}" ]; then
             say "stopping pid $pid at checkpoint $ck for upgrade: $members"
             stop_worker "$pid"
+            sleep 5
+            pid=""  # restart this list at once, before a waiting list can take its card
+          else
+            seen_ckpt[$key]=$ck
           fi
-          seen_ckpt[$key]=$ck
         fi
       fi
-      continue
+      [ -n "$pid" ] && continue
     fi
     finished "$members" && continue
     gpu=$(pick_gpu)
