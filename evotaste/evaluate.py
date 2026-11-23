@@ -25,7 +25,7 @@ from evotaste.records import now, read_json, read_jsonl_gz, write_json, write_js
 from evotaste.sampler import Request, Sampler
 from evotaste.tasks import BlindReceipt, blind_suite, check_gold, fixed_tasks
 from evotaste.trainer import adapter_sha256
-from evotaste.worker import revision, setup_logging, start_server
+from evotaste.worker import logged, revision, setup_logging, start_server
 
 log = logging.getLogger("evotaste.evaluate")
 SUITES = ("train", "selection", "blind1", "blind2")
@@ -168,7 +168,6 @@ def read_records(out: Path) -> list[dict]:
 def evaluate(run_dir: Path, suite: str, adapter_specs: list[str], per_family: int, samples: int, shard: str,
              tag: str | None, attach: str | None, per_source: int | None = None) -> None:
     run = Run(run_dir)
-    setup_logging(run.cfg.name, f"eval-{suite}")
     if suite not in SUITES:
         raise SystemExit(f"unknown suite {suite!r}; choose from {SUITES}")
     adapters = {spec: resolve_adapter(run, spec) for spec in adapter_specs}
@@ -270,8 +269,9 @@ def main(argv=None) -> None:
     h.add_argument("--tag", required=True)
     args = ap.parse_args(argv)
     if args.cmd == "run":
-        evaluate(args.run_dir, args.suite, [a for a in args.adapters.split(",") if a], args.per_family, args.samples,
-                 args.shard, args.tag, args.attach, args.per_source)
+        setup_logging(args.run_dir.name, f"eval-{args.suite}")
+        logged(evaluate, args.run_dir, args.suite, [a for a in args.adapters.split(",") if a], args.per_family,
+               args.samples, args.shard, args.tag, args.attach, args.per_source)
     else:
         harvest(args.run_dir, args.tag)
 

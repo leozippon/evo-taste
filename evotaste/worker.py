@@ -23,6 +23,7 @@ import sys
 import time
 from pathlib import Path
 
+import torch
 import yaml
 
 from evotaste import config
@@ -35,6 +36,16 @@ from evotaste.trainer import Policy
 log = logging.getLogger("evotaste.worker")
 
 
+_STOP_SIGNAL: str | None = None
+
+
+def _stop(signum, _frame) -> None:
+    global _STOP_SIGNAL
+    _STOP_SIGNAL = signal.Signals(signum).name
+    log.warning("received %s; stopping", _STOP_SIGNAL)
+    sys.exit(128 + signum)  # run finally-blocks: stop vLLM, clean /dev/shm
+
+
 def setup_logging(run_name: str, label: str) -> Path:
     path = Path("logs") / run_name / f"{label}-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}.log"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -45,8 +56,35 @@ def setup_logging(run_name: str, label: str) -> Path:
     logging.basicConfig(level=logging.INFO, handlers=handlers, force=True)
     for noisy in ("httpx", "httpcore", "datasets"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))  # run finally-blocks: stop vLLM, clean /dev/shm
+    for s in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(s, _stop)
     return path
+
+
+def logged(command, *args) -> None:
+    """Run a CLI command so that whatever ends it lands in its log file: the traceback of an exception, or the
+    signal that stopped it (a deliberate stop is then distinguishable from a crash)."""
+    try:
+        command(*args)
+    except SystemExit as e:
+        if _STOP_SIGNAL:
+            log.warning("stopped by %s", _STOP_SIGNAL)
+        elif e.code not in (None, 0):
+            log.error("exiting: %s", e.code, exc_info=True)
+        raise
+    except BaseException:
+        log.critical("terminated by an exception", exc_info=True)
+        raise
+
+
+def gpu_processes() -> str:
+    """This GPU's memory and every process on the machine's GPUs, as nvidia-smi reports them now."""
+    def query(*args):
+        return subprocess.run(["nvidia-smi", *args], capture_output=True, text=True).stdout.strip()
+
+    return "\n".join([query("-i", os.environ.get("CUDA_VISIBLE_DEVICES", ""),
+                            "--query-gpu=index,uuid,memory.used,memory.total", "--format=csv"),
+                      query("--query-compute-apps=gpu_uuid,pid,used_memory", "--format=csv")])
 
 
 def revision() -> str:
@@ -134,7 +172,6 @@ def base_probe(run: Run, sampler: Sampler) -> None:
 def prepare(config_path: Path, attach: str | None) -> None:
     run_dir = freeze(config_path)
     run = Run(run_dir)
-    setup_logging(run.cfg.name, "prepare")
     pool_tasks = run.streams.seed_pool(run.cfg.seeding.pool_prompts)
     check_gold([t for _, t in run.probe_tasks] + pool_tasks)
     todo = [t for t in teachers(run.cfg) if not (run.dir / "seeding" / f"{t}.jsonl.gz").exists()]
@@ -240,7 +277,6 @@ def fork(src: Path, config_path: Path, dry_run: bool) -> None:
         (run_dir / f.parent.name).mkdir(exist_ok=True)
         shutil.copy2(f, run_dir / f.parent.name / f.name)
     run = Run(run_dir)
-    setup_logging(run.cfg.name, "fork")
     run.check_probe_set()
     for slot in reuse:
         s, d = src / "members" / slot, lineage_dir(run, slot)
@@ -341,14 +377,13 @@ def lock_slots(run: Run, slots: list[str]) -> list:
 
 def run_worker(run_dir: Path, slots: list[str], attach: str | None) -> None:
     run = Run(run_dir)
-    log_path = setup_logging(run.cfg.name, "worker-" + "-".join(slots))
     prepared = run.dir / "prepared.json"
     if not prepared.exists() or set(teachers(run.cfg)) - set(read_json(prepared)["teachers"]):
         raise SystemExit(f"{run.dir} is not prepared; run `python -m evotaste.worker prepare` first")
     run.check_probe_set()
     locks = lock_slots(run, slots)
-    log.info("worker pid %d, GPU %s, members %s, revision %s, log %s", os.getpid(),
-             os.environ.get("CUDA_VISIBLE_DEVICES"), slots, revision(), log_path)
+    log.info("worker pid %d, GPU %s, members %s, revision %s", os.getpid(),
+             os.environ.get("CUDA_VISIBLE_DEVICES"), slots, revision())
     server, url = start_server(run, attach, "worker-" + "-".join(slots))
     try:
         run.policy = Policy(run.cfg.model, run.cfg.lora, run.cfg.trainer)  # loads while vLLM starts
@@ -358,6 +393,10 @@ def run_worker(run_dir: Path, slots: list[str], attach: str | None) -> None:
         run.sampler = Sampler(url, run.cfg.model, run.cfg.name)
         advance(run, slots)
         log.info("all members finished")
+    except torch.OutOfMemoryError:  # before vLLM stops: co-tenants are the usual cause on this machine
+        log.error("CUDA out of memory in pid %d; GPU memory now (find this pid's GPU):\n%s", os.getpid(),
+                  gpu_processes())
+        raise
     finally:
         if run.sampler:
             run.sampler.close()
@@ -383,11 +422,17 @@ def main(argv=None) -> None:
     r.add_argument("--attach", help="URL of a running vLLM server of the run's model (development)")
     args = ap.parse_args(argv)
     if args.cmd == "prepare":
-        prepare(args.config, args.attach)
+        setup_logging(yaml.safe_load(args.config.read_text())["name"], "prepare")
+        logged(prepare, args.config, args.attach)
+    elif args.cmd == "fork" and args.dry_run:
+        fork(args.source, args.config, True)
     elif args.cmd == "fork":
-        fork(args.source, args.config, args.dry_run)
+        setup_logging(yaml.safe_load(args.config.read_text())["name"], "fork")
+        logged(fork, args.source, args.config, False)
     else:
-        run_worker(args.run_dir, [s for s in args.members.split(",") if s], args.attach)
+        slots = [s for s in args.members.split(",") if s]
+        setup_logging(args.run_dir.name, "worker-" + "-".join(slots))
+        logged(run_worker, args.run_dir, slots, args.attach)
 
 
 if __name__ == "__main__":
