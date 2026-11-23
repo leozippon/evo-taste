@@ -310,9 +310,50 @@ def family_at(families: tuple[str, ...], key: str, j: int) -> tuple[str, int]:
     return order[pos], block
 
 
+_GOLD_FAILURES: set[str] = set()  # logged once per process
+
+
+def _gold_rejected(tasks: list[Task]) -> list[bool]:
+    """Which tasks' own scorer refuses reward 1 to their gold answer (logged once per uid)."""
+    scores = score_many([(t, f"<answer>{t.answer}</answer>", "stop") for t in tasks])
+    for t, s in zip(tasks, scores):
+        if s.reward != 1.0 and t.uid not in _GOLD_FAILURES:
+            _GOLD_FAILURES.add(t.uid)
+            log.warning("gold answer of %s does not earn reward 1 (score %s, %s); using the next draw",
+                        t.uid, s.score, s.error)
+    return [s.reward != 1.0 for s in scores]
+
+
 def fixed_tasks(families, key: str, per_family: int) -> list[Task]:
-    """The first `per_family` instances of each family in stream `key` (probe and evaluation sets)."""
-    return [instance(key, f, n) for f in families for n in range(per_family)]
+    """The first `per_family` instances of each family in stream `key` (probe and evaluation sets). A position whose
+    draw has a gold answer its own scorer rejects takes the position's next draw, like one whose generator raises,
+    so every usable set is unchanged and every replacement is a pure function of the position. (The training stream
+    and the seeding pool do not do this; members have trained on them as they are.)"""
+    positions = [(f, n) for f in families for n in range(per_family)]
+    candidates = {p: draws(key, *p) for p in positions}
+    chosen = {p: next(candidates[p], None) for p in positions}
+    pending = positions
+    while pending:
+        exhausted = [p for p in pending if chosen[p] is None]
+        if exhausted:
+            raise RuntimeError(f"{key}: no usable draw among {REDRAWS} for {exhausted[:5]}")
+        rejected = _gold_rejected([chosen[p] for p in pending])
+        pending = [p for p, bad in zip(pending, rejected) if bad]
+        for p in pending:
+            chosen[p] = next(candidates[p], None)
+    return [chosen[p] for p in positions]
+
+
+def usable_items(items: list[Task], count: int, from_end: bool = False) -> list[Task]:
+    """The first (or last) `count` items of an ordered external part whose gold answer earns reward 1: an unusable
+    item is replaced by the next one in the part's order, so a usable selection is unchanged."""
+    order = items[::-1] if from_end else items
+    chosen, start = [], 0
+    while len(chosen) < count and start < len(order):
+        batch = order[start:start + count - len(chosen)]
+        start += len(batch)
+        chosen += [t for t, bad in zip(batch, _gold_rejected(batch)) if not bad]
+    return chosen[::-1] if from_end else chosen
 
 
 class Streams:
@@ -327,7 +368,7 @@ class Streams:
             "train": fixed_tasks(suites.train, "probe", probes.train_per_family),
             "selection": fixed_tasks(suites.selection, "probe", probes.selection_per_family),
             "foundation": [t for s in suites.foundation
-                           for t in external.items(s, "foundation")[:probes.foundation_per_source]],
+                           for t in usable_items(external.items(s, "foundation"), probes.foundation_per_source)],
         }
         self._probe_questions = {t.question for t in self.probe_tasks["train"]}
 

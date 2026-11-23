@@ -23,7 +23,7 @@ from evotaste import external
 from evotaste.member import Run, load_lineage, response_records
 from evotaste.records import now, read_json, read_jsonl_gz, write_json, write_jsonl_gz
 from evotaste.sampler import Request, Sampler
-from evotaste.tasks import BlindReceipt, blind_suite, check_gold, fixed_tasks
+from evotaste.tasks import BlindReceipt, blind_suite, check_gold, fixed_tasks, usable_items
 from evotaste.trainer import adapter_sha256
 from evotaste.worker import (apply_server, logged, revision, server_options, server_overrides, setup_logging,
                              start_server)
@@ -104,10 +104,11 @@ def suite_tasks(run: Run, suite: str, per_family: int, receipt: BlindReceipt | N
         return fixed_tasks(run.suites.train, "eval", per_family)
     if suite == "selection":
         return fixed_tasks(run.suites.selection, "eval", per_family) + [
-            t for s in run.suites.foundation for t in external.items(s, "foundation")[-per_source:]]
+            t for s in run.suites.foundation
+            for t in usable_items(external.items(s, "foundation"), per_source, from_end=True)]
     families, sources = blind_suite(run.cfg.suites, suite, receipt)
     return fixed_tasks(families, "eval", per_family) + [
-        t for s in sources for t in external.items(s, suite, receipt)[:per_source]]
+        t for s in sources for t in usable_items(external.items(s, suite, receipt), per_source)]
 
 
 def eval_params(suite: str, per_family: int, samples: int, per_source: int | None) -> tuple[dict, str]:

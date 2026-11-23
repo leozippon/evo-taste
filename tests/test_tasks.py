@@ -184,3 +184,33 @@ def test_generator_failure_is_redrawn_deterministically(monkeypatch, caplog, sui
     monkeypatch.setattr(tasks, "procedural_task", lambda f, s, i: (_ for _ in ()).throw(ValueError("always")))
     with pytest.raises(RuntimeError, match="all 16 draws raised"):
         instance("stream", "chain_sum", 3)
+
+
+def test_unusable_gold_takes_the_next_draw_in_fixed_sets(monkeypatch, caplog):
+    real = tasks.procedural_task
+    clean = tasks.fixed_tasks(["chain_sum"], "evalx", 4)
+    family, seed, index = clean[2].uid.split("/")
+
+    def planted(f, s, i):
+        t = real(f, s, i)
+        if (f, s, i) == (family, int(seed), int(index)):  # a gold answer its own scorer rejects
+            return tasks.Task(t.uid, t.family, t.question, t.answer + "999", t.entry)
+        return t
+
+    monkeypatch.setattr(tasks, "procedural_task", planted)
+    monkeypatch.setattr(tasks, "_GOLD_FAILURES", set())
+    with caplog.at_level("WARNING"):
+        a, b = tasks.fixed_tasks(["chain_sum"], "evalx", 4), tasks.fixed_tasks(["chain_sum"], "evalx", 4)
+    assert [t.uid for t in a] == [t.uid for t in b]  # a pure function of the position
+    assert [t.uid for i, t in enumerate(a) if i != 2] == [t.uid for i, t in enumerate(clean) if i != 2]
+    assert a[2].uid == f"{family}/{seed}/{int(index) + 1}"
+    assert sum("does not earn reward 1" in r.message for r in caplog.records) == 1
+    tasks.check_gold(a)
+
+
+def test_usable_items_skip_bad_gold():
+    items = [tasks.Task(f"gsm8k_train/{i}", "gsm8k_train", "q", "x" if i == 1 else str(i)) for i in range(6)]
+    assert [t.uid for t in tasks.usable_items(items, 3)] == ["gsm8k_train/0", "gsm8k_train/2", "gsm8k_train/3"]
+    assert [t.uid for t in tasks.usable_items(items, 2, from_end=True)] == ["gsm8k_train/4", "gsm8k_train/5"]
+    assert [t.uid for t in tasks.usable_items(items, 5, from_end=True)] == [f"gsm8k_train/{i}" for i in (0, 2, 3, 4, 5)]
+    assert len(tasks.usable_items(items, 100)) == 5  # more than the part: every usable item
