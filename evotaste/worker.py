@@ -31,7 +31,7 @@ from evotaste.member import Lineage, Member, Run, current_lineage, lineage_dir, 
 from evotaste.records import atomic_write, now, read_json, read_jsonl, write_json, write_jsonl_gz
 from evotaste.sampler import Request, Sampler, Server
 from evotaste.tasks import check_gold, score_many
-from evotaste.trainer import Policy
+from evotaste.trainer import Policy, gpu_processes
 
 log = logging.getLogger("evotaste.worker")
 
@@ -75,16 +75,6 @@ def logged(command, *args) -> None:
     except BaseException:
         log.critical("terminated by an exception", exc_info=True)
         raise
-
-
-def gpu_processes() -> str:
-    """This GPU's memory and every process on the machine's GPUs, as nvidia-smi reports them now."""
-    def query(*args):
-        return subprocess.run(["nvidia-smi", *args], capture_output=True, text=True).stdout.strip()
-
-    return "\n".join([query("-i", os.environ.get("CUDA_VISIBLE_DEVICES", ""),
-                            "--query-gpu=index,uuid,memory.used,memory.total", "--format=csv"),
-                      query("--query-compute-apps=gpu_uuid,pid,used_memory", "--format=csv")])
 
 
 def revision() -> str:
@@ -318,7 +308,10 @@ def probe(run: Run, members: list[Member]) -> None:
         m.finish_probe(samples)
 
 
-def advance(run: Run, slots: list[str]) -> None:
+def advance(run: Run, slots: list[str], checkpoint_every: int | None = None) -> None:
+    """Advance the slots' members to the end of their courses; besides the probe-step checkpoints, a light
+    checkpoint (no probe) is written every `checkpoint_every` steps."""
+    checkpoint_every = checkpoint_every or run.cfg.probes.every
     members: dict[str, Member] = {}
 
     def living() -> list[Member]:
@@ -354,6 +347,9 @@ def advance(run: Run, slots: list[str]) -> None:
             due = [m for m in stepping if m.probe_due()]
             if due:
                 probe(run, due)
+            for m in stepping:
+                if m not in due and m.lin.step % checkpoint_every == 0:
+                    m.light_checkpoint()
         for m in live:
             if m.finished:
                 m.retire()
@@ -375,7 +371,7 @@ def lock_slots(run: Run, slots: list[str]) -> list:
     return handles
 
 
-def run_worker(run_dir: Path, slots: list[str], attach: str | None) -> None:
+def run_worker(run_dir: Path, slots: list[str], attach: str | None, checkpoint_every: int | None = None) -> None:
     run = Run(run_dir)
     prepared = run.dir / "prepared.json"
     if not prepared.exists() or set(teachers(run.cfg)) - set(read_json(prepared)["teachers"]):
@@ -391,7 +387,7 @@ def run_worker(run_dir: Path, slots: list[str], attach: str | None) -> None:
             server.wait_ready()
             url = server.url
         run.sampler = Sampler(url, run.cfg.model, run.cfg.name)
-        advance(run, slots)
+        advance(run, slots, checkpoint_every)
         log.info("all members finished")
     except torch.OutOfMemoryError:  # before vLLM stops: co-tenants are the usual cause on this machine
         log.error("CUDA out of memory in pid %d; GPU memory now (find this pid's GPU):\n%s", os.getpid(),
@@ -420,6 +416,8 @@ def main(argv=None) -> None:
     r.add_argument("run_dir", type=Path)
     r.add_argument("--members", required=True, help="comma-separated member ids of this worker")
     r.add_argument("--attach", help="URL of a running vLLM server of the run's model (development)")
+    r.add_argument("--checkpoint-every", type=int, help="also write a light checkpoint (no probe) every N steps "
+                                                         "(default: probes.every)")
     args = ap.parse_args(argv)
     if args.cmd == "prepare":
         setup_logging(yaml.safe_load(args.config.read_text())["name"], "prepare")
@@ -432,7 +430,9 @@ def main(argv=None) -> None:
     else:
         slots = [s for s in args.members.split(",") if s]
         setup_logging(args.run_dir.name, "worker-" + "-".join(slots))
-        logged(run_worker, args.run_dir, slots, args.attach)
+        if args.checkpoint_every is not None and args.checkpoint_every < 1:
+            raise SystemExit("--checkpoint-every must be at least 1")
+        logged(run_worker, args.run_dir, slots, args.attach, args.checkpoint_every)
 
 
 if __name__ == "__main__":

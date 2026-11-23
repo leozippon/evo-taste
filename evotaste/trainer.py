@@ -10,8 +10,11 @@ On GPU the LoRA matmuls run in bf16 under autocast, as in vLLM; the fp32 LoRA te
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import math
+import os
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -148,6 +151,14 @@ class Policy:
         if not self.params or any(p.dtype != torch.float32 for p in self.params.values()):
             raise RuntimeError("expected fp32 LoRA parameters")
 
+    def release_memory(self) -> None:
+        """Drop gradients and cached CUDA blocks, e.g. after an out-of-memory error, before trying again."""
+        for p in self.params.values():
+            p.grad = None
+        gc.collect()
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+
     # -- member state ----------------------------------------------------------------------------------------
     def new_member(self, seed: int, b_std: float = 0.0) -> MemberWeights:
         """PEFT's initialization (A: Kaiming-uniform, B: 0) drawn from `seed`; b_std > 0 perturbs B ~ N(0, b_std)."""
@@ -240,8 +251,8 @@ class Policy:
         self._activate(member)
         params = list(self.params.values())
         opt = torch.optim.AdamW(params, lr=lr, weight_decay=self.cfg.weight_decay)
-        if member.optimizer is not None:
-            opt.load_state_dict(member.optimizer)
+        if member.optimizer is not None:  # a private copy: a failed step must leave the member's state untouched
+            opt.load_state_dict(_to_cpu(member.optimizer))
             for group in opt.param_groups:
                 group.update(lr=lr, weight_decay=self.cfg.weight_decay)
         opt.zero_grad(set_to_none=True)
@@ -268,6 +279,16 @@ class Policy:
             loss.backward()
             loss_sum += loss.item()
         return loss_sum, len(batches)
+
+
+def gpu_processes() -> str:
+    """This GPU's memory and every process on the machine's GPUs, as nvidia-smi reports them now."""
+    def query(*args):
+        return subprocess.run(["nvidia-smi", *args], capture_output=True, text=True).stdout.strip()
+
+    return "\n".join([query("-i", os.environ.get("CUDA_VISIBLE_DEVICES", ""),
+                            "--query-gpu=index,uuid,memory.used,memory.total", "--format=csv"),
+                      query("--query-compute-apps=gpu_uuid,pid,used_memory", "--format=csv")])
 
 
 def save_optimizer(member: MemberWeights, path: Path) -> None:

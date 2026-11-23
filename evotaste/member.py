@@ -24,13 +24,17 @@ from evotaste.records import (append_jsonl, filter_jsonl, now, read_json, read_j
 from evotaste.sampler import Request, Sample
 from evotaste.tasks import (SYSTEM_PROMPT, Streams, Suites, Task, load_scaffolds, prompt_ids, score_many, stable_seed,
                             system_prompt)
-from evotaste.trainer import MemberWeights, Sequence, group_weights, load_optimizer, shaped_returns
+from evotaste.trainer import MemberWeights, Sequence, gpu_processes, group_weights, load_optimizer, shaped_returns
 
 log = logging.getLogger(__name__)
 
 # Policy-consistency check (docs/dev/ENGINE_NOTES.md): with the right adapter the per-token mean |trainer - sampler|
 # log-probability is about 0.006 and the summed |difference| about 0.002 per token; serving the base model instead of
 # a random adapter, or the reverse, gave 0.12 and 0.073. The limits sit between the two.
+# A CUDA out-of-memory error in the trainer (a co-tenant took memory on the shared card) is retried from clean
+# state: OOM_ATTEMPTS tries, OOM_WAIT_S apart (about 15 minutes in all), then the error propagates.
+OOM_ATTEMPTS = 10
+OOM_WAIT_S = 100
 CHECK_TOKEN_MEAN_ABS_MAX = 0.04
 CHECK_SEQ_ABS_PER_TOKEN_MAX = 0.015
 PROBE_SUITES = ("train", "selection", "foundation")
@@ -52,6 +56,23 @@ def check_sample(lengths: list[int], rollouts: int, min_tokens: int, min_rollout
 
 def _check_passes(stats: dict) -> bool:
     return stats["token_mean_abs"] <= CHECK_TOKEN_MEAN_ABS_MAX and stats["seq_abs_per_token"] <= CHECK_SEQ_ABS_PER_TOKEN_MAX
+
+
+def retry_on_oom(policy, what: str, fn):
+    """fn() with retries after CUDA out-of-memory errors. fn must not change anything before it succeeds (the
+    trainer's scoring and update copy a member's tensors and optimizer state in, and out only at the very end), so
+    a retry computes exactly what an uninterrupted call would have."""
+    for attempt in range(1, OOM_ATTEMPTS + 1):
+        try:
+            return fn()
+        except torch.OutOfMemoryError as e:
+            if attempt == OOM_ATTEMPTS:
+                raise
+            error = str(e).splitlines()[0]
+        policy.release_memory()  # outside the except block, so that the failed frames' tensors are gone
+        log.warning("%s: CUDA out of memory (attempt %d of %d: %s); retrying in %d s. GPU memory now:\n%s",
+                    what, attempt, OOM_ATTEMPTS, error, OOM_WAIT_S, gpu_processes())
+        time.sleep(OOM_WAIT_S)
 
 
 class ConsistencyError(RuntimeError):
@@ -232,7 +253,8 @@ class Member:
             for _ in range(self.seeding.batch):
                 prompt, completions = rng.choice(pool)
                 seqs.append(Sequence(prompt, rng.choice(completions), 1.0))
-            stats = policy.update(self.weights, seqs, self.seeding.lr)
+            stats = retry_on_oom(policy, f"{lin.id} seeding step {i}",
+                                 lambda: policy.update(self.weights, seqs, self.seeding.lr))
             append_jsonl(self.dir / "history.jsonl", {"phase": "seed", "step": i, "time": now(), **stats})
         self.weights.optimizer = None  # amplification starts from a fresh AdamW state
         log.info("%s seeded (%d positive updates, teacher %s)", lin.id, self.seeding.steps, self.teacher)
@@ -277,9 +299,11 @@ class Member:
                 records.append({"step": t, "prompt": j, "k": k, **r, "weight": w})
         score_s = time.perf_counter() - t0
         t0 = time.perf_counter()
-        check = self.consistency_check(seqs, sampler_lps)
+        check = retry_on_oom(policy, f"{self.lin.id} step {t} check",
+                             lambda: self.consistency_check(seqs, sampler_lps))
         check_s = time.perf_counter() - t0
-        stats = policy.update(self.weights, seqs, self.amp.lr)
+        stats = retry_on_oom(policy, f"{self.lin.id} step {t} update",
+                             lambda: policy.update(self.weights, seqs, self.amp.lr))
         publish = self.publish()
         t0 = time.perf_counter()
         write_jsonl_gz(self.dir / "rollouts" / f"step_{t:06d}.jsonl.gz", records)
@@ -360,9 +384,7 @@ class Member:
         else:
             self.lin.status = "active"
         write_json(self.dir / "state.json", dataclasses.asdict(self.lin))  # commit point
-        for path in (self.dir / "checkpoints").glob("step_*/optimizer.pt"):
-            if path.parent != self.checkpoint_dir(s):
-                path.unlink()
+        self.prune_checkpoints()
         log.info("%s probe at step %d: %s, cull=%s", self.lin.id, s,
                  {k: round(v, 3) for k, v in summary["accuracy"].items()}, summary["cull"])
 
@@ -382,6 +404,25 @@ class Member:
         if summary["accuracy"]["train"] < base["train"] and previous and previous[-1]["accuracy"]["train"] < base["train"]:
             return "train-test accuracy below the base model's on two consecutive probes"
         return None
+
+    def light_checkpoint(self) -> None:
+        """What resume needs (adapter, optimizer, state) at the current step, without a probe."""
+        self.write_checkpoint()
+        write_json(self.dir / "state.json", dataclasses.asdict(self.lin))  # commit point
+        self.prune_checkpoints()
+        log.info("%s light checkpoint at step %d", self.lin.id, self.lin.step)
+
+    def prune_checkpoints(self) -> None:
+        """After a commit: keep the current checkpoint and the probe-step ones (final evaluation may name them);
+        drop older light checkpoints, and the optimizer state of every checkpoint but the current one."""
+        probe_steps = {p["step"] for p in self.lin.probes}
+        for path in (self.dir / "checkpoints").glob("step_*"):
+            if path.name.endswith(".tmp") or (step := int(path.name[5:11])) == self.lin.step:
+                continue
+            if step not in probe_steps:
+                shutil.rmtree(path)
+            else:
+                (path / "optimizer.pt").unlink(missing_ok=True)
 
     def write_checkpoint(self) -> None:
         final = self.checkpoint_dir(self.lin.step)

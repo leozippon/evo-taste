@@ -3,6 +3,7 @@
 import copy
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from evotaste import config
@@ -111,3 +112,122 @@ def test_adapter_files_roundtrip(tmp_path, base_model):
     assert (tmp_path / "a" / "adapter_config.json").exists()
     seqs = [Sequence([1, 2, 3], [4, 5], 1.0)]
     assert torch.equal(policy.logprobs(w, seqs)[0], policy.logprobs(type(w)(loaded), seqs)[0])
+
+
+def test_light_checkpoints_are_pruned_and_resumable(tmp_path, base_model):
+    """Light checkpoints every 3 steps, probe checkpoints at 0 and 5; a kill after step 7 resumes from step 6."""
+    policy = make_policy(base_model)
+    run = _fake_run(tmp_path, policy)
+    member = Member(run, Lineage("m0", "m0", 0, "plain", None, 1, status="active", step=0, probes=[{"step": 0}]))
+    member.weights = policy.new_member(seed=1, b_std=0.05)
+    member.write_checkpoint()
+    write_json(member.dir / "state.json", vars(member.lin))
+    snapshot = None
+    for t in range(8):
+        policy.update(member.weights, random_groups(seed=10 + t), lr=1e-3)
+        append_jsonl(member.dir / "history.jsonl", {"phase": "amp", "step": t})
+        write_jsonl_gz(member.dir / "rollouts" / f"step_{t:06d}.jsonl.gz", [{"step": t}])
+        member.lin.step = t + 1
+        if member.lin.step == 5:  # a probe step, as finish_probe does it
+            member.lin.probes.append({"step": 5})
+            member.write_checkpoint()
+            write_json(member.dir / "state.json", vars(member.lin))
+            member.prune_checkpoints()
+        elif member.lin.step % 3 == 0:
+            member.light_checkpoint()
+            snapshot = copy.deepcopy(member.weights)
+        names = sorted(p.name for p in (member.dir / "checkpoints").iterdir())
+        if member.lin.step == 5:
+            assert names == ["step_000000", "step_000005"]  # the light checkpoint at 3 is gone
+    assert sorted(p.name for p in (member.dir / "checkpoints").iterdir()) == ["step_000000", "step_000005",
+                                                                              "step_000006"]
+    assert [p.parent.name for p in (member.dir / "checkpoints").glob("*/optimizer.pt")] == ["step_000006"]
+    member.write_checkpoint()  # a kill between writing the step-8 checkpoint and committing the state
+    (member.dir / "checkpoints" / "step_000008").rename(member.dir / "checkpoints" / "step_000009")
+
+    resumed = Member(run, Lineage(**read_json_state(member.dir)))
+    resumed.restore()
+    assert resumed.lin.step == 6 and [p["step"] for p in resumed.lin.probes] == [0, 5]
+    assert [r["step"] for r in read_jsonl(resumed.dir / "history.jsonl")] == [0, 1, 2, 3, 4, 5]
+    assert sorted(p.name for p in (resumed.dir / "rollouts").iterdir()) == [f"step_{t:06d}.jsonl.gz" for t in range(6)]
+    assert sorted(p.name for p in (resumed.dir / "checkpoints").iterdir()) == ["step_000000", "step_000005",
+                                                                               "step_000006"]
+    seqs = random_groups(seed=99)
+    policy.update(resumed.weights, seqs, lr=1e-3)
+    policy.update(snapshot, seqs, lr=1e-3)
+    for name in snapshot.lora:
+        torch.testing.assert_close(resumed.weights.lora[name], snapshot.lora[name], rtol=0, atol=0)
+
+
+def read_json_state(d):
+    import json
+
+    return json.loads((d / "state.json").read_text())
+
+
+def test_oom_retry_bound(monkeypatch):
+    from evotaste import member as member_module
+
+    monkeypatch.setattr(member_module, "OOM_WAIT_S", 0)
+    monkeypatch.setattr(member_module, "gpu_processes", lambda: "")
+    released = []
+    policy = SimpleNamespace(release_memory=lambda: released.append(1))
+    calls = []
+
+    def flaky(failures):
+        def fn():
+            calls.append(1)
+            if len(calls) <= failures:
+                raise torch.OutOfMemoryError("CUDA out of memory. Tried to allocate 2.00 GiB")
+            return "done"
+        return fn
+
+    assert member_module.retry_on_oom(policy, "m0 step 3 update", flaky(3)) == "done"
+    assert len(calls) == 4 and len(released) == 3
+    calls.clear()
+    with pytest.raises(torch.OutOfMemoryError):
+        member_module.retry_on_oom(policy, "m0 step 3 update", flaky(100))
+    assert len(calls) == member_module.OOM_ATTEMPTS
+
+
+@pytest.mark.parametrize("where", ["after_backward", "inside_step"])
+def test_update_retried_after_oom_is_the_uninterrupted_update(base_model, monkeypatch, where):
+    """An OOM after the gradients were accumulated, or halfway through the optimizer step, leaves no trace."""
+    from evotaste import member as member_module
+
+    monkeypatch.setattr(member_module, "OOM_WAIT_S", 0)
+    monkeypatch.setattr(member_module, "gpu_processes", lambda: "")
+    policy = make_policy(base_model)
+    start = policy.new_member(seed=7, b_std=0.05)
+    policy.update(start, random_groups(seed=1), lr=1e-3)  # with optimizer state
+    seqs = random_groups(seed=2)
+    reference = copy.deepcopy(start)
+    policy.update(reference, seqs, lr=1e-3)
+
+    failed = []
+    if where == "after_backward":
+        real = policy._accumulate
+
+        def accumulate_then_fail(active):
+            out = real(active)
+            if not failed:
+                failed.append(1)
+                raise torch.OutOfMemoryError("CUDA out of memory")
+            return out
+        monkeypatch.setattr(policy, "_accumulate", accumulate_then_fail)
+    else:
+        real_step = torch.optim.AdamW.step
+
+        def step_then_fail(self, *a, **k):
+            out = real_step(self, *a, **k)  # parameters already changed
+            if not failed:
+                failed.append(1)
+                raise torch.OutOfMemoryError("CUDA out of memory")
+            return out
+        monkeypatch.setattr(torch.optim.AdamW, "step", step_then_fail)
+    member_module.retry_on_oom(policy, "m0 update", lambda: policy.update(start, seqs, lr=1e-3))
+    assert failed
+    for name in reference.lora:
+        torch.testing.assert_close(start.lora[name], reference.lora[name], rtol=0, atol=0)
+    for (_, a), (_, b) in zip(sorted(start.optimizer["state"].items()), sorted(reference.optimizer["state"].items())):
+        torch.testing.assert_close(a["exp_avg"], b["exp_avg"], rtol=0, atol=0)
