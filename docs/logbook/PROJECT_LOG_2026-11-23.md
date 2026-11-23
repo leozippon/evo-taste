@@ -41,6 +41,39 @@ Reading records showed members failing for format alone: `237.0` where the verif
 - Both single-model baselines reason better than the population mean, and the wide baseline better than every statistic of the population we have looked at, at three members' compute.
 - Longer answers go with better lenient accuracy across members (rank correlation 0.69) and with more format loss (0.49); no style feature predicts the strict score.
 
+## Blind vault 1
+
+Opened once, after the manifest was committed: base model, 36 members at step 120, long baseline at 120 / 240 / 480 / 720 steps, wide baseline at 60 steps; 200 instances per family × 2 samples on 18 families, 650 items per external source (all 249 of MATH-500's share). The ledger is committed. Full account: `docs/findings/main-run-1.md`.
+
+- **The harvested member did not hold up.** `procedure-a` scores 32.0 on the blind suite, 27th of 36, 1.3 points below the population mean (interval −1.9 to −0.6) and 3.6 below the long baseline at the same compute. The retained fraction of its selection lead is −0.27 (−0.42 to −0.12); for the top three, 0.00.
+- **Selection and blind scores are weakly related across members** (rank correlation 0.37, interval 0.03 to 0.68). With format forgiven on the selection side the correlation is 0.53; the format loss itself correlates 0.11. The blind families are not sensitive to notation (14 of 242,700 wrong answers rescued), which is why the harvested member's advantage vanished.
+- **Blind spread** is real (noise-corrected SD about 1.9 points), without a heavy tail, no larger for habit-seeded members than for seed-only controls (3.5 against 3.1 pp²), and unrelated to the seeded habit (intraclass correlation −0.23).
+- **Everyone transfers.** Blind procedural accuracy rises from 23.7 to 33.3 on average, GSM8K from 70.1 to 79.7, MATH-500 from 29.9 to 57.8, MMLU-Pro from 29.4 to 41.0. No blind family that the base model cannot solve was unlocked by any adapter.
+- **The long baseline gets worse on blind tasks as it trains**: 35.6, 35.0, 31.8 and 27.9 at 120, 240, 480 and 720 steps, while its train and selection scores rise until the collapse. The wide baseline scores 34.3 at three members' compute.
+- **Harvest against single-model training at equal compute.** The expected blind score of the member ranked first on selection among n random members is 33.3 (n = 1), 33.7 (2), 33.8 (3), 33.9 (4 and 6): half a point gained by selecting. Single runs with the same compute score 35.6, 35.0, 34.3, 31.8 and 27.9; one run varies by about two points from seed to seed, so the first three are not distinguishable from the harvest, and the last two are the long run's decline and collapse.
+- **After the fact**: ranking by format-forgiven selection accuracy would have picked `plain-2`, 1.9 points above the blind mean; answer length at step 120 correlates 0.39 with the blind score and 0.60 with the external benchmarks. Neither was specified in advance.
+
+## Verdict and reading
+
+Divergence supported, consequence not. Of the four hypotheses only the first holds, and in a weaker form than intended: lineages become individually recognisable, but by presentation, and seeded biases neither persist (one habit of twelve excepted) nor spread members further than seed noise. The shared reward decides everything it has a say in; what is left to drift is what the reward ignores, and in this environment that is notation, layout and to some extent answer length. The one drifting trait with large consequences, answer format, matters only where a verifier is strict about it, so selecting on it buys nothing elsewhere.
+
+## Follow-up started
+
+- `main1-tp-rep`: two replications of the long baseline with new seeds, 480 steps each, forked from `main1-tp` so that seeding pools and probes are shared. Question: is the long run's decline on blind tasks from step 240, and its instability beyond step 480, typical or one unlucky seed. They will be evaluated on selection, train and the already opened vault 1, which is legitimate here because nothing is selected.
+- The wide baseline was resumed from step 68 toward its planned 120 steps, to complete the comparison at six members' compute.
+- A fix made this morning had made probe-set construction depend on machine load (gold checks could time out and trigger a redraw). It was caught by the probe-set guard when the replication workers started, and corrected. All probe and evaluation sets of `main1-tp` were verified against a deterministic rebuild; no data was affected.
+- The results page first went to `docs/results/`, a directory name excluded from sync and git; it lives in `docs/findings/`.
+
+## Proposed next round
+
+The second blind vault stays sealed for a redesigned experiment. What the first round suggests that design must change:
+
+1. **An environment with real strategic choice.** Tasks that admit several substantively different solution strategies with similar training reward and different behaviour out of distribution, so that what drifts is a strategy rather than notation. The derive-versus-enumerate tasks of *Not All Reasoning Generalizes* are the template.
+2. **A selection suite that cannot be won on format.** Tolerant verifiers, or selection on format-forgiven accuracy, with the blind suite scored the same way.
+3. **Protection of what training erodes.** Format compliance fell by ten points in every trained model; a small share of format-checked prompts in the training mix, or replay of the base model's compliant answers on families where compliance drops, is the targeted protection the protocol left unbuilt.
+4. **A direct test of heritability before any harvest.** Clone members that rank high and low, continue each clone with fresh sampling noise, and measure whether the parents' difference survives. In this run a member's standing at step 60 predicts its standing at step 120 only weakly, which already suggests little would survive.
+
 ## Open
 
-- Blind vault 1 is being evaluated (all 36 members, both baselines, base). The pre-registered comparisons follow, under both strict and lenient scoring.
+- Replication results and the completed wide baseline.
+- `origin` still does not exist; nothing has been pushed.
