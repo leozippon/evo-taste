@@ -1,6 +1,6 @@
 """Final evaluation of adapters (or the base model) on a suite, the harvest manifest, and the blind guard.
 
-  python -m evotaste.evaluate run runs/<name> --suite selection --adapters base,m00,m01 --per-family 50
+  python -m evotaste.evaluate run runs/<name> --suite selection --adapters base,m00,m01 --per-family 50 [--per-source 500]
   python -m evotaste.evaluate harvest runs/<name> --tag n50x1
 
 Suites: train (fresh train-family instances), selection (selection families + foundation items), blind1, blind2.
@@ -45,7 +45,7 @@ def _git(repo: Path, *args) -> subprocess.CompletedProcess:
 
 
 def blind_guard(vault: str, run_name: str, adapters: dict[str, Path | None], per_family: int, samples: int,
-                repo: Path = Path(".")) -> BlindReceipt:
+                repo: Path = Path("."), per_source: int | None = None) -> BlindReceipt:
     """Refuse unless every adapter is in a committed, unmodified harvest manifest; then append to the ledger.
 
     `adapters` maps labels to adapter directories (None = base model, allowed without a manifest).
@@ -71,7 +71,8 @@ def blind_guard(vault: str, run_name: str, adapters: dict[str, Path | None], per
     head = _git(repo, "rev-parse", "HEAD").stdout.strip()
     dirty = bool(_git(repo, "status", "--porcelain", "--untracked-files=no").stdout.strip())
     line = (f"| {now()} | {vault} | {head}{'-dirty' if dirty else ''} | {manifest_hash} | "
-            f"{', '.join(sorted(adapters))} | {per_family} x {samples} | run {run_name} |\n")
+            f"{', '.join(sorted(adapters))} | {per_family} x {samples} ({per_source or per_family} per external source) "
+            f"| run {run_name} |\n")
     ledger = repo / LEDGER
     ledger.parent.mkdir(parents=True, exist_ok=True)
     if not ledger.exists():
@@ -94,15 +95,32 @@ def resolve_adapter(run: Run, spec: str) -> Path | None:
     return path
 
 
-def suite_tasks(run: Run, suite: str, per_family: int, receipt: BlindReceipt | None):
+def suite_tasks(run: Run, suite: str, per_family: int, receipt: BlindReceipt | None, per_source: int | None = None):
+    """Instances of a suite: `per_family` per procedural family, `per_source` (default `per_family`; at most the
+    whole part) per external source."""
+    per_source = per_family if per_source is None else per_source
     if suite == "train":
         return fixed_tasks(run.suites.train, "eval", per_family)
     if suite == "selection":
         return fixed_tasks(run.suites.selection, "eval", per_family) + [
-            t for s in run.suites.foundation for t in external.items(s, "foundation")[-per_family:]]
+            t for s in run.suites.foundation for t in external.items(s, "foundation")[-per_source:]]
     families, sources = blind_suite(run.cfg.suites, suite, receipt)
     return fixed_tasks(families, "eval", per_family) + [
-        t for s in sources for t in external.items(s, suite, receipt)[:per_family]]
+        t for s in sources for t in external.items(s, suite, receipt)[:per_source]]
+
+
+def eval_params(suite: str, per_family: int, samples: int, per_source: int | None) -> tuple[dict, str]:
+    """params.json of an evaluation and its default tag; the tag names per_source only when it differs."""
+    per_source = per_family if per_source is None else per_source
+    if min(per_family, samples, per_source) < 1:
+        raise SystemExit("--per-family, --samples and --per-source must be at least 1")
+    tag = f"n{per_family}x{samples}" + (f"s{per_source}" if per_source != per_family else "")
+    return {"suite": suite, "per_family": per_family, "samples": samples, "per_source": per_source}, tag
+
+
+def same_params(old: dict, new: dict) -> bool:
+    """params.json written before per_source existed meant per_source == per_family."""
+    return {"per_source": old.get("per_family"), **old} == new
 
 
 class IncompleteEvaluation(Exception):
@@ -148,20 +166,21 @@ def read_records(out: Path) -> list[dict]:
 
 
 def evaluate(run_dir: Path, suite: str, adapter_specs: list[str], per_family: int, samples: int, shard: str,
-             tag: str | None, attach: str | None) -> None:
+             tag: str | None, attach: str | None, per_source: int | None = None) -> None:
     run = Run(run_dir)
     setup_logging(run.cfg.name, f"eval-{suite}")
     if suite not in SUITES:
         raise SystemExit(f"unknown suite {suite!r}; choose from {SUITES}")
     adapters = {spec: resolve_adapter(run, spec) for spec in adapter_specs}
-    receipt = blind_guard(suite, run.cfg.name, adapters, per_family, samples) if suite in VAULTS else None
-    tasks = suite_tasks(run, suite, per_family, receipt)
+    params, default_tag = eval_params(suite, per_family, samples, per_source)
+    receipt = (blind_guard(suite, run.cfg.name, adapters, per_family, samples, per_source=params["per_source"])
+               if suite in VAULTS else None)
+    tasks = suite_tasks(run, suite, per_family, receipt, params["per_source"])
     check_gold(tasks)
     index, count = (int(x) for x in shard.split("/"))
     jobs = [(label, t) for label in adapters for t in tasks][index::count]
-    out = run.dir / "eval" / suite / (tag or f"n{per_family}x{samples}")
-    params = {"suite": suite, "per_family": per_family, "samples": samples}
-    if (out / "params.json").exists() and read_json(out / "params.json") != params:
+    out = run.dir / "eval" / suite / (tag or default_tag)
+    if (out / "params.json").exists() and not same_params(read_json(out / "params.json"), params):
         raise SystemExit(f"{out} holds an evaluation with other parameters; choose another --tag")
     write_json(out / "params.json", params)
     log.info("%s: %d tasks x %d adapters, shard %s: %d jobs", suite, len(tasks), len(adapters), shard, len(jobs))
@@ -206,7 +225,8 @@ def harvest(run_dir: Path, tag: str) -> None:
     out = run.dir / "eval" / "selection" / tag
     params = read_json(out / "params.json")
     # Recomputed from the records with the same checks as the summary: one adapter per label, complete grid.
-    summary = summarize(read_records(out), suite_tasks(run, "selection", params["per_family"], None), params["samples"])
+    tasks = suite_tasks(run, "selection", params["per_family"], None, params.get("per_source"))
+    summary = summarize(read_records(out), tasks, params["samples"])
     ranking, baselines = [], []
     for path in sorted((run.dir / "members").glob("*/state.json")):
         lin = load_lineage(run, path.parent.name)
@@ -237,10 +257,13 @@ def main(argv=None) -> None:
     e.add_argument("run_dir", type=Path)
     e.add_argument("--suite", required=True, choices=SUITES)
     e.add_argument("--adapters", required=True, help="comma-separated: base, <lineage>, <lineage>@<step>")
-    e.add_argument("--per-family", type=int, required=True)
+    e.add_argument("--per-family", type=int, required=True, help="instances per procedural family")
+    e.add_argument("--per-source", type=int, help="items per external source (default --per-family; at most the "
+                                                   "whole part)")
     e.add_argument("--samples", type=int, default=1)
     e.add_argument("--shard", default="0/1", help="i/n: this process evaluates every n-th job from i")
-    e.add_argument("--tag", help="output subdirectory (default n<per-family>x<samples>)")
+    e.add_argument("--tag", help="output subdirectory (default n<per-family>x<samples>, plus s<per-source> if set "
+                                 "to another value)")
     e.add_argument("--attach", help="URL of a running vLLM server of the run's model (development)")
     h = sub.add_parser("harvest")
     h.add_argument("run_dir", type=Path)
@@ -248,7 +271,7 @@ def main(argv=None) -> None:
     args = ap.parse_args(argv)
     if args.cmd == "run":
         evaluate(args.run_dir, args.suite, [a for a in args.adapters.split(",") if a], args.per_family, args.samples,
-                 args.shard, args.tag, args.attach)
+                 args.shard, args.tag, args.attach, args.per_source)
     else:
         harvest(args.run_dir, args.tag)
 
