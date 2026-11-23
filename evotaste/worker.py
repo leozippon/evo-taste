@@ -77,6 +77,29 @@ def logged(command, *args) -> None:
         raise
 
 
+def server_options(parser) -> None:
+    """Launch-time overrides of the run's server settings; they change memory footprint and speed, never results."""
+    parser.add_argument("--kv-cache", help="vLLM KV budget for this process, e.g. 12G (default: server.kv_cache)")
+    parser.add_argument("--max-loras", type=int, help="adapters per vLLM batch (default: server.max_loras)")
+    parser.add_argument("--gpu-memory-utilization", type=float,
+                        help="vLLM's startup free-memory check (default: server.gpu_memory_utilization)")
+
+
+def server_overrides(args) -> dict:
+    overrides = {k: v for k, v in (("kv_cache", args.kv_cache), ("max_loras", args.max_loras),
+                                   ("gpu_memory_utilization", args.gpu_memory_utilization)) if v is not None}
+    if overrides.get("max_loras", 1) < 1 or not 0 < overrides.get("gpu_memory_utilization", 0.5) <= 1:
+        raise SystemExit("--max-loras must be >= 1 and --gpu-memory-utilization in (0, 1]")
+    return overrides
+
+
+def apply_server(run: Run, overrides: dict | None) -> None:
+    """Use launch-time server settings for this process only; the frozen run config is not changed."""
+    run.cfg = dataclasses.replace(run.cfg, server=dataclasses.replace(run.cfg.server, **(overrides or {})))
+    log.info("server settings (footprint and speed only, never results): %s%s", dataclasses.asdict(run.cfg.server),
+             f"; set at launch: {sorted(overrides)}" if overrides else "")
+
+
 def revision() -> str:
     head = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
     dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"], capture_output=True,
@@ -159,9 +182,10 @@ def base_probe(run: Run, sampler: Sampler) -> None:
     log.info("base probe: %s", {k: round(v, 3) for k, v in summary["accuracy"].items()})
 
 
-def prepare(config_path: Path, attach: str | None) -> None:
+def prepare(config_path: Path, attach: str | None, server: dict | None = None) -> None:
     run_dir = freeze(config_path)
     run = Run(run_dir)
+    apply_server(run, server)
     pool_tasks = run.streams.seed_pool(run.cfg.seeding.pool_prompts)
     check_gold([t for _, t in run.probe_tasks] + pool_tasks)
     todo = [t for t in teachers(run.cfg) if not (run.dir / "seeding" / f"{t}.jsonl.gz").exists()]
@@ -376,9 +400,11 @@ def lock_slots(run: Run, slots: list[str]) -> list:
 WORKER_CPU_THREADS = 4
 
 
-def run_worker(run_dir: Path, slots: list[str], attach: str | None, checkpoint_every: int | None = None) -> None:
+def run_worker(run_dir: Path, slots: list[str], attach: str | None, checkpoint_every: int | None = None,
+               server: dict | None = None) -> None:
     torch.set_num_threads(WORKER_CPU_THREADS)
     run = Run(run_dir)
+    apply_server(run, server)
     prepared = run.dir / "prepared.json"
     if not prepared.exists() or set(teachers(run.cfg)) - set(read_json(prepared)["teachers"]):
         raise SystemExit(f"{run.dir} is not prepared; run `python -m evotaste.worker prepare` first")
@@ -414,6 +440,7 @@ def main(argv=None) -> None:
     p = sub.add_parser("prepare", help="freeze the config and create seeding pools and base-model probe answers")
     p.add_argument("config", type=Path)
     p.add_argument("--attach", help="URL of a running vLLM server of the run's model (development)")
+    server_options(p)
     f = sub.add_parser("fork", help="a prepared run that reuses another run's seeding and starts at step 0")
     f.add_argument("source", type=Path)
     f.add_argument("config", type=Path)
@@ -424,10 +451,11 @@ def main(argv=None) -> None:
     r.add_argument("--attach", help="URL of a running vLLM server of the run's model (development)")
     r.add_argument("--checkpoint-every", type=int, help="also write a light checkpoint (no probe) every N steps "
                                                          "(default: probes.every)")
+    server_options(r)
     args = ap.parse_args(argv)
     if args.cmd == "prepare":
         setup_logging(yaml.safe_load(args.config.read_text())["name"], "prepare")
-        logged(prepare, args.config, args.attach)
+        logged(prepare, args.config, args.attach, server_overrides(args))
     elif args.cmd == "fork" and args.dry_run:
         fork(args.source, args.config, True)
     elif args.cmd == "fork":
@@ -438,7 +466,7 @@ def main(argv=None) -> None:
         setup_logging(args.run_dir.name, "worker-" + "-".join(slots))
         if args.checkpoint_every is not None and args.checkpoint_every < 1:
             raise SystemExit("--checkpoint-every must be at least 1")
-        logged(run_worker, args.run_dir, slots, args.attach, args.checkpoint_every)
+        logged(run_worker, args.run_dir, slots, args.attach, args.checkpoint_every, server_overrides(args))
 
 
 if __name__ == "__main__":

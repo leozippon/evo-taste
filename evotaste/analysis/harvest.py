@@ -12,6 +12,7 @@ defined in docs/dev/ANALYSIS_NOTES.md.
 from __future__ import annotations
 
 import argparse
+import collections
 import json
 from pathlib import Path
 
@@ -155,7 +156,11 @@ def one_way(values: np.ndarray, labels: np.ndarray, rng) -> dict:
 # -- analysis -----------------------------------------------------------------------------------------------------
 
 def adapter_roles(adapters, specs: dict[str, dict]) -> dict[str, dict]:
-    """label -> {role: base | member | baseline | checkpoint, arm, bias}; lineage ids map to their slot's spec."""
+    """label -> {role: base | member | baseline | checkpoint, arm, bias}; lineage ids map to their slot's spec.
+    A label <lineage>@<step> takes its slot's role when it is the only label of that lineage (a harvest at a common
+    step evaluates every member that way) and is a checkpoint otherwise; every label of a baseline is a baseline
+    (the long baseline is compared at several budgets)."""
+    labels = collections.Counter(a.partition("@")[0] for a in adapters if a != "base")
     out = {}
     for a in adapters:
         if a == "base":
@@ -165,8 +170,8 @@ def adapter_roles(adapters, specs: dict[str, dict]) -> dict[str, dict]:
         spec = specs.get(lineage.split("~")[0])
         if spec is None:
             raise ValueError(f"adapter {a!r} is neither base nor a lineage of a configured slot")
-        out[a] = {"role": "checkpoint" if step else spec["role"], "arm": spec["arm"],
-                  "bias": spec["scaffold"] or spec["arm"]}
+        role = spec["role"] if not step or spec["role"] == "baseline" or labels[lineage] == 1 else "checkpoint"
+        out[a] = {"role": role, "arm": spec["arm"], "bias": spec["scaffold"] or spec["arm"]}
     return out
 
 

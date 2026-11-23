@@ -25,7 +25,8 @@ from evotaste.records import now, read_json, read_jsonl_gz, write_json, write_js
 from evotaste.sampler import Request, Sampler
 from evotaste.tasks import BlindReceipt, blind_suite, check_gold, fixed_tasks
 from evotaste.trainer import adapter_sha256
-from evotaste.worker import logged, revision, setup_logging, start_server
+from evotaste.worker import (apply_server, logged, revision, server_options, server_overrides, setup_logging,
+                             start_server)
 
 log = logging.getLogger("evotaste.evaluate")
 SUITES = ("train", "selection", "blind1", "blind2")
@@ -166,8 +167,9 @@ def read_records(out: Path) -> list[dict]:
 
 
 def evaluate(run_dir: Path, suite: str, adapter_specs: list[str], per_family: int, samples: int, shard: str,
-             tag: str | None, attach: str | None, per_source: int | None = None) -> None:
+             tag: str | None, attach: str | None, per_source: int | None = None, server: dict | None = None) -> None:
     run = Run(run_dir)
+    apply_server(run, server)
     if suite not in SUITES:
         raise SystemExit(f"unknown suite {suite!r}; choose from {SUITES}")
     adapters = {spec: resolve_adapter(run, spec) for spec in adapter_specs}
@@ -217,15 +219,79 @@ def evaluate(run_dir: Path, suite: str, adapter_specs: list[str], per_family: in
     log.info("summary written to %s", out / "summary.json")
 
 
-def harvest(run_dir: Path, tag: str) -> None:
-    """Rank finished population lineages by selection macro accuracy of their final adapters and write the harvest
-    manifest; finished baselines (role: baseline) are listed with their hashes but never ranked."""
+def slot_lineage(run: Run, slot: str):
+    """The slot's current lineage, following replacements (read only): None if the slot never started; a culled
+    lineage without replacement if the slot is exhausted."""
+    lin = load_lineage(run, slot)
+    while lin is not None and lin.status == "culled" and lin.replaced_by:
+        lin = load_lineage(run, lin.replaced_by)
+    return lin
+
+
+def step_harvest(run: Run, summary: dict, step: int) -> tuple[list, list, list]:
+    """(ranking entries, baseline entries, problems) for a harvest of every population slot's current lineage at
+    `step`, evaluated as `<lineage>@<step>`; baselines are listed at every step at which they were evaluated."""
+    ranking, baselines, problems = [], [], []
+    for spec in run.cfg.members:
+        lin = slot_lineage(run, spec.id)
+        if spec.role == "baseline":
+            for label in sorted(summary):
+                lineage_id, _, at = label.partition("@")
+                if lin is None or lineage_id != lin.id:
+                    continue
+                path = resolve_adapter(run, label)
+                if summary[label]["adapter_sha256"] != adapter_sha256(path):
+                    problems.append(f"{label}: the evaluated adapter differs from {path}")
+                    continue
+                baselines.append({"lineage": lin.id, "slot": spec.id, "arm": lin.arm, "scaffold": lin.scaffold,
+                                  "step": int(at) if at else lin.step, "label": label,
+                                  "selection_macro": summary[label]["macro"], "adapter": str(path),
+                                  "sha256": summary[label]["adapter_sha256"]})
+            continue
+        label = f"{lin.id}@{step}" if lin is not None else None
+        path = lin and run.dir / "members" / lin.id / "checkpoints" / f"step_{step:06d}"
+        if lin is None or lin.status == "new":
+            problem = "has no lineage with a checkpoint"
+        elif lin.status == "culled":
+            problem = f"is exhausted ({lin.id} culled: {lin.cull_reason})"
+        elif not (path / "adapter_model.safetensors").exists():
+            problem = f"{lin.id} has no checkpoint at step {step} (it is at step {lin.step})"
+        elif label not in summary:
+            problem = f"{label} is not evaluated under this tag"
+        elif summary[label]["adapter_sha256"] != adapter_sha256(path):
+            problem = f"the evaluated {label} differs from {path}"
+        else:
+            ranking.append({"lineage": lin.id, "slot": spec.id, "arm": lin.arm, "scaffold": lin.scaffold,
+                            "step": step, "label": label, "selection_macro": summary[label]["macro"],
+                            "adapter": str(path), "sha256": summary[label]["adapter_sha256"]})
+            continue
+        problems.append(f"{spec.id}: {problem}")
+    return ranking, baselines, problems
+
+
+def harvest(run_dir: Path, tag: str, step: int | None = None) -> None:
+    """Rank population lineages by the selection macro accuracy of their adapters and write the harvest manifest:
+    the final adapters of finished lineages, or with `step` every population slot's step-`step` checkpoint
+    (evaluated as `<lineage>@<step>`). Baselines (role: baseline) are listed with their hashes but never ranked."""
     run = Run(run_dir)
     out = run.dir / "eval" / "selection" / tag
     params = read_json(out / "params.json")
     # Recomputed from the records with the same checks as the summary: one adapter per label, complete grid.
     tasks = suite_tasks(run, "selection", params["per_family"], None, params.get("per_source"))
     summary = summarize(read_records(out), tasks, params["samples"])
+    if step is not None:
+        ranking, baselines, problems = step_harvest(run, summary, step)
+        if problems:
+            raise SystemExit(f"cannot harvest at step {step}:\n  " + "\n  ".join(problems))
+        ranking.sort(key=lambda e: -e["selection_macro"])
+        for i, e in enumerate(ranking):
+            e["rank"] = i + 1
+        manifest = {"run": run.cfg.name, "time": now(), "revision": revision(), "tag": tag, "step": step,
+                    "outlier": ranking[0]["label"], "top3": [e["label"] for e in ranking[:3]], "ranking": ranking,
+                    "baselines": baselines}
+        write_json(manifest_path(run.cfg.name), manifest)
+        print(f"wrote {manifest_path(run.cfg.name)} (step {step}); commit it before any blind evaluation")
+        return
     ranking, baselines = [], []
     for path in sorted((run.dir / "members").glob("*/state.json")):
         lin = load_lineage(run, path.parent.name)
@@ -264,16 +330,19 @@ def main(argv=None) -> None:
     e.add_argument("--tag", help="output subdirectory (default n<per-family>x<samples>, plus s<per-source> if set "
                                  "to another value)")
     e.add_argument("--attach", help="URL of a running vLLM server of the run's model (development)")
+    server_options(e)
     h = sub.add_parser("harvest")
     h.add_argument("run_dir", type=Path)
     h.add_argument("--tag", required=True)
+    h.add_argument("--step", type=int, help="harvest every population slot's checkpoint at this step, evaluated as "
+                                            "<lineage>@<step> (default: final adapters of finished lineages)")
     args = ap.parse_args(argv)
     if args.cmd == "run":
         setup_logging(args.run_dir.name, f"eval-{args.suite}")
         logged(evaluate, args.run_dir, args.suite, [a for a in args.adapters.split(",") if a], args.per_family,
-               args.samples, args.shard, args.tag, args.attach, args.per_source)
+               args.samples, args.shard, args.tag, args.attach, args.per_source, server_overrides(args))
     else:
-        harvest(args.run_dir, args.tag)
+        harvest(args.run_dir, args.tag, args.step)
 
 
 if __name__ == "__main__":
