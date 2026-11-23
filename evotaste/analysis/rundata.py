@@ -49,6 +49,11 @@ def member_specs(run_dir: str | Path) -> tuple[str, dict[str, dict]]:
     return data["name"], specs
 
 
+def control_scaffolds(run_dir: str | Path) -> set[str]:
+    """Scaffolds of the `control` section of the run's frozen scaffolds file (e.g. cot: seed-only controls)."""
+    return set(yaml.safe_load((Path(run_dir) / "scaffolds.yaml").read_text())["control"])
+
+
 def held_locks() -> set[tuple[int, int, int]]:
     """(device major, device minor, inode) of every file currently locked on this host."""
     held = set()
@@ -102,6 +107,11 @@ class Lineage:
 
     def probe_responses(self, step: int) -> list[dict]:
         return read_jsonl_gz(self.dir / "probe_responses" / f"step_{step:06d}.jsonl.gz")
+
+    def probe_summaries(self) -> dict[int, dict]:
+        """Committed lines of probes.jsonl by step (the same rule as probe_steps)."""
+        steps = set(self.probe_steps())
+        return {r["step"]: r for r in read_jsonl(self.dir / "probes.jsonl") if r["step"] in steps}
 
 
 class RunData:
@@ -165,6 +175,9 @@ class Evaluation:
     reward: np.ndarray  # adapter x instance x sample, 0 or 1
     tokens: np.ndarray  # completion tokens, same shape
     dropped: tuple[str, ...]  # uids whose question text differs between adapters, left out
+    extracted: np.ndarray | None = None  # last answer span (object, None when unparsed), same shape
+    truncated: np.ndarray | None = None  # bool, same shape
+    gold: np.ndarray | None = None  # gold answer text of each instance (object)
 
 
 def load_evaluation(run_dir: str | Path, suite: str, tag: str, blind: bool = False) -> Evaluation:
@@ -197,17 +210,23 @@ def load_evaluation(run_dir: str | Path, suite: str, tag: str, blind: bool = Fal
     s = params["samples"]
     reward = np.full((len(adapters), len(uids), s), np.nan)
     tokens = np.full_like(reward, np.nan)
+    extracted = np.full(reward.shape, None, dtype=object)
+    truncated = np.zeros(reward.shape, dtype=bool)
+    gold = {}
     for r in records:
         if r["uid"] in u_index:
-            reward[a_index[r["adapter"]], u_index[r["uid"]], r["sample"]] = r["reward"]
-            tokens[a_index[r["adapter"]], u_index[r["uid"]], r["sample"]] = r["completion_tokens"]
+            k = a_index[r["adapter"]], u_index[r["uid"]], r["sample"]
+            reward[k], tokens[k], extracted[k], truncated[k] = (r["reward"], r["completion_tokens"], r["extracted"],
+                                                                r["truncated"])
+            gold[r["uid"]] = r["answer"]
     missing = np.isnan(reward).any(axis=(1, 2))
     if missing.any():
         raise ValueError(f"{out}: incomplete evaluation; adapters without every instance x {s} samples: "
                          f"{[a for a, m in zip(adapters, missing) if m]}")
     ev = Evaluation(suite, tag, params["per_family"], s, tuple(adapters), tuple(uids),
                     np.array([family[u] for u in uids]), np.array([bool(PROCEDURAL_UID.match(u)) for u in uids]),
-                    reward, tokens, tuple(dropped))
+                    reward, tokens, tuple(dropped), extracted, truncated,
+                    np.array([gold[u] for u in uids], dtype=object))
     if not dropped:  # the procedural/external split must reproduce the engine's macro accuracy
         engine = read_json(out / "summary.json")["adapters"]
         fams = sorted(set(ev.families[ev.procedural]))

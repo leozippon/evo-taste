@@ -21,7 +21,8 @@ import pandas as pd
 from scipy import stats
 
 from evotaste.analysis.report import render
-from evotaste.analysis.rundata import VAULTS, Evaluation, load_evaluation, manifest_path, member_specs
+from evotaste.analysis.rundata import (VAULTS, Evaluation, RunData, control_scaffolds, load_evaluation,
+                                      manifest_path, member_specs)
 from evotaste.records import read_json
 
 B = 2000  # bootstrap draws
@@ -185,6 +186,84 @@ def pick_outlier(name: str, sel: Suite, members: list[str]) -> tuple[str, list[s
     return ranked[0], ranked[:3], "PROVISIONAL: no harvest manifest; top member by selection macro on this tag"
 
 
+def median_member(sel: Suite, members: list[str]) -> str:
+    """The population member at position floor((n - 1) / 2) of the ascending selection macros."""
+    return sorted(members, key=lambda a: sel.macro[sel.pos[a]])[(len(members) - 1) // 2]
+
+
+def compare_outlier(suites: dict[str, Suite], roles: dict, outlier: str, median: str) -> pd.DataFrame:
+    """Outlier macro minus that of base, each baseline, the median member and the population mean, with paired
+    bootstrap intervals, on every suite where the outlier was evaluated."""
+    rows = []
+    for k, s in suites.items():
+        if outlier not in s.pos:
+            continue
+        mem = [s.pos[a] for a in s.ev.adapters if roles[a]["role"] == "member"]
+        comparators = ([("base", "base")] + [(a, "baseline") for a in s.ev.adapters if roles[a]["role"] == "baseline"]
+                       + [(median, "median member"), ("mean", "population mean")])
+        for comp, kind in comparators:
+            if comp == outlier:  # the median member can be the outlier itself
+                continue
+            if comp == "mean":
+                m, mb = s.macro[mem].mean(), s.macro_boot[mem].mean(0)
+            elif comp in s.pos:
+                m, mb = s.macro[s.pos[comp]], s.macro_boot[s.pos[comp]]
+            else:
+                continue
+            d = s.macro_boot[s.pos[outlier]] - mb
+            rows.append({"suite": k, "outlier": outlier, "comparator": comp, "kind": kind,
+                         "diff": s.macro[s.pos[outlier]] - m, **dict(zip(("lo", "hi"), ci(d)))})
+    return pd.DataFrame(rows)
+
+
+def seeding_group(role: dict, controls: set[str]) -> str:
+    """Seeding bias class of a member: its control scaffold (e.g. cot, the seed-only control), `style` for any
+    other scaffold, or its arm (plain, perturb)."""
+    if role["arm"] != "scaffold":
+        return role["arm"]
+    return role["bias"] if role["bias"] in controls else "style"
+
+
+def ranking_emergence(run_dir: Path, sel: Suite, members: list[str], rng) -> dict:
+    """Spearman correlation across members between the in-loop selection-probe accuracy at each probe step and the
+    final selection macro, with member-bootstrap intervals, and the correlation expected at the final step from
+    probe noise alone (final macro plus normal noise of each member's probe-bootstrap SD, 2000 simulations)."""
+    lineages = {lin.id: lin for lin in RunData(run_dir).lineages}
+    final = {a: sel.macro[sel.pos[a]] for a in members}
+    probes = {a: lineages[a.partition("@")[0]].probe_summaries() for a in members}
+    rows = []
+    for step in sorted({t for p in probes.values() for t in p}):
+        have = [a for a in members if step in probes[a]]
+        if len(have) < 3:
+            continue
+        x = np.array([probes[a][step]["accuracy"]["selection"] for a in have])
+        y = np.array([final[a] for a in have])
+        idx = rng.integers(0, len(have), (B, len(have)))
+        lo, hi = ci(rowcorr(stats.rankdata(x[idx], axis=1), stats.rankdata(y[idx], axis=1)))
+        rows.append({"step": step, "members": len(have), "spearman": float(stats.spearmanr(x, y)[0]), "lo": lo,
+                     "hi": hi})
+    out = {"steps": rows}
+    last = {a: a.partition("@")[2] for a in members}
+    if rows and all(s.isdigit() for s in last.values()):
+        sd = np.array([probe_noise_sd(lineages[a.partition("@")[0]], int(last[a]), rng) for a in members])
+        y = np.array([final[a] for a in members])
+        sims = y + rng.standard_normal((2000, len(members))) * sd
+        r = rowcorr(stats.rankdata(sims, axis=1), np.tile(stats.rankdata(y), (2000, 1)))
+        out["expected_from_probe_noise"] = {"mean": float(r.mean()), **dict(zip(("lo", "hi"), ci(r))),
+                                            "probe_noise_sd": float(np.sqrt((sd ** 2).mean()))}
+    return out
+
+
+def probe_noise_sd(lin, step: int, rng) -> float:
+    """SD of a lineage's selection-probe macro at a step over instance resamples within family."""
+    recs = [r for r in lin.probe_responses(step) if r["suite"] == "selection"]
+    fams: dict[str, list[float]] = {}
+    for r in recs:
+        fams.setdefault(r["family"], []).append(r["reward"])
+    draws = np.mean([np.array(v)[rng.integers(0, len(v), (B, len(v)))].mean(1) for v in fams.values()], axis=0)
+    return float(draws.std(ddof=1))
+
+
 def analyse(run_dir: Path, tag: str, train_tag: str | None, blind: str | None, blind_tag: str | None) -> dict:
     name, specs = member_specs(run_dir)
     suites = {"selection": Suite(load_evaluation(run_dir, "selection", tag), seed=1)}
@@ -232,30 +311,31 @@ def analyse(run_dir: Path, tag: str, train_tag: str | None, blind: str | None, b
                                  **compare_excess(xa, s.noise_var(groups[ga]), xb, s.noise_var(groups[gb]), rng)})
     res["spread"], res["arms"] = pd.DataFrame(rows), pd.DataFrame(arm_rows)
 
+    # Spread by seeding bias class (control scaffold, style scaffolds, plain, perturb): do induced biases spread
+    # more than seed noise? Excess variance of the style scaffolds compared with each control scaffold.
+    controls = control_scaffolds(run_dir)
+    rows, cmp_rows = [], []
+    for k in ["selection"] + [v for v in VAULTS if v in suites]:
+        s = suites[k]
+        mem = [a for a in s.ev.adapters if roles[a]["role"] == "member"]
+        groups: dict[str, list[str]] = {}
+        for a in mem:
+            groups.setdefault(seeding_group(roles[a], controls), []).append(a)
+        for g, labels in groups.items():
+            rows.append({"suite": k, "group": g, **spread(s.macro[[s.pos[a] for a in labels]], s.noise_var(labels), rng)})
+        for c in sorted(controls & set(groups)):
+            if len(groups.get("style", [])) >= 2 and len(groups[c]) >= 2:
+                xa, xb = (s.macro[[s.pos[a] for a in groups[g]]] for g in ("style", c))
+                cmp_rows.append({"suite": k, "arm_a": "style", "arm_b": c, "n_a": len(xa), "n_b": len(xb),
+                                 **compare_excess(xa, s.noise_var(groups["style"]), xb, s.noise_var(groups[c]), rng)})
+    res["bias_spread"], res["bias_compare"] = pd.DataFrame(rows), pd.DataFrame(cmp_rows)
+
+    # When the ranking emerges: in-loop selection probes against the final selection macro.
+    res["emergence"] = ranking_emergence(run_dir, sel, members, rng)
+
     # (c) the outlier against base, baselines, the median member and the population mean, on every suite.
-    by_sel = sorted(members, key=lambda a: sel.macro[sel.pos[a]])
-    median_member = by_sel[(len(by_sel) - 1) // 2]
-    comparators = ([("base", "base")] + [(a, "baseline") for a in sel.ev.adapters if roles[a]["role"] == "baseline"]
-                   + [(median_member, "median member"), ("mean", "population mean")])
-    rows = []
-    for k, s in suites.items():
-        if outlier not in s.pos:
-            continue
-        mem = [s.pos[a] for a in s.ev.adapters if roles[a]["role"] == "member"]
-        for comp, kind in comparators:
-            if comp == outlier:  # the median member can be the outlier itself
-                continue
-            if comp == "mean":
-                m, mb = s.macro[mem].mean(), s.macro_boot[mem].mean(0)
-            elif comp in s.pos:
-                m, mb = s.macro[s.pos[comp]], s.macro_boot[s.pos[comp]]
-            else:
-                continue
-            d = s.macro_boot[s.pos[outlier]] - mb
-            rows.append({"suite": k, "outlier": outlier, "comparator": comp, "kind": kind,
-                         "diff": s.macro[s.pos[outlier]] - m, **dict(zip(("lo", "hi"), ci(d)))})
-    res["comparisons"] = pd.DataFrame(rows)
-    res["median_member"] = median_member
+    res["median_member"] = median_member(sel, members)
+    res["comparisons"] = compare_outlier(suites, roles, outlier, res["median_member"])
 
     # (d) winner's curse on the blind vault.
     if blind:
@@ -332,6 +412,16 @@ def pci(v, lo, hi) -> str:
     return f"{100 * v:.1f} [{100 * lo:.0f},{100 * hi:.0f}]"
 
 
+def spread_table(df: pd.DataFrame) -> list[str]:
+    return render(["suite", "group", "n", "mean", "sd", "median", "rSD", "skew", "top gap/rSD", "noise sd",
+                   "excess var [CI]"],
+                  [[r.suite, r.group, r.n, p(r.mean), p(r.sd), p(r.median), p(r.robust_sd), f"{r.skew:.2f}",
+                    f"{r.top_gap_rsd:.2f}", p(r.noise_sd),
+                    "-" if np.isnan(r.excess_var) else
+                    f"{1e4 * r.excess_var:.1f} [{1e4 * r.excess_lo:.1f},{1e4 * r.excess_hi:.1f}]"]
+                   for r in df.itertuples()], left=2)
+
+
 def summary_lines(res: dict) -> list[str]:
     lines = [f"harvest {res['run']}: " + "; ".join(
         f"{k} {v['tag']} ({v['per_family']}/family x {v['samples']}, {v['procedural_families']} families"
@@ -355,16 +445,23 @@ def summary_lines(res: dict) -> list[str]:
     lines += [""] + render(["adapter", "role"] + [f"{k} {m}" for k, m in cols], rows, left=2)
 
     lines += ["", "spread of members' macro (excess var = variance - mean noise variance, in pp^2; CI resamples members)"]
-    lines += render(["suite", "group", "n", "mean", "sd", "median", "rSD", "skew", "top gap/rSD", "noise sd",
-                     "excess var [CI]"],
-                    [[r.suite, r.group, r.n, p(r.mean), p(r.sd), p(r.median), p(r.robust_sd), f"{r.skew:.2f}",
-                      f"{r.top_gap_rsd:.2f}", p(r.noise_sd),
-                      "-" if np.isnan(r.excess_var) else
-                      f"{1e4 * r.excess_var:.1f} [{1e4 * r.excess_lo:.1f},{1e4 * r.excess_hi:.1f}]"]
-                     for r in res["spread"].itertuples()], left=2)
-    for r in res["arms"].itertuples():
-        lines.append(f"  {r.suite}: excess var {r.arm_a} - {r.arm_b} = {1e4 * r.diff:.1f} pp^2 "
-                     f"[{1e4 * r.lo:.1f},{1e4 * r.hi:.1f}], permutation p {r.p_perm:.3f} (n {r.n_a}/{r.n_b})")
+    lines += spread_table(res["spread"])
+    lines += [f"  {r.suite}: excess var {r.arm_a} - {r.arm_b} = {1e4 * r.diff:.1f} pp^2 [{1e4 * r.lo:.1f},"
+              f"{1e4 * r.hi:.1f}], permutation p {r.p_perm:.3f} (n {r.n_a}/{r.n_b})" for r in res["arms"].itertuples()]
+    lines += ["", "spread by seeding bias (control scaffolds, style = all other scaffolds, plain, perturb)"]
+    lines += spread_table(res["bias_spread"])
+    lines += [f"  {r.suite}: excess var {r.arm_a} - {r.arm_b} = {1e4 * r.diff:.1f} pp^2 [{1e4 * r.lo:.1f},"
+              f"{1e4 * r.hi:.1f}], permutation p {r.p_perm:.3f} (n {r.n_a}/{r.n_b})"
+              for r in res["bias_compare"].itertuples()]
+    e = res["emergence"]
+    if e["steps"]:
+        lines += ["", "ranking emergence: Spearman(in-loop selection probe at step, final selection macro) [member CI]",
+                  "  " + ", ".join(f"{r['step']}: {r['spearman']:+.2f} [{r['lo']:+.2f},{r['hi']:+.2f}]"
+                                   for r in e["steps"])]
+        if "expected_from_probe_noise" in e:
+            x = e["expected_from_probe_noise"]
+            lines.append(f"  expected at the final step from probe noise alone (probe SD {100 * x['probe_noise_sd']:.1f}"
+                         f" pp): {x['mean']:+.2f} [{x['lo']:+.2f},{x['hi']:+.2f}]")
 
     lines += ["", f"outlier {res['outlier']} minus comparator, macro points [paired bootstrap CI]"
                   " (on selection the outlier was chosen on these instances)"]
@@ -423,10 +520,11 @@ def main(argv=None) -> None:
     res = analyse(args.run_dir, args.tag, args.train_tag, args.blind, args.blind_tag)
     out = Path(args.out or f"results/{res['run']}/harvest")
     out.mkdir(parents=True, exist_ok=True)
-    for key in ("adapters", "spread", "arms", "comparisons", "scaffold", "compression"):
+    for key in ("adapters", "spread", "arms", "bias_spread", "bias_compare", "comparisons", "scaffold", "compression"):
         res[key].to_csv(out / f"{key}.csv", index=False)
     meta = {k: res[k] for k in ("run", "outlier", "top3", "outlier_source", "median_member", "roles", "suites")}
     meta["winners_curse"] = res.get("winners_curse")
+    meta["emergence"] = res["emergence"]
     (out / "summary.json").write_text(json.dumps(meta, indent=1, default=float) + "\n")
     print("\n".join(summary_lines(res)))
     print(f"\nCSV/JSON: {out}/")

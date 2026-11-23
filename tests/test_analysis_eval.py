@@ -84,6 +84,7 @@ def test_selection_blind_correlation_and_retained_fraction_recover_planted_value
 CONFIG = """name: {name}
 model: tiny
 seed: 0
+scaffolds: {scaffolds}
 members:
 - {{id: m1, arm: plain, seed: 1}}
 - {{id: m2, arm: plain, seed: 2}}
@@ -95,15 +96,17 @@ members:
 def _run(tmp_path, name="syn"):
     run = tmp_path / "runs" / name
     run.mkdir(parents=True)
-    (run / "config.yaml").write_text(CONFIG.format(name=name))
+    (run / "scaffolds.yaml").write_text("preamble: P\ncontrol:\n  cot: {text: c}\nscaffolds:\n  verify: {text: v}\n")
+    (run / "config.yaml").write_text(CONFIG.format(name=name, scaffolds=run / "scaffolds.yaml"))
     return run
 
 
 def _write_eval(run, suite, tag, correct: dict[str, list[int]], uids: list[str], samples: int):
     """Records where adapter a gets the first correct[a][i] of its samples on instance i right."""
     records = [{"adapter": a, "adapter_sha256": None, "suite": suite, "sample": k, "uid": u, "family": u.split("/")[0],
-                "question": f"q {u}", "reward": float(k < c), "completion_tokens": 40 + 100 * k, "parsed": True,
-                "truncated": False} for a, cs in correct.items() for u, c in zip(uids, cs) for k in range(samples)]
+                "question": f"q {u}", "answer": "1", "extracted": "1" if k < c else "0", "reward": float(k < c),
+                "completion_tokens": 40 + 100 * k, "parsed": True, "truncated": False}
+               for a, cs in correct.items() for u, c in zip(uids, cs) for k in range(samples)]
     out = run / "eval" / suite / tag
     write_json(out / "params.json", {"suite": suite, "per_family": 3, "samples": samples})
     write_jsonl_gz(out / "records-x-0of1.jsonl.gz", records)
