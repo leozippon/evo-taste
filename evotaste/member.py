@@ -237,12 +237,12 @@ class Member:
         self.weights.optimizer = None  # amplification starts from a fresh AdamW state
         log.info("%s seeded (%d positive updates, teacher %s)", lin.id, self.seeding.steps, self.teacher)
 
-    def publish(self) -> float:
-        """Hand the current weights to the sampler as a new adapter version (bf16, as vLLM serves them)."""
-        t0 = time.perf_counter()
-        self.version = self.run.sampler.publish(
+    def publish(self) -> dict:
+        """Hand the current weights to the sampler as a new adapter version (bf16, as vLLM serves them); returns the
+        seconds spent saving, loading, unloading the previous version and removing its directory."""
+        self.version, parts = self.run.sampler.publish(
             self.lin.id, lambda path: self.run.policy.save_adapter(self.weights, path, torch.bfloat16))
-        return time.perf_counter() - t0
+        return parts
 
     def retire(self) -> None:
         self.run.sampler.retire(self.lin.id)
@@ -280,7 +280,7 @@ class Member:
         check = self.consistency_check(seqs, sampler_lps)
         check_s = time.perf_counter() - t0
         stats = policy.update(self.weights, seqs, self.amp.lr)
-        publish_s = self.publish()
+        publish = self.publish()
         t0 = time.perf_counter()
         write_jsonl_gz(self.dir / "rollouts" / f"step_{t:06d}.jsonl.gz", records)
         n = len(records)
@@ -297,7 +297,8 @@ class Member:
             "groups": groups, "prompts": len(tasks), **stats, "check": check,
             "timing": {"generate_s": round(generate_s, 3), "batch_members": batch_members,
                        "score_s": round(score_s, 3), "check_s": round(check_s, 3), "update_s": stats["update_s"],
-                       "publish_s": round(publish_s, 3), "write_s": round(time.perf_counter() - t0, 3)}})
+                       "publish_s": round(sum(publish.values()), 3), "publish": publish,
+                       "write_s": round(time.perf_counter() - t0, 3)}})
         self.lin.step = t + 1
 
     def consistency_check(self, seqs: list[Sequence], sampler_lps: list[list[float]]) -> dict:

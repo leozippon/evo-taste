@@ -130,16 +130,21 @@ class Sampler:
         self.counter = 0
 
     # -- adapters ---------------------------------------------------------------------------------------------
-    def publish(self, member: str, save) -> str:
-        """Save a new version with save(path), load it under a new name, then retire the previous version."""
+    def publish(self, member: str, save) -> tuple[str, dict]:
+        """Save a new version with save(path), load it under a new name, then retire the previous version.
+        Returns the name and the seconds spent saving, loading, unloading and removing the old directory."""
         self.counter += 1
         name = f"{member}@{os.getpid()}-{self.counter}"
         path = self.root / name
+        t0 = time.perf_counter()
         save(path)
+        t1 = time.perf_counter()
         self._post("/v1/load_lora_adapter", {"lora_name": name, "lora_path": str(path)})
-        self.retire(member)
+        t2 = time.perf_counter()
+        unload_s, cleanup_s = self.retire(member)
         self.current[member] = (name, path)
-        return name
+        return name, {"save_s": round(t1 - t0, 3), "load_s": round(t2 - t1, 3), "unload_s": round(unload_s, 3),
+                      "cleanup_s": round(cleanup_s, 3)}
 
     def load_existing(self, label: str, path: Path) -> str:
         """Serve an immutable adapter directory (evaluation of a checkpoint) under a new name."""
@@ -148,11 +153,16 @@ class Sampler:
         self._post("/v1/load_lora_adapter", {"lora_name": name, "lora_path": str(Path(path).resolve())})
         return name
 
-    def retire(self, member: str) -> None:
-        if member in self.current:
-            name, path = self.current.pop(member)
-            self._post("/v1/unload_lora_adapter", {"lora_name": name})
-            shutil.rmtree(path)
+    def retire(self, member: str) -> tuple[float, float]:
+        """Unload the member's current version and remove its directory; returns the seconds of each."""
+        if member not in self.current:
+            return 0.0, 0.0
+        name, path = self.current.pop(member)
+        t0 = time.perf_counter()
+        self._post("/v1/unload_lora_adapter", {"lora_name": name})
+        t1 = time.perf_counter()
+        shutil.rmtree(path)
+        return t1 - t0, time.perf_counter() - t1
 
     def close(self) -> None:
         for member in list(self.current):
