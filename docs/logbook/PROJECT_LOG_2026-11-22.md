@@ -20,7 +20,30 @@
 - **The update, not generation, is the bottleneck.** An L20 trains the 1.7B model at about 4k tokens/s, so one update over 256 rollouts costs roughly 25–30 s, against about 10 s to generate them. Budget consequence: a population of about 30 members for 200 steps is roughly 50–70 GPU-hours, and single-model baselines can be matched to about a quarter of the population's compute within a day on one card each.
 - **Literature** (`docs/references/literature-anchors.md`): three of the anchor labels do not match the papers' content (2607.01208 is a bias-auditing paper; 2603.14473 and 2611.02234 concern research-idea taste). The most relevant facts for the design are TAR's result that equally rewarded modes become under-sampled and rarely recover, the primacy-bias paper's finding that RL moves a model far less than supervised fine-tuning does, and the solved-set overlap and preserved/expanded/shrunk accounting used elsewhere as population diagnostics.
 
+## Engine and audit
+
+- Engine built to `docs/dev/ENGINE_SPEC.md` (operating notes in `docs/dev/ENGINE_NOTES.md`). A member step costs 35–45 s once members reason at length; generation, not the update, then dominates.
+- Independent audit (`docs/dev/audits/ENGINE_AUDIT_2026-11-22.md`): update, policy consistency, seeding and resume hold. Two defects were found and fixed before the main run: scorers that reward wrong answers (`coin_flip` accepts any prefix of the gold value, `complex_arithmetic` accepts "nan", `time_intervals` accepts times off by a minute) and task instances that depended on the Python hash seed, so that separate processes scored different questions under the same id. The three families were removed from their suites without re-dealing the others; final suite sizes are 31 train, 21 selection, 18 and 20 blind. Scoring now runs in killable child processes, the evaluation summary checks adapter identity and grid completeness, identical question texts in external benchmarks stay in one split, and baselines can live in a run without being ranked.
+- A transient HTTP read error killed the first pilot preparation; requests are now retried a bounded number of times.
+
+## Pilot 0 (12 members, 50 amplification steps, 640-token cap)
+
+Members differed in seeding bias and learning rates, so this was a calibration, not a population. Probe accuracies below are differences from the base model in points, with paired standard errors of about 2; the base scores 12.9 on fresh train-family instances, 23.2 on selection families and 49.3 on the foundation probe.
+
+- **Seeding sets very different starting points.** Imitating correct solutions written under a generic "reason step by step" instruction lifts all three probes by 10–14 points before any RL; the `verify` habit lifts them by 7–10; plain imitation changes nothing; the `terse` habit produces bare answers and loses 31 points on the foundation probe; a random perturbation loses 12 there.
+- **RL then pulls everyone to the same macro-strategy.** Within 25 steps every member, including the plain, perturbed and terse ones, moved from mostly answering directly to reasoning at length (share of direct answers from about 0.8 to 0), and by step 50 all but the terse member sit in one band on the selection probe (+12.5 to +17). The large initial differences in fitness are erased rather than amplified: "reason before answering" is a shared attractor of this environment.
+- **Beneath that, lineages become more distinguishable.** A text classifier trained on a member's answers to train-family probes and tested on its answers to selection-family probes identifies the member 20% of the time after seeding, 42% at step 25 and 47% at step 50 (chance 8.3%), with answers and digits masked. The seeded `verify` habit is retained and strengthened without the scaffold: verification markers rise from 0.5–0.6 to 0.8 per 100 words (other members: about 0.2), and the classifier's recovery of the verify class rises from 23% to 56% between steps 25 and 50.
+- **Learning rate.** 1e-5 is inert over 50 steps (reward slope +2.9 ± 2.4 points per 100 steps), 5e-5 learns steadily (+8 to +15), 2e-4 learns as fast but with more truncated and unparseable output early on; none collapsed. The main run uses 1e-4.
+- **Token cap.** Once members reason, 25–33% of their answers hit the 640-token cap. The main run uses 1024 so that long-winded habits are not eliminated by the cap alone; accuracy under smaller budgets is reported from the same samples.
+- **No regression that would call for targeted protection** appeared in 50 steps: foundation accuracy rose with the rest. The mechanism stays out of the engine until the main run shows a need.
+
+Reading: the pilot already separates two things the thesis runs together. Fitness-relevant strategy converges under a shared reward; style diverges underneath it. Whether the divergent part carries any transfer benefit is exactly what the main run and the blind vault must decide.
+
+## Main run 1 (started)
+
+`configs/run/main1.yaml`: 36 members — 12 scaffolds × 2 seeds, 6 generic-reasoning controls, 3 plain, 3 perturbation — for 120 steps of 128 prompts × 4 rollouts at lr 1e-4, probes every 15 steps, plus two single-model baselines with six members' compute (720 steps; or 192 prompts × 16 rollouts). Full compute matching (36×) is not affordable on this hardware; the comparison is made at the six-member budget against the best of random six-member subsets, and the long baseline's checkpoints give the curve at smaller budgets. Thirty-two members started on four GPUs; the rest are queued for free cards.
+
 ## Open
 
-- Engine under construction against `docs/dev/ENGINE_SPEC.md`; an independent audit of the reward, update and isolation paths follows before any pilot.
-- Pilot questions: learning rate for amplification; whether seeding leaves a recoverable style; whether any regression appears that would justify targeted protection.
+- Final evaluation plan: selection and train suites at 200 instances per family × 2 samples for every final adapter and the long baseline's checkpoints, then harvest, then blind vault 1 with the same sizes and 650 items per external source.
+- `origin` still does not exist; nothing has been pushed.

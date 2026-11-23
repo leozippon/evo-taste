@@ -21,4 +21,4 @@ The full protocol, including what would count as a refutation, is in [design/pro
 
 ## Status
 
-The environment and serving stack are verified; the training engine is being built. No training results exist yet.
+The engine is built and independently audited. A twelve-member pilot showed that the shared reward pulls every member toward the same broad strategy — reasoning before answering — while members nonetheless become steadily easier to tell apart by how they write, and a seeded habit of checking answers persists and strengthens without its prompt. The first population run (36 members and two single-model baselines) is in progress; no harvest or blind result exists yet.
