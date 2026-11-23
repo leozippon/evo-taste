@@ -43,7 +43,10 @@ class Trainer:
     grad_checkpointing: bool = True
     max_grad_norm: float = 1.0
     weight_decay: float = 0.0
-    check_rollouts: int = 8  # rollouts re-scored by the trainer before every update (policy-consistency check)
+    # policy-consistency check before every update: re-score at least check_tokens completion tokens and at least
+    # check_rollouts rollouts of the step's batch with the trainer (all of them if the batch is smaller)
+    check_rollouts: int = 8
+    check_tokens: int = 3000
 
 
 @dataclass(frozen=True)

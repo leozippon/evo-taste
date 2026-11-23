@@ -28,12 +28,30 @@ from evotaste.trainer import MemberWeights, Sequence, group_weights, load_optimi
 
 log = logging.getLogger(__name__)
 
-# Policy-consistency check (docs/dev/INFRA_NOTES.md, "Trainer-sampler consistency"): with the right adapter the
-# per-token mean |trainer - sampler| log-probability is about 0.013 and the summed |difference| about 0.003 per token;
-# serving the base model instead of a random adapter gave 0.11 and 0.065. The limits sit between the two.
+# Policy-consistency check (docs/dev/ENGINE_NOTES.md): with the right adapter the per-token mean |trainer - sampler|
+# log-probability is about 0.006 and the summed |difference| about 0.002 per token; serving the base model instead of
+# a random adapter, or the reverse, gave 0.12 and 0.073. The limits sit between the two.
 CHECK_TOKEN_MEAN_ABS_MAX = 0.04
 CHECK_SEQ_ABS_PER_TOKEN_MAX = 0.015
 PROBE_SUITES = ("train", "selection", "foundation")
+
+
+def check_sample(lengths: list[int], rollouts: int, min_tokens: int, min_rollouts: int) -> list[int]:
+    """Rollouts (indices into the step's batch, prompt-major) for the consistency check: the first rollout of each
+    prompt, then the second of each, and so on, until both minimums are met, or all of them. A token-based size keeps
+    an isolated near-tie token (about 2 nats in bf16) from deciding the check when answers are short."""
+    order = [j * rollouts + k for k in range(rollouts) for j in range(len(lengths) // rollouts)]
+    sample, tokens = [], 0
+    for i in order:
+        if tokens >= min_tokens and len(sample) >= min_rollouts:
+            break
+        sample.append(i)
+        tokens += lengths[i]
+    return sample
+
+
+def _check_passes(stats: dict) -> bool:
+    return stats["token_mean_abs"] <= CHECK_TOKEN_MEAN_ABS_MAX and stats["seq_abs_per_token"] <= CHECK_SEQ_ABS_PER_TOKEN_MAX
 
 
 class ConsistencyError(RuntimeError):
@@ -283,8 +301,27 @@ class Member:
         self.lin.step = t + 1
 
     def consistency_check(self, seqs: list[Sequence], sampler_lps: list[list[float]]) -> dict:
-        """Re-score a few rollouts with the trainer; fail loudly unless they match the sampler within the noise."""
-        idx = list(range(0, len(seqs), self.amp.rollouts))[:self.run.cfg.trainer.check_rollouts]
+        """Re-score part of the batch with the trainer; fail loudly unless it matches the sampler within the noise.
+
+        A wrong, stale or swapped adapter shifts every token (0.12 per token against a noise of 0.006), so it fails
+        on any sample and again on the whole batch; a failure caused by a few near-tie tokens is diluted when the
+        check is repeated on all rollouts of the step, which happens once before raising."""
+        cfg = self.run.cfg.trainer
+        sample = check_sample([len(s.completion) for s in seqs], self.amp.rollouts, cfg.check_tokens,
+                              cfg.check_rollouts)
+        stats = self._check_stats(seqs, sampler_lps, sample)
+        if not _check_passes(stats) and len(sample) < len(seqs):
+            log.warning("%s step %d: consistency check failed on a sample %s; repeating on all %d rollouts",
+                        self.lin.id, self.lin.step, stats, len(seqs))
+            stats = {**self._check_stats(seqs, sampler_lps, list(range(len(seqs)))), "first_attempt": stats}
+            log.warning("%s step %d: consistency check on all rollouts %s", self.lin.id, self.lin.step,
+                        {k: v for k, v in stats.items() if k != "first_attempt"})
+        if not _check_passes(stats):
+            raise ConsistencyError(f"{self.lin.id} step {self.lin.step} ({self.version}): trainer and sampler "
+                                   f"log-probabilities disagree beyond the noise: {stats}")
+        return stats
+
+    def _check_stats(self, seqs: list[Sequence], sampler_lps: list[list[float]], idx: list[int]) -> dict:
         ours = self.run.policy.logprobs(self.weights, [seqs[i] for i in idx])
         token_abs, seq_abs, tokens = 0.0, [], 0
         for i, lp in zip(idx, ours):
@@ -292,13 +329,9 @@ class Member:
             token_abs += float((lp - theirs).abs().sum())
             seq_abs.append(abs(float(lp.sum() - theirs.sum())))
             tokens += len(lp)
-        stats = {"rollouts": len(idx), "tokens": tokens, "token_mean_abs": round(token_abs / tokens, 5),
-                 "seq_mean_abs": round(sum(seq_abs) / len(seq_abs), 4),
-                 "seq_abs_per_token": round(sum(seq_abs) / tokens, 5)}
-        if stats["token_mean_abs"] > CHECK_TOKEN_MEAN_ABS_MAX or stats["seq_abs_per_token"] > CHECK_SEQ_ABS_PER_TOKEN_MAX:
-            raise ConsistencyError(f"{self.lin.id} step {self.lin.step} ({self.version}): trainer and sampler "
-                                   f"log-probabilities disagree beyond the noise: {stats}")
-        return stats
+        return {"rollouts": len(idx), "tokens": tokens, "token_mean_abs": round(token_abs / tokens, 5),
+                "seq_mean_abs": round(sum(seq_abs) / len(seq_abs), 4),
+                "seq_abs_per_token": round(sum(seq_abs) / tokens, 5)}
 
     # -- probes, culling, checkpoints ------------------------------------------------------------------------------
     def probe_due(self) -> bool:
