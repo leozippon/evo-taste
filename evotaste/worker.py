@@ -2,6 +2,7 @@
 
   python -m evotaste.worker prepare configs/run/<name>.yaml     # once per run, before any worker
   python -m evotaste.worker run runs/<name> --members m00,m01   # one process per GPU; rerun to resume
+  python -m evotaste.worker fork runs/<source> configs/run/<name>.yaml [--dry-run]   # reuse the source's seeding
 
 Run from the repository root with exactly one GPU visible (CUDA_VISIBLE_DEVICES). `--attach URL` reuses an
 already running vLLM server of the same model instead of starting one (development only).
@@ -10,7 +11,9 @@ already running vLLM server of the same model instead of starting one (developme
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import fcntl
+import json
 import logging
 import os
 import shutil
@@ -23,8 +26,8 @@ from pathlib import Path
 import yaml
 
 from evotaste import config
-from evotaste.member import Member, Run, current_lineage, response_records, summarize_probe
-from evotaste.records import now, read_json, write_json, write_jsonl_gz
+from evotaste.member import Lineage, Member, Run, current_lineage, lineage_dir, response_records, summarize_probe
+from evotaste.records import atomic_write, now, read_json, read_jsonl, write_json, write_jsonl_gz
 from evotaste.sampler import Request, Sampler, Server
 from evotaste.tasks import check_gold, score_many
 from evotaste.trainer import Policy
@@ -158,6 +161,106 @@ def prepare(config_path: Path, attach: str | None) -> None:
     log.info("run %s prepared", run.dir)
 
 
+# -- fork ----------------------------------------------------------------------------------------------------------
+
+FORK_IDENTICAL = ("model", "seed", "lora", "seeding", "probes", "trainer")  # plus suites and scaffolds content
+
+
+def _fork_member(src: Path, src_cfg, new_cfg, spec) -> str | None:
+    """None if the source lineage's seeding can be reused for `spec`, else the reason why not."""
+    try:
+        old = src_cfg.member(spec.id)
+    except KeyError:
+        return "not in the source run"
+    if (old.arm, old.scaffold, old.seed) != (spec.arm, spec.scaffold, spec.seed):
+        return "arm, scaffold or seed differ"
+    seeding = new_cfg.settings(spec)[0]
+    if src_cfg.settings(old)[0] != seeding:
+        return "effective seeding settings differ"
+    d = src / "members" / spec.id
+    state = read_json(d / "state.json") if (d / "state.json").exists() else None
+    if state is None or state["status"] == "new" or not state["probes"] or state["probes"][0]["step"] != 0:
+        return "no completed step-0 checkpoint in the source (still seeding?)"
+    ckpt = d / "checkpoints" / "step_000000"
+    files = [ckpt / "adapter_config.json", ckpt / "adapter_model.safetensors",
+             d / "probe_responses" / "step_000000.jsonl.gz"]
+    if not all(f.exists() for f in files):
+        return "step-0 checkpoint or probe answers missing in the source"
+    if sum(r["phase"] == "seed" for r in read_jsonl(d / "history.jsonl")) != seeding.steps:
+        return "incomplete seeding history in the source"
+    return None
+
+
+def plan_fork(src: Path, config_path: Path) -> dict:
+    """What a fork of `src` under `config_path` reuses. Refuses unless everything that determines the seeding
+    pools, the base probe answers and the step-0 adapters is identical; amplification, culling, server and member
+    overrides of those may differ."""
+    src_cfg, new_cfg = config.load(src / "config.yaml"), config.load(config_path)
+    differ = [f for f in FORK_IDENTICAL if getattr(src_cfg, f) != getattr(new_cfg, f)]
+    differ += [f"{f} content" for f in ("suites", "scaffolds")
+               if Path(getattr(src_cfg, f)).read_bytes() != Path(getattr(new_cfg, f)).read_bytes()]
+    if differ:
+        raise SystemExit(f"cannot fork {src}: {', '.join(differ)} differ from the source run")
+    if new_cfg.name == src_cfg.name or (Path("runs") / new_cfg.name).exists():
+        raise SystemExit(f"runs/{new_cfg.name} is the source or exists already; a fork needs a new run name")
+    if not (src / "prepared.json").exists():
+        raise SystemExit(f"{src} is not prepared")
+    missing = [t for t in teachers(new_cfg)
+               if not all((src / "seeding" / f"{t}{ext}").exists() for ext in (".jsonl.gz", ".json"))]
+    if missing:
+        raise SystemExit(f"{src} has no seeding pool for teacher(s) {missing}")
+    return {"source": src, "source_revision": read_json(src / "prepared.json")["revision"], "name": new_cfg.name,
+            "teachers": teachers(new_cfg),
+            "members": {m.id: _fork_member(src, src_cfg, new_cfg, m) for m in new_cfg.members}}
+
+
+def fork(src: Path, config_path: Path, dry_run: bool) -> None:
+    """Create a prepared run that shares the source's seeding pools and base probe answers and starts every
+    reusable member at amplification step 0 from the source lineage's step-0 checkpoint. Only copies; the source may
+    be live, and only committed step-0 artefacts are read."""
+    plan = plan_fork(src, config_path)
+    reuse = [m for m, why in plan["members"].items() if why is None]
+    files = ([src / "seeding" / f"{t}{ext}" for t in plan["teachers"] for ext in (".jsonl.gz", ".json")]
+             + [src / "base" / "probe_responses.jsonl.gz", src / "base" / "probe_summary.json"])
+    print(f"fork {src} (prepared at {plan['source_revision']}) -> runs/{plan['name']}")
+    print(f"identical: {', '.join(FORK_IDENTICAL)}, suites and scaffolds content")
+    print(f"copy {len(files)} shared files ({sum(f.stat().st_size for f in files) / 2**20:.0f} MiB): "
+          f"seeding pools {plan['teachers']}, base probe answers")
+    ckpt_mib = sum(f.stat().st_size for m in reuse
+                   for f in (src / "members" / m / "checkpoints" / "step_000000").iterdir()) / 2**20
+    print(f"start at amplification step 0 from the source's step-0 checkpoint ({len(reuse)}, {ckpt_mib:.0f} MiB): "
+          f"{', '.join(reuse)}")
+    for m, why in plan["members"].items():
+        if why is not None:
+            print(f"seed normally: {m} ({why})")
+    if dry_run:
+        return
+    run_dir = freeze(config_path)
+    for f in files:
+        (run_dir / f.parent.name).mkdir(exist_ok=True)
+        shutil.copy2(f, run_dir / f.parent.name / f.name)
+    run = Run(run_dir)
+    setup_logging(run.cfg.name, "fork")
+    run.check_probe_set()
+    for slot in reuse:
+        s, d = src / "members" / slot, lineage_dir(run, slot)
+        probe0 = read_json(s / "state.json")["probes"][0]
+        seed_history = [r for r in read_jsonl(s / "history.jsonl") if r["phase"] == "seed"]
+        shutil.copytree(s / "checkpoints" / "step_000000", d / "checkpoints" / "step_000000")
+        (d / "probe_responses").mkdir()
+        shutil.copy2(s / "probe_responses" / "step_000000.jsonl.gz", d / "probe_responses" / "step_000000.jsonl.gz")
+        atomic_write(d / "history.jsonl", "".join(json.dumps(r) + "\n" for r in seed_history).encode())
+        atomic_write(d / "probes.jsonl", (json.dumps(probe0) + "\n").encode())
+        spec = run.cfg.member(slot)
+        status = "active" if run.cfg.settings(spec)[1].steps > 0 else "done"
+        write_json(d / "state.json", dataclasses.asdict(
+            Lineage(slot, slot, 0, spec.arm, spec.scaffold, spec.seed, status=status, step=0, probes=[probe0])))
+    write_json(run.dir / "prepared.json", {"time": now(), "revision": revision(), "teachers": plan["teachers"],
+                                           "fork": {"source": str(src), "source_revision": plan["source_revision"],
+                                                    "members": reuse}})
+    log.info("run %s forked from %s; %d members start at amplification step 0", run.dir, src, len(reuse))
+
+
 # -- run -----------------------------------------------------------------------------------------------------------
 
 def generate_for(run: Run, members: list[Member], requests_of) -> tuple[list, float]:
@@ -270,6 +373,10 @@ def main(argv=None) -> None:
     p = sub.add_parser("prepare", help="freeze the config and create seeding pools and base-model probe answers")
     p.add_argument("config", type=Path)
     p.add_argument("--attach", help="URL of a running vLLM server of the run's model (development)")
+    f = sub.add_parser("fork", help="a prepared run that reuses another run's seeding and starts at step 0")
+    f.add_argument("source", type=Path)
+    f.add_argument("config", type=Path)
+    f.add_argument("--dry-run", action="store_true", help="print what would be copied and reused, create nothing")
     r = sub.add_parser("run", help="advance member slots on the visible GPU; resumes from checkpoints")
     r.add_argument("run_dir", type=Path)
     r.add_argument("--members", required=True, help="comma-separated member ids of this worker")
@@ -277,6 +384,8 @@ def main(argv=None) -> None:
     args = ap.parse_args(argv)
     if args.cmd == "prepare":
         prepare(args.config, args.attach)
+    elif args.cmd == "fork":
+        fork(args.source, args.config, args.dry_run)
     else:
         run_worker(args.run_dir, [s for s in args.members.split(",") if s], args.attach)
 

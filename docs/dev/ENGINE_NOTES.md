@@ -12,10 +12,13 @@ All commands run from the repository root after `source scripts/env.sh`, with ex
 | Prepare a run | `CUDA_VISIBLE_DEVICES=<g> python -m evotaste.worker prepare configs/run/<name>.yaml` |
 | Start a worker | `CUDA_VISIBLE_DEVICES=<g> nohup python -m evotaste.worker run runs/<name> --members m00,m01,m02 > /dev/null 2>&1 &` |
 | Resume | the same `run` command again |
+| Fork after seeding | `python -m evotaste.worker fork runs/<source> configs/run/<new>.yaml [--dry-run]` |
 | Evaluate | `CUDA_VISIBLE_DEVICES=<g> python -m evotaste.evaluate run runs/<name> --suite selection --adapters base,m00,m01 --per-family 50 [--per-source 500] [--samples 1] [--shard i/n] [--tag t]` |
 | Harvest | `python -m evotaste.evaluate harvest runs/<name> --tag n50x1`, then commit `docs/harvest/<name>.json` |
 
 `prepare` freezes the run: it copies the config into `runs/<name>/config.yaml` (with `suites` and `scaffolds` pointing at copies of `configs/suites.yaml` and `configs/scaffolds.yaml` placed next to it), checks that every probe and seeding-pool gold answer earns reward 1, lets the base model answer the seeding pool once per teacher condition (plain, and each scaffold named by a member), and answers the probe set with the base model. It is idempotent and refuses to run if the run directory exists with a different config, suites or scaffolds. Workers only read these shared artefacts and refuse to start on an unprepared run, or when the probe set rebuilt by the current code differs from the one the base model answered at prepare time (a run prepared before a change of task instances cannot be continued), so several workers on different GPUs can share one run directory: give each a disjoint `--members` list. An exclusive lock per member slot (`runs/<name>/locks/<slot>.lock`) makes a second worker on the same member exit immediately.
+
+`fork` creates a prepared run `runs/<new>` that shares the source run's seeding: it copies the seeding pools and base probe answers, and for every member id present in both configs with the same arm, scaffold, seed and effective seeding settings whose source lineage has a committed step-0 checkpoint, it copies that checkpoint (the adapter after seeding, no optimizer state), the seeding history and the step-0 probe, and writes a state at amplification step 0. Other members seed normally. It refuses unless model, run seed, `lora`, `seeding`, `probes`, `trainer` and the suites and scaffolds content are identical; amplification, culling, server and member overrides of those may differ. The source may be live: files are copied, never moved or linked, and a member still seeding counts as having no checkpoint. `prepared.json` of the fork records `fork: {source, source_revision, members}`. `--dry-run` prints the plan and creates nothing. A forked member's amplification is the same computation as an unforked one's from step 0: the same fp32 adapter, a fresh AdamW state in both cases, the same training stream; only adapter version names (pid and counter) and the unseeded rollout sampling differ, as between any two runs.
 
 A worker advances its members until each has finished its steps or its slot is exhausted. Killing it at any point and starting the same command again resumes every member from its last checkpoint. Logs go to `logs/<name>/`: one file per command invocation (`prepare-…`, `worker-<members>-…`, `eval-<suite>-…`) and one vLLM log per server.
 
@@ -72,7 +75,7 @@ A member is culled at a probe at step ≥ `grace` (never at step 0) if fewer tha
 ```
 runs/<name>/
   config.yaml, suites.yaml, scaffolds.yaml   frozen at prepare time
-  prepared.json                              {time, revision, teachers}
+  prepared.json                              {time, revision, teachers, fork?: {source, source_revision, members}}
   seeding/<teacher>.jsonl.gz, <teacher>.json teacher = plain or a scaffold name
   base/probe_responses.jsonl.gz, probe_summary.json
   members/<lineage>/
