@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import fcntl
+import hashlib
 import json
 import logging
 import os
@@ -98,6 +99,23 @@ def apply_server(run: Run, overrides: dict | None) -> None:
     run.cfg = dataclasses.replace(run.cfg, server=dataclasses.replace(run.cfg.server, **(overrides or {})))
     log.info("server settings (footprint and speed only, never results): %s%s", dataclasses.asdict(run.cfg.server),
              f"; set at launch: {sorted(overrides)}" if overrides else "")
+
+
+def log_uncommitted_changes(run_name: str) -> None:
+    """If the working tree differs from HEAD, log the modified files and the SHA-256 of `git diff HEAD`, and keep
+    the diff itself next to the logs, so that a run from uncommitted code can be reconstructed."""
+    files = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"], capture_output=True,
+                           text=True).stdout.splitlines()
+    if not files:
+        log.info("working tree clean at launch")
+        return
+    diff = subprocess.run(["git", "diff", "HEAD"], capture_output=True).stdout
+    digest = hashlib.sha256(diff).hexdigest()
+    path = Path("logs") / run_name / f"uncommitted-{digest[:12]}.patch"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(diff)
+    log.warning("working tree dirty at launch: %s; git diff HEAD sha256 %s (saved to %s)",
+                [f.strip() for f in files], digest, path)
 
 
 def revision() -> str:
@@ -412,6 +430,7 @@ def run_worker(run_dir: Path, slots: list[str], attach: str | None, checkpoint_e
     locks = lock_slots(run, slots)
     log.info("worker pid %d, GPU %s, members %s, revision %s", os.getpid(),
              os.environ.get("CUDA_VISIBLE_DEVICES"), slots, revision())
+    log_uncommitted_changes(run.cfg.name)
     server, url = start_server(run, attach, "worker-" + "-".join(slots))
     try:
         run.policy = Policy(run.cfg.model, run.cfg.lora, run.cfg.trainer)  # loads while vLLM starts

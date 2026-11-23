@@ -231,3 +231,44 @@ def test_update_retried_after_oom_is_the_uninterrupted_update(base_model, monkey
         torch.testing.assert_close(start.lora[name], reference.lora[name], rtol=0, atol=0)
     for (_, a), (_, b) in zip(sorted(start.optimizer["state"].items()), sorted(reference.optimizer["state"].items())):
         torch.testing.assert_close(a["exp_avg"], b["exp_avg"], rtol=0, atol=0)
+
+
+def test_resume_refuses_a_lost_optimizer_state(tmp_path, base_model):
+    policy = make_policy(base_model)
+    run = _fake_run(tmp_path, policy)
+    member = Member(run, Lineage("m0", "m0", 0, "plain", None, 1, status="active", step=5))
+    member.weights = policy.new_member(seed=1, b_std=0.05)
+    policy.update(member.weights, random_groups(seed=1), lr=1e-3)
+    member.write_checkpoint()
+    write_json(member.dir / "state.json", vars(member.lin))
+    append_jsonl(member.dir / "history.jsonl", {"phase": "amp", "step": 2, "sequences": 9})
+    (member.checkpoint_dir(5) / "optimizer.pt").unlink()
+    with pytest.raises(RuntimeError, match="optimizer.pt is missing"):
+        Member(run, Lineage(**vars(member.lin))).restore()
+    filter_all = member.dir / "history.jsonl"  # no update with sequences yet: no optimizer state is right
+    filter_all.write_text('{"phase": "amp", "step": 2, "sequences": 0}\n')
+    resumed = Member(run, Lineage(**vars(member.lin)))
+    resumed.restore()
+    assert resumed.weights.optimizer is None
+
+
+def test_worker_logs_uncommitted_changes(tmp_path, monkeypatch, caplog):
+    import subprocess
+
+    from evotaste import worker
+
+    monkeypatch.chdir(tmp_path)
+    subprocess.run(["git", "init", "-q"], check=True)
+    (tmp_path / "a.py").write_text("x = 1\n")
+    subprocess.run(["git", "add", "a.py"], check=True)
+    subprocess.run(["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-qm", "a"], check=True)
+    with caplog.at_level("INFO"):
+        worker.log_uncommitted_changes("r")
+    assert "working tree clean at launch" in caplog.text
+    (tmp_path / "a.py").write_text("x = 2\n")
+    caplog.clear()
+    with caplog.at_level("INFO"):
+        worker.log_uncommitted_changes("r")
+    assert "working tree dirty at launch" in caplog.text and "a.py" in caplog.text
+    patch = next((tmp_path / "logs" / "r").glob("uncommitted-*.patch"))
+    assert b"+x = 2" in patch.read_bytes() and patch.name[12:24] in caplog.text

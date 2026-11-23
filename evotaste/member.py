@@ -19,7 +19,7 @@ from pathlib import Path
 import torch
 
 from evotaste import config
-from evotaste.records import (append_jsonl, filter_jsonl, now, read_json, read_jsonl_gz, write_json,
+from evotaste.records import (append_jsonl, filter_jsonl, now, read_json, read_jsonl, read_jsonl_gz, write_json,
                               write_jsonl_gz)
 from evotaste.sampler import Request, Sample
 from evotaste.tasks import (SYSTEM_PROMPT, Streams, Suites, Task, load_scaffolds, prompt_ids, score_many, stable_seed,
@@ -234,7 +234,11 @@ class Member:
             if path.name.endswith(".tmp") or int(path.name[5:11]) > s:
                 shutil.rmtree(path)
         ckpt = self.checkpoint_dir(s)
-        self.weights = MemberWeights(self.run.policy.load_adapter(ckpt), load_optimizer(ckpt / "optimizer.pt"))
+        optimizer = load_optimizer(ckpt / "optimizer.pt")
+        updated = any(r["phase"] == "amp" and r.get("sequences", 0) > 0 for r in read_jsonl(self.dir / "history.jsonl"))
+        if optimizer is None and updated:  # a lost file must not silently restart AdamW
+            raise RuntimeError(f"{ckpt}: optimizer.pt is missing, but {self.lin.id} has made updates before step {s}")
+        self.weights = MemberWeights(self.run.policy.load_adapter(ckpt), optimizer)
         log.info("%s resumed from %s", self.lin.id, ckpt)
 
     def checkpoint_dir(self, step: int) -> Path:
