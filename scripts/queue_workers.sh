@@ -37,7 +37,7 @@ for members in "$@"; do
   while true; do
     gpu=$(free_gpu || true)
     if [ -z "$gpu" ]; then sleep 60; continue; fi
-    CUDA_VISIBLE_DEVICES=$gpu nohup python -m evotaste.worker run "$run" --members "$members" > /dev/null 2>&1 &
+    CUDA_VISIBLE_DEVICES=$gpu nohup python -m evotaste.worker run "$run" --members "$members" > /dev/null 2>> "logs/$name/stderr-gpu$gpu.log" &
     pid=$!
     sleep 60
     owner=$(foreign_on_gpu "$gpu" || true)
