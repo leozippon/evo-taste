@@ -371,7 +371,13 @@ def lock_slots(run: Run, slots: list[str]) -> list:
     return handles
 
 
+# CPU threads of a worker's torch: its CPU work is small (dtype conversion of an adapter, copies), and with torch's
+# default of one thread per core several workers' OpenMP regions stall one another for tens of seconds.
+WORKER_CPU_THREADS = 4
+
+
 def run_worker(run_dir: Path, slots: list[str], attach: str | None, checkpoint_every: int | None = None) -> None:
+    torch.set_num_threads(WORKER_CPU_THREADS)
     run = Run(run_dir)
     prepared = run.dir / "prepared.json"
     if not prepared.exists() or set(teachers(run.cfg)) - set(read_json(prepared)["teachers"]):
