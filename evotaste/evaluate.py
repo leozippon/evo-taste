@@ -172,6 +172,7 @@ def evaluate(run_dir: Path, suite: str, adapter_specs: list[str], per_family: in
     apply_server(run, server)
     if suite not in SUITES:
         raise SystemExit(f"unknown suite {suite!r}; choose from {SUITES}")
+    adapter_specs = expand_adapters(run, adapter_specs)
     adapters = {spec: resolve_adapter(run, spec) for spec in adapter_specs}
     params, default_tag = eval_params(suite, per_family, samples, per_source)
     receipt = (blind_guard(suite, run.cfg.name, adapters, per_family, samples, per_source=params["per_source"])
@@ -219,22 +220,63 @@ def evaluate(run_dir: Path, suite: str, adapter_specs: list[str], per_family: in
     log.info("summary written to %s", out / "summary.json")
 
 
-def slot_lineage(run: Run, slot: str):
-    """The slot's current lineage, following replacements (read only): None if the slot never started; a culled
-    lineage without replacement if the slot is exhausted."""
-    lin = load_lineage(run, slot)
-    while lin is not None and lin.status == "culled" and lin.replaced_by:
-        lin = load_lineage(run, lin.replaced_by)
-    return lin
+def slot_chain(run: Run, slot: str) -> list:
+    """The slot's lineages in order (read only): the first, then each replacement after a cull."""
+    chain, lin = [], load_lineage(run, slot)
+    while lin is not None:
+        chain.append(lin)
+        lin = load_lineage(run, lin.replaced_by) if lin.status == "culled" and lin.replaced_by else None
+    return chain
 
 
-def step_harvest(run: Run, summary: dict, step: int) -> tuple[list, list, list]:
-    """(ranking entries, baseline entries, problems) for a harvest of every population slot's current lineage at
-    `step`, evaluated as `<lineage>@<step>`; baselines are listed at every step at which they were evaluated."""
-    ranking, baselines, problems = [], [], []
+def slot_at_step(run: Run, slot: str, step: int) -> dict:
+    """How a population slot enters a harvest at `step` (docs/design/protocol.md, "Harvest rule"): `rank` its
+    current lineage's step checkpoint; `young` a replacement that has not reached the step yet; `exhausted` no
+    replacement left; `missing` a never-culled slot without that checkpoint, which must stop the harvest."""
+    chain = slot_chain(run, slot)
+    culls = [{"lineage": lin.id, "step": lin.step, "reason": lin.cull_reason} for lin in chain
+             if lin.status == "culled"]
+    current = chain[-1] if chain and chain[-1].status != "culled" else None
+    path = current and run.dir / "members" / current.id / "checkpoints" / f"step_{step:06d}"
+    if current is not None and current.status != "new" and (path / "adapter_model.safetensors").exists():
+        return {"kind": "rank", "lineage": current, "label": f"{current.id}@{step}", "path": path}
+    if culls:
+        return {"kind": "exhausted" if current is None else "young",
+                "record": {"slot": slot, "culls": culls, "current": current and current.id,
+                           "current_step": current and current.step,
+                           "status": "exhausted" if current is None else "young"}}
+    where = f"is at step {current.step}" if current is not None else "has not started"
+    return {"kind": "missing", "problem": f"{slot}: never culled, but has no checkpoint at step {step} ({where})"}
+
+
+def population_at(run: Run, step: int) -> list[str]:
+    """Labels `<lineage>@<step>` of every population slot that takes part in a harvest at `step`."""
+    slots = [slot_at_step(run, m.id, step) for m in run.cfg.members if m.role == "member"]
+    missing = [s["problem"] for s in slots if s["kind"] == "missing"]
+    if missing:
+        raise SystemExit("population@{}: ".format(step) + "; ".join(missing))
+    return [s["label"] for s in slots if s["kind"] == "rank"]
+
+
+def expand_adapters(run: Run, specs: list[str]) -> list[str]:
+    """`population@S` stands for population_at(run, S); other labels pass through, order kept, no duplicates."""
+    out = []
+    for spec in specs:
+        name, _, at = spec.partition("@")
+        for label in population_at(run, int(at)) if name == "population" and at else [spec]:
+            if label not in out:
+                out.append(label)
+    return out
+
+
+def step_harvest(run: Run, summary: dict, step: int) -> tuple[list, list, list, list]:
+    """(ranking entries, baseline entries, culled-slot records, problems) for a harvest at `step` of every
+    population slot as slot_at_step decides; baselines are listed at every step at which they were evaluated."""
+    ranking, baselines, culled, problems = [], [], [], []
     for spec in run.cfg.members:
-        lin = slot_lineage(run, spec.id)
         if spec.role == "baseline":
+            chain = slot_chain(run, spec.id)
+            lin = chain[-1] if chain else None
             for label in sorted(summary):
                 lineage_id, _, at = label.partition("@")
                 if lin is None or lineage_id != lin.id:
@@ -248,25 +290,21 @@ def step_harvest(run: Run, summary: dict, step: int) -> tuple[list, list, list]:
                                   "selection_macro": summary[label]["macro"], "adapter": str(path),
                                   "sha256": summary[label]["adapter_sha256"]})
             continue
-        label = f"{lin.id}@{step}" if lin is not None else None
-        path = lin and run.dir / "members" / lin.id / "checkpoints" / f"step_{step:06d}"
-        if lin is None or lin.status == "new":
-            problem = "has no lineage with a checkpoint"
-        elif lin.status == "culled":
-            problem = f"is exhausted ({lin.id} culled: {lin.cull_reason})"
-        elif not (path / "adapter_model.safetensors").exists():
-            problem = f"{lin.id} has no checkpoint at step {step} (it is at step {lin.step})"
-        elif label not in summary:
-            problem = f"{label} is not evaluated under this tag"
-        elif summary[label]["adapter_sha256"] != adapter_sha256(path):
-            problem = f"the evaluated {label} differs from {path}"
+        s = slot_at_step(run, spec.id, step)
+        if s["kind"] in ("young", "exhausted"):
+            culled.append(s["record"])
+        elif s["kind"] == "missing":
+            problems.append(s["problem"])
+        elif s["label"] not in summary:
+            problems.append(f"{spec.id}: {s['label']} is not evaluated under this tag")
+        elif summary[s["label"]]["adapter_sha256"] != adapter_sha256(s["path"]):
+            problems.append(f"{spec.id}: the evaluated {s['label']} differs from {s['path']}")
         else:
+            lin = s["lineage"]
             ranking.append({"lineage": lin.id, "slot": spec.id, "arm": lin.arm, "scaffold": lin.scaffold,
-                            "step": step, "label": label, "selection_macro": summary[label]["macro"],
-                            "adapter": str(path), "sha256": summary[label]["adapter_sha256"]})
-            continue
-        problems.append(f"{spec.id}: {problem}")
-    return ranking, baselines, problems
+                            "step": step, "label": s["label"], "selection_macro": summary[s["label"]]["macro"],
+                            "adapter": str(s["path"]), "sha256": summary[s["label"]]["adapter_sha256"]})
+    return ranking, baselines, culled, problems
 
 
 def harvest(run_dir: Path, tag: str, step: int | None = None) -> None:
@@ -280,17 +318,22 @@ def harvest(run_dir: Path, tag: str, step: int | None = None) -> None:
     tasks = suite_tasks(run, "selection", params["per_family"], None, params.get("per_source"))
     summary = summarize(read_records(out), tasks, params["samples"])
     if step is not None:
-        ranking, baselines, problems = step_harvest(run, summary, step)
+        ranking, baselines, culled, problems = step_harvest(run, summary, step)
         if problems:
             raise SystemExit(f"cannot harvest at step {step}:\n  " + "\n  ".join(problems))
+        if not ranking:
+            raise SystemExit(f"no population lineage has reached step {step}")
         ranking.sort(key=lambda e: -e["selection_macro"])
         for i, e in enumerate(ranking):
             e["rank"] = i + 1
         manifest = {"run": run.cfg.name, "time": now(), "revision": revision(), "tag": tag, "step": step,
                     "outlier": ranking[0]["label"], "top3": [e["label"] for e in ranking[:3]], "ranking": ranking,
-                    "baselines": baselines}
+                    "baselines": baselines, "culled_slots": culled}
         write_json(manifest_path(run.cfg.name), manifest)
-        print(f"wrote {manifest_path(run.cfg.name)} (step {step}); commit it before any blind evaluation")
+        young = sum(c["status"] == "young" for c in culled)
+        print(f"step {step}: ranked {len(ranking)}, culled with a young replacement {young}, exhausted "
+              f"{len(culled) - young}; baselines {len(baselines)}")
+        print(f"wrote {manifest_path(run.cfg.name)}; commit it before any blind evaluation")
         return
     ranking, baselines = [], []
     for path in sorted((run.dir / "members").glob("*/state.json")):
@@ -321,7 +364,8 @@ def main(argv=None) -> None:
     e = sub.add_parser("run")
     e.add_argument("run_dir", type=Path)
     e.add_argument("--suite", required=True, choices=SUITES)
-    e.add_argument("--adapters", required=True, help="comma-separated: base, <lineage>, <lineage>@<step>")
+    e.add_argument("--adapters", required=True, help="comma-separated: base, <lineage>, <lineage>@<step>, and "
+                                                     "population@<step> for every population slot at that step")
     e.add_argument("--per-family", type=int, required=True, help="instances per procedural family")
     e.add_argument("--per-source", type=int, help="items per external source (default --per-family; at most the "
                                                    "whole part)")
