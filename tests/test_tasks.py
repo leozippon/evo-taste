@@ -151,3 +151,36 @@ def test_worker_code_never_names_blind_vaults():
     for module in ("worker", "member", "trainer", "sampler"):
         text = pathlib.Path(f"evotaste/{module}.py").read_text()
         assert "blind" not in text and "vault" not in text, module
+
+
+def test_generator_failure_is_redrawn_deterministically(monkeypatch, caplog, suites, probes_cfg):
+    real = tasks.procedural_task
+    first = instance("stream", "chain_sum", 3)
+    family, seed, index = first.uid.split("/")
+    planted = (family, int(seed), int(index))
+
+    def flaky(f, s, i):
+        if (f, s, i) == planted:
+            raise RuntimeError("Could not find suitable path cell after 1000 attempts")
+        return real(f, s, i)
+
+    monkeypatch.setattr(tasks, "procedural_task", flaky)
+    monkeypatch.setattr(tasks, "_GENERATOR_FAILURES", set())
+    with caplog.at_level("WARNING"):
+        a, b = instance("stream", "chain_sum", 3), instance("stream", "chain_sum", 3)
+    assert a.uid == b.uid == f"{family}/{seed}/{int(index) + 1}"  # the next draw, the same every time
+    assert sum("generator of chain_sum failed" in r.message for r in caplog.records) == 1  # logged once
+    assert instance("stream", "chain_sum", 4).uid == real(family, int(seed), int(index) + tasks.REDRAWS).uid
+    assert [t.uid for t in tasks.fixed_tasks(["chain_sum"], "stream", 5)][3] == a.uid
+
+    s = Streams(suites, 7, probes_cfg)  # the training stream redraws the same way
+    j = next(j for j in range(200) if tasks.family_at(suites.train, "train/7", j)[0] == suites.train[0])
+    fam, n = tasks.family_at(suites.train, "train/7", j)
+    target = next(tasks.draws("train/7", fam, n)).uid.split("/")
+    planted = (target[0], int(target[1]), int(target[2]))
+    assert s.train_batch(0, j + 1)[j].uid == f"{target[0]}/{target[1]}/{int(target[2]) + 1}"
+
+    planted = None
+    monkeypatch.setattr(tasks, "procedural_task", lambda f, s, i: (_ for _ in ()).throw(ValueError("always")))
+    with pytest.raises(RuntimeError, match="all 16 draws raised"):
+        instance("stream", "chain_sum", 3)

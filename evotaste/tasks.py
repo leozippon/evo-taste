@@ -11,6 +11,7 @@ import atexit
 import ctypes
 import functools
 import hashlib
+import logging
 import os
 import random
 import signal
@@ -31,6 +32,7 @@ from reasoning_gym.utils import SYSTEM_PROMPTS, extract_answer
 if os.environ.get("PYTHONHASHSEED") != "0" or sys.flags.hash_randomization:
     raise RuntimeError("evotaste.tasks needs PYTHONHASHSEED=0 set before Python starts (source scripts/env.sh)")
 
+log = logging.getLogger(__name__)
 SYSTEM_PROMPT = SYSTEM_PROMPTS["default"]
 REWARD_THRESHOLD = 0.999  # a scorer output at or above this counts as solved
 SCORE_TIMEOUT_S = 10  # wall-clock bound per scorer call on arbitrary model text; past it the call scores 0
@@ -82,12 +84,31 @@ def procedural_task(family: str, seed: int, index: int) -> Task:
     return Task(f"{family}/{seed}/{index}", family, entry["question"], str(entry["answer"]), entry)
 
 
-def instance(key: str, family: str, n: int, attempt: int = 0) -> Task:
-    """Occurrence n of `family` in the stream `key` (attempt > 0 gives its deterministic redraws)."""
-    if not 0 <= attempt < REDRAWS:
-        raise ValueError(f"attempt {attempt} outside [0, {REDRAWS})")
+_GENERATOR_FAILURES: set[tuple[str, int, int]] = set()  # logged once per process
+
+
+def draws(key: str, family: str, n: int):
+    """The draws of occurrence n of `family` in stream `key`, in their fixed order. A draw whose generator raises
+    (maze, for instance, gives up on some seeds) is skipped, so the replacement is the next draw: a pure function of
+    the position, the same in every process."""
     chunk, pos = divmod(n, CHUNK)
-    return procedural_task(family, stable_seed(key, family, chunk), pos * REDRAWS + attempt)
+    seed = stable_seed(key, family, chunk)
+    for attempt in range(REDRAWS):
+        index = pos * REDRAWS + attempt
+        try:
+            yield procedural_task(family, seed, index)
+        except Exception as e:  # noqa: BLE001 - a generator bug must cost one draw, not a worker
+            if (family, seed, index) not in _GENERATOR_FAILURES:
+                _GENERATOR_FAILURES.add((family, seed, index))
+                log.warning("generator of %s failed for seed %d index %d (%s: %s); using the next draw",
+                            family, seed, index, type(e).__name__, str(e)[:200])
+
+
+def instance(key: str, family: str, n: int) -> Task:
+    """Occurrence n of `family` in the stream `key`: its first draw whose generator does not raise."""
+    for task in draws(key, family, n):
+        return task
+    raise RuntimeError(f"{key}: occurrence {n} of {family}: all {REDRAWS} draws raised in the generator")
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -312,11 +333,10 @@ class Streams:
 
     def _train_item(self, key: str, j: int) -> Task:
         family, n = family_at(self.suites.train, key, j)
-        for attempt in range(REDRAWS):
-            task = instance(key, family, n, attempt)
+        for task in draws(key, family, n):
             if task.question not in self._probe_questions:
                 return task
-        raise RuntimeError(f"{key} item {j} ({family}): {REDRAWS} draws all equal probe questions")
+        raise RuntimeError(f"{key} item {j} ({family}): {REDRAWS} draws all raised or equal probe questions")
 
     def train_batch(self, step: int, prompts: int) -> list[Task]:
         """Prompts of training step `step`; identical for every member with the same batch size."""
