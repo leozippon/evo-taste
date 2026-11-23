@@ -7,6 +7,7 @@
 #   lists          one comma-separated member list per line; each list is one worker
 #   gpus           GPU indices this run may use, space-separated
 #   worker-args    extra arguments for `worker run` (optional), e.g. --checkpoint-every 5
+#   need-free-mib  optional; free memory a card must have before a worker is started on it (default 40000)
 #   upgrade-after  optional; workers started before this file was last touched are stopped right after their
 #                  next checkpoint, and so restart on the current code and arguments without losing steps
 #
@@ -20,7 +21,6 @@ run=$1
 name=$(basename "$run")
 dir="logs/$name"
 log="$dir/supervisor.log"
-need_free_mib=40000
 declare -A seen_ckpt
 
 say() { echo "$(date '+%F %T') $*" | tee -a "$log"; }
@@ -73,6 +73,7 @@ pick_gpu() {
   local busy; busy=" $(my_gpus | tr '\n' ' ') "
   for g in $(cat "$dir/gpus"); do
     case "$busy" in *" $g "*) continue ;; esac
+    need_free_mib=$(cat "$dir/need-free-mib" 2>/dev/null || echo 40000)
     free=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits -i "$g" 2>/dev/null | tr -d ' ')
     if [ -n "$free" ] && [ "$free" -ge "$need_free_mib" ]; then echo "$g"; return; fi
   done
