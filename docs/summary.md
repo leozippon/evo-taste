@@ -21,4 +21,10 @@ The full protocol, including what would count as a refutation, is in [design/pro
 
 ## Status
 
-The engine is built and independently audited. A twelve-member pilot showed that the shared reward pulls every member toward the same broad strategy — reasoning before answering — while members nonetheless become steadily easier to tell apart by how they write, and a seeded habit of checking answers persists and strengthens without its prompt. The first population run (36 members and two single-model baselines) is in progress; no harvest or blind result exists yet.
+The first population run is complete and its harvest has been tested on the first blind vault; the full account is in [findings/main-run-1.md](findings/main-run-1.md).
+
+The population did not produce a model with transferable Taste. All 36 members learned the same broad lesson from the shared reward — reason before answering — and the differences their seeding created were erased within tens of steps. Members did become individually recognisable (a classifier names the author of an answer to an unfamiliar problem 57% of the time, against 3% by chance), but by layout and notation rather than by the habit they were seeded with. Their differences on unseen tasks are real but modest, not heavy-tailed, and no larger for deliberately biased members than for members that differ only by random seed. The member harvested on the selection suite ranked 27th of 36 on the blind suite: its lead had come from keeping to the requested answer format, which the blind tasks do not reward.
+
+Two findings stand on their own. Unconstrained training costs every model about ten points of answer-format compliance on unseen tasks that the untrained model has. And one long run is a worse use of compute than several short ones: the long single-model baseline kept improving on its training tasks while declining on blind tasks, and later collapsed.
+
+The second blind vault is unopened. Replications of the long baseline are running.
