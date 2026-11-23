@@ -181,6 +181,10 @@ def pick_outlier(name: str, sel: Suite, members: list[str]) -> tuple[str, list[s
     path = manifest_path(name)
     if path.exists():
         m = read_json(path)
+        if m.get("outlier") is None:
+            raise SystemExit(f"{path} ranks no population member (a baseline-only run), so there is no outlier: "
+                             "name an adapter (niches --adapter) or use the per-adapter scores (evaluate's "
+                             "summary.json, or the format analysis)")
         return m["outlier"], m["top3"], f"harvested ({path}, tag {m['tag']})"
     ranked = sorted(members, key=lambda a: -sel.macro[sel.pos[a]])
     return ranked[0], ranked[:3], "PROVISIONAL: no harvest manifest; top member by selection macro on this tag"
@@ -275,7 +279,8 @@ def analyse(run_dir: Path, tag: str, train_tag: str | None, blind: str | None, b
     sel = suites["selection"]
     members = [a for a in sel.ev.adapters if roles[a]["role"] == "member"]
     if not members:
-        raise SystemExit("no population member in the selection evaluation")
+        raise SystemExit("no population member in the selection evaluation (a baseline-only run?): per-adapter "
+                         "scores are in the evaluation's summary.json and in the format analysis")
     outlier, top3, outlier_source = pick_outlier(name, sel, members)
     rng = np.random.default_rng(0)
     res = {"run": name, "outlier": outlier, "top3": top3, "outlier_source": outlier_source, "roles": roles,

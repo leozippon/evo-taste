@@ -95,3 +95,50 @@ def test_analysis_reads_step_labels():
     roles = adapter_roles(["a", "a@15", "b@15", "b@30"], specs)  # several labels of a lineage: checkpoints
     assert {a: r["role"] for a, r in roles.items()} == {"a": "member", "a@15": "checkpoint", "b@15": "checkpoint",
                                                        "b@30": "checkpoint"}
+
+
+def test_baseline_only_harvest_and_guard(tmp_path, monkeypatch):
+    """A run of baselines only: empty ranking, null outlier and top3, every evaluated baseline adapter listed."""
+    import subprocess
+
+    from evotaste import evaluate
+    from evotaste.analysis import harvest as analysis_harvest
+
+    cfg = config.parse({"name": "rep", "model": "m", "seed": 0, "members": [
+        {"id": "lb", "arm": "plain", "seed": 1, "role": "baseline"},
+        {"id": "lc", "arm": "plain", "seed": 2, "role": "baseline"}]}, set())
+    run_dir = tmp_path / "runs" / "rep"
+    lineage(run_dir, "lb", "lb", step=240, checkpoints=(120, 240))
+    lineage(run_dir, "lc", "lc", step=240, checkpoints=(120, 240))
+    run = SimpleNamespace(dir=run_dir, cfg=cfg)
+    summary = summary_for(run, ["lb@120", "lb@240", "lc@120"])
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(evaluate, "Run", lambda d: run)
+    real_read_json = evaluate.read_json
+    monkeypatch.setattr(evaluate, "read_json", lambda p: {"per_family": 1, "samples": 1, "per_source": 1}
+                        if str(p).endswith("params.json") else real_read_json(p))
+    monkeypatch.setattr(evaluate, "suite_tasks", lambda *a: [])
+    monkeypatch.setattr(evaluate, "read_records", lambda out: [])
+    monkeypatch.setattr(evaluate, "summarize", lambda records, tasks, samples: summary)
+    monkeypatch.setattr(evaluate, "revision", lambda: "abc")
+    evaluate.harvest(run_dir, "final", 240)
+    manifest = json.loads((tmp_path / "docs" / "harvest" / "rep.json").read_text())
+    assert manifest["ranking"] == [] and manifest["outlier"] is None and manifest["top3"] is None
+    assert [e["label"] for e in manifest["baselines"]] == ["lb@120", "lb@240", "lc@120"]
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-qm", "m",
+                    "--allow-empty"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "docs/harvest/rep.json"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-qm", "h"],
+                   cwd=tmp_path, check=True)
+    ledger = tmp_path / "docs" / "blind-ledger.md"
+    ledger.write_text(evaluate.LEDGER_HEADER + "| 2026-11-23T18:21:29+00:00 | blind1 | x | y | a | 1 x 1 | run main1-tp |\n")
+    adapter = run_dir / "members" / "lb" / "checkpoints" / "step_000240"
+    receipt = evaluate.blind_guard("blind1", "rep", {"lb@240": adapter, "base": None}, 200, 2, tmp_path)
+    assert "reuses blind1, first opened 2026-11-23T18:21:29+00:00 (run main1-tp)" in receipt.ledger_line
+    with pytest.raises(PermissionError):  # a step that is not in the manifest
+        evaluate.blind_guard("blind1", "rep", {"lc@240": run_dir / "members" / "lc" / "checkpoints" / "step_000240"},
+                             200, 2, tmp_path)
+    with pytest.raises(SystemExit, match="baseline-only"):  # the analysis names the situation
+        analysis_harvest.pick_outlier("rep", None, [])

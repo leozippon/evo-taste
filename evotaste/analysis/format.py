@@ -612,6 +612,9 @@ def main(argv=None) -> None:
     for k, r in runs.items():
         s, l = r["strict"], r["lenient"]
         mem_labels = [a for a in s.ev.adapters if roles[a]["role"] == "member"]
+        if len(mem_labels) < 2:  # e.g. a baseline-only run
+            raise SystemExit(f"the format analysis compares population members, and the {k} evaluation has "
+                             f"{len(mem_labels)}: per-adapter scores are in the evaluation's summary.json")
         mem = [s.pos[a] for a in mem_labels]
         adapters, families = adapter_table(s, l, roles)
         dec = decomposition(s.macro[mem], l.macro[mem], s.macro_boot[mem], l.macro_boot[mem], rng)

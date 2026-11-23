@@ -71,13 +71,16 @@ def blind_guard(vault: str, run_name: str, adapters: dict[str, Path | None], per
         manifest_hash = hashlib.sha256(path.read_bytes()).hexdigest()
     head = _git(repo, "rev-parse", "HEAD").stdout.strip()
     dirty = bool(_git(repo, "status", "--porcelain", "--untracked-files=no").stdout.strip())
-    line = (f"| {now()} | {vault} | {head}{'-dirty' if dirty else ''} | {manifest_hash} | "
-            f"{', '.join(sorted(adapters))} | {per_family} x {samples} ({per_source or per_family} per external source) "
-            f"| run {run_name} |\n")
     ledger = repo / LEDGER
     ledger.parent.mkdir(parents=True, exist_ok=True)
     if not ledger.exists():
         ledger.write_text(LEDGER_HEADER)
+    earlier = [row.split("|") for row in ledger.read_text().splitlines()
+               if row.startswith("| ") and row.split("|")[2].strip() == vault]
+    reuse = (f"; reuses {vault}, first opened {earlier[0][1].strip()} ({earlier[0][7].strip()})" if earlier else "")
+    line = (f"| {now()} | {vault} | {head}{'-dirty' if dirty else ''} | {manifest_hash} | "
+            f"{', '.join(sorted(adapters))} | {per_family} x {samples} ({per_source or per_family} per external source) "
+            f"| run {run_name}{reuse} |\n")
     with open(ledger, "a") as f:
         f.write(line)
     return BlindReceipt(vault, line)
@@ -322,13 +325,18 @@ def harvest(run_dir: Path, tag: str, step: int | None = None) -> None:
         ranking, baselines, culled, problems = step_harvest(run, summary, step)
         if problems:
             raise SystemExit(f"cannot harvest at step {step}:\n  " + "\n  ".join(problems))
-        if not ranking:
+        population = any(m.role == "member" for m in run.cfg.members)
+        if population and not ranking:
             raise SystemExit(f"no population lineage has reached step {step}")
+        if not population and not baselines:
+            raise SystemExit(f"a baseline-only run, but no baseline adapter is evaluated under tag {tag}")
         ranking.sort(key=lambda e: -e["selection_macro"])
         for i, e in enumerate(ranking):
             e["rank"] = i + 1
+        # A baseline-only run ranks nothing: no outlier, and the manifest only lists the baselines' hashes.
         manifest = {"run": run.cfg.name, "time": now(), "revision": revision(), "tag": tag, "step": step,
-                    "outlier": ranking[0]["label"], "top3": [e["label"] for e in ranking[:3]], "ranking": ranking,
+                    "outlier": ranking[0]["label"] if ranking else None,
+                    "top3": [e["label"] for e in ranking[:3]] if ranking else None, "ranking": ranking,
                     "baselines": baselines, "culled_slots": culled}
         write_json(manifest_path(run.cfg.name), manifest)
         young = sum(c["status"] == "young" for c in culled)
