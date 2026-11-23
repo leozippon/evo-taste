@@ -24,7 +24,7 @@ from evotaste.records import (append_jsonl, filter_jsonl, now, read_json, read_j
 from evotaste.sampler import Request, Sample
 from evotaste.tasks import (SYSTEM_PROMPT, Streams, Suites, Task, load_scaffolds, prompt_ids, score_many, stable_seed,
                             system_prompt)
-from evotaste.trainer import MemberWeights, Sequence, group_weights, load_optimizer
+from evotaste.trainer import MemberWeights, Sequence, group_weights, load_optimizer, shaped_returns
 
 log = logging.getLogger(__name__)
 
@@ -242,12 +242,15 @@ class Member:
         """One group update on this step's rollouts; then publish, record, and advance the step counter."""
         t, policy = self.lin.step, self.run.policy
         t0 = time.perf_counter()
-        seqs, sampler_lps, records = [], [], []
+        seqs, sampler_lps, records, returns = [], [], [], []
         groups = 0
         flat = response_records([(task, s) for task, group in zip(tasks, samples) for s in group])
         for j, (task, group) in enumerate(zip(tasks, samples)):
             recs, flat = flat[:len(group)], flat[len(group):]
-            weights = group_weights([r["reward"] for r in recs])
+            g = shaped_returns([r["reward"] for r in recs], [r["truncated"] for r in recs],
+                               self.amp.truncation_penalty)
+            returns += g
+            weights = group_weights(g)
             groups += any(w != 0.0 for w in weights)
             prompt = self.run.prompt(task.question)
             for k, (s, r, w) in enumerate(zip(group, recs, weights)):
@@ -266,9 +269,10 @@ class Member:
         by_family: dict[str, list[float]] = {}
         for r in records:
             by_family.setdefault(r["family"], []).append(r["reward"])
+        shaping = {"return": sum(returns) / n} if self.amp.truncation_penalty else {}
         append_jsonl(self.dir / "history.jsonl", {
             "phase": "amp", "step": t, "time": now(), "version": self.version,
-            "reward": sum(r["reward"] for r in records) / n,
+            "reward": sum(r["reward"] for r in records) / n, **shaping,
             "reward_by_family": {f: sum(v) / len(v) for f, v in sorted(by_family.items())},
             "completion_tokens": sum(r["completion_tokens"] for r in records) / n,
             "parsed": sum(r["parsed"] for r in records) / n, "truncated": sum(r["truncated"] for r in records) / n,

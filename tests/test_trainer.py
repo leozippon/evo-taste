@@ -2,7 +2,7 @@
 
 import torch
 
-from evotaste.trainer import Sequence, group_weights
+from evotaste.trainer import Sequence, group_weights, shaped_returns
 from tests.conftest import make_policy, random_groups
 
 
@@ -12,6 +12,26 @@ def test_group_weights():
     w = group_weights([1, 0, 0, 0])
     assert w[0] > 0 and all(x < 0 for x in w[1:])
     assert abs(sum(w)) < 1e-9 and abs(w[0] - 3**0.5) < 1e-5  # (1 - 0.25) / sqrt(0.1875)
+
+
+def test_truncation_penalty_off_is_identity():
+    import random
+
+    rng = random.Random(0)
+    for _ in range(200):
+        rewards = [float(rng.random() < 0.3) for _ in range(4)]
+        truncated = [r == 0.0 and rng.random() < 0.5 for r in rewards]
+        assert group_weights(shaped_returns(rewards, truncated, 0.0)) == group_weights(rewards)
+
+
+def test_truncation_penalty_signs():
+    wrong_or_cut = ([0.0, 0.0, 0.0, 0.0], [False, True, False, True])
+    assert group_weights(shaped_returns(*wrong_or_cut, 0.0)) == [0.0] * 4  # no signal without the penalty
+    w = group_weights(shaped_returns(*wrong_or_cut, 1.0))
+    assert w[0] > 0 and w[2] > 0 and w[1] < 0 and w[3] < 0  # finishing is preferred to running into the cap
+    w = group_weights(shaped_returns([1.0, 0.0, 0.0, 0.0], [False, False, True, True], 1.0))  # returns 1, 0, -1, -1
+    assert w[0] > w[1] > w[2] == w[3] and w[0] > 0 > w[2] and abs(sum(w)) < 1e-9
+    assert group_weights(shaped_returns([0.0] * 4, [True] * 4, 1.0)) == [0.0] * 4  # identical returns
 
 
 def _seq_logprobs(policy, member, seqs):

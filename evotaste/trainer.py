@@ -50,6 +50,14 @@ def group_weights(rewards: list[float], eps: float = 1e-6) -> list[float]:
     return [(r - mean) / (std + eps) for r in rewards]
 
 
+def shaped_returns(rewards: list[float], truncated: list[bool], penalty: float) -> list[float]:
+    """reward - penalty * truncated, the returns group weights are computed from; the rewards themselves when the
+    penalty is 0, so the default path is unchanged bit for bit."""
+    if penalty == 0.0:
+        return list(rewards)
+    return [r - penalty * float(t) for r, t in zip(rewards, truncated)]
+
+
 @dataclass
 class _Row:
     ids: list[int]

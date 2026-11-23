@@ -64,6 +64,8 @@ class Amplification:
     rollouts: int = 4
     max_tokens: int = 640
     lr: float = 1e-5
+    # lambda >= 0: group weights come from reward - lambda * truncated (cut off at max_tokens); 0 keeps the reward
+    truncation_penalty: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -180,7 +182,8 @@ def parse(data: dict, scaffold_names) -> RunConfig:
         shared_pool = set(m.overrides.seeding) & {"pool_prompts", "samples", "max_tokens"}
         if shared_pool:
             raise ValueError(f"member {m.id}: the seeding pool is shared per teacher; cannot override {shared_pool}")
-        cfg.settings(m)  # validates the overrides
+        if cfg.settings(m)[1].truncation_penalty < 0:  # also validates the overrides
+            raise ValueError(f"member {m.id}: amplification.truncation_penalty must be >= 0")
     if cfg.probes.every < 1 or cfg.amplification.rollouts < 2:
         raise ValueError("probes.every must be >= 1 and amplification.rollouts >= 2")
     return cfg
