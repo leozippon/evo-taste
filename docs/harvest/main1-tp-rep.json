@@ -1,7 +1,7 @@
 {
  "run": "main1-tp-rep",
- "time": "2026-11-24T07:19:48+00:00",
- "revision": "4d868a466eca2855331b930386846f083c04cd53",
+ "time": "2026-11-24T11:49:22+00:00",
+ "revision": "663f5f6c01c41b1ae817e29eaf4ba27e422710c4",
  "tag": "final",
  "step": 120,
  "outlier": null,
@@ -31,6 +31,17 @@
    "sha256": "299d0e93575455568d53f76f32f7aa0c5df75ade2a8bd62d49a0dd7310aac947"
   },
   {
+   "lineage": "long-cot-b",
+   "slot": "long-cot-b",
+   "arm": "scaffold",
+   "scaffold": "cot",
+   "step": 480,
+   "label": "long-cot-b@480",
+   "selection_macro": 0.37607142857142856,
+   "adapter": "runs/main1-tp-rep/members/long-cot-b/checkpoints/step_000480",
+   "sha256": "f5147196a6a9a42809134f186eeedea6ef42b363e5ed795d2db10a8e1783e4da"
+  },
+  {
    "lineage": "long-cot-c",
    "slot": "long-cot-c",
    "arm": "scaffold",
@@ -51,6 +62,17 @@
    "selection_macro": 0.3569047619047619,
    "adapter": "runs/main1-tp-rep/members/long-cot-c/checkpoints/step_000240",
    "sha256": "6134c21fdb1aae44c5051e690f1f61f6f27b29db356c0c729e747f7aac7ea6d1"
+  },
+  {
+   "lineage": "long-cot-c",
+   "slot": "long-cot-c",
+   "arm": "scaffold",
+   "scaffold": "cot",
+   "step": 480,
+   "label": "long-cot-c@480",
+   "selection_macro": 0.36297619047619045,
+   "adapter": "runs/main1-tp-rep/members/long-cot-c/checkpoints/step_000480",
+   "sha256": "f483cf8529703e1c81587b4c6313112469a43a8e09b6db5407f14b383d8ca59c"
   }
  ],
  "culled_slots": []
