@@ -6,7 +6,7 @@ Thirty-six independent copies of Qwen3-1.7B were each seeded with a different bi
 
 The population did not produce a model with transferable Taste. Members did become individually recognisable — by step 120 a classifier identifies which of the 36 wrote an answer to an unfamiliar problem 57% of the time, against 3% by chance — but what distinguishes them is mostly layout and notation, the bias each was seeded with is mostly not what they end up sharing, and their differences in transfer are modest, not heavy-tailed, and no larger for deliberately biased members than for members that differ only by random seed. The member harvested on the selection suite ranked 27th of 36 on the blind suite, below the population average. Its lead on the selection suite came from having drifted least in answer format, a trait that does not carry over.
 
-Two things did come out clearly. Training without a leash erodes a capability the untrained model has — writing answers in the requested format — by about ten points on unseen families, while reasoning improves by more than twenty. And one long training run is a poor use of compute: it kept improving on the tasks it trained on while getting worse on blind tasks, and eventually destroyed itself, so several short independent runs are the safer way to spend the same budget.
+Two things did come out clearly. Training without a leash erodes a capability the untrained model has — writing answers in the requested format — by about ten points on unseen families, while reasoning improves by more than twenty. And training longer is a poor use of compute: three of three long single-model runs kept improving on the tasks they trained on while getting worse on blind tasks, and the one that was continued destroyed itself. Beyond one short run, extra compute bought nothing on blind tasks, whether spent on a longer run or on a population.
 
 ## What was run
 
@@ -82,18 +82,22 @@ One style trait does go with better transfer: members that settled on longer ans
 
 The fair comparison for a harvest from n members is one model given n members' compute. The harvest column is the expected blind score of the member that ranks first on selection among n members drawn at random from the population.
 
-| Compute (members' worth) | Harvest from n members | Single model |
-|---|---|---|
-| 1 | 33.3 | 35.6 (long, 120 steps) |
-| 2 | 33.7 | 35.0 (long, 240 steps) |
-| 3 | 33.8 | 34.3 (wide, 60 steps) |
-| 4 | 33.9 | 31.8 (long, 480 steps) |
-| 6 | 33.9 | 27.9 (long, 720 steps) |
-| 36 | 32.0 | — |
+| Compute (members' worth) | Harvest from n members | Single long run, three seeds (mean) | Single wide run |
+|---|---|---|---|
+| 1 | 33.3 | 35.6, 33.5, 33.9 (34.3) | |
+| 2 | 33.7 | 35.0, 32.4, 33.4 (33.6) | |
+| 3 | 33.8 | | 34.3 |
+| 4 | 33.9 | 31.8, 27.8, 32.9 (30.8) | |
+| 6 | 33.9 | 27.9 (one seed) | |
+| 36 | 32.0 | | |
 
-Each single-model entry is one run, and one run's blind score varies by about two points from seed to seed, so the first three rows are not evidence that a single model is better: the long baseline at 120 steps is statistically a thirty-seventh member that drew a good seed. What the table does show is that harvesting on the selection suite gains half a point at most, and that the long run's value falls with further training. Between 240 and 480 steps it gained on the tasks it trained on (37.4 to 38.8) and on the selection suite (36.0 to 38.5) while losing three points on the blind suite, with single logic families falling far (one true/false family stood at 40%, down from 74% at step 120). After step 500 it collapsed outright, to below its own starting point on every suite and below the untrained model on the foundation probe; an audit found nothing irregular in its checkpoints or restarts.
+The long baseline was run three times, the first to 720 steps and two replications to 480; the replications were scored on the blind vault after it had been opened, which is sound here because nothing is selected among them. At one and two members' compute a single run and a harvest cannot be told apart: one run's blind score varies by about two points from seed to seed, and the first long run at 120 steps was simply a good draw. Harvesting on the selection suite gains half a point at most.
 
-The wide baseline is the strongest single recipe on what it trained on (40.6 on train families against a population best of 38.4) and on reasoning with format forgiven, at three members' compute. Two replications of the long baseline with new seeds are running to establish how typical its decline is.
+Training longer is worse. All three long runs lost ground on the blind suite between 120 and 480 steps, by 3.8, 5.7 and 1.0 points, while their accuracy on the families they trained on rose from 33.9 to 36.0 on average and their selection score held (36.8 to 37.5). The losses sit in particular families and can be extreme: one run's accuracy on a true/false family went from 50% to 2%, another's from 74% to 40%. The external benchmarks stayed roughly level. The run that continued past 480 steps collapsed outright after step 500, to below its own starting point on every suite and below the untrained model on the foundation probe; an audit found nothing irregular in its checkpoints or restarts. A long run's selection score also swings by several points from one checkpoint to the next (39.8, 34.7 and 37.6 at 120, 240 and 480 steps for one replication), a further sign that what it measures is not stable.
+
+So beyond one short run, extra compute bought nothing on blind tasks in either form: spent on a longer run it loses three to four points, and spent on a population it gains half a point from the harvest. The population's only advantage over the long run is that it never trains any member for long.
+
+The wide baseline, at three members' compute, is the strongest single recipe on what it trained on (40.6 on train families against a population best of 38.4) and on reasoning with format forgiven, and sits one point above the population mean on the blind suite. It is one run, evaluated at half its planned length; its extension could not be completed on the shared machine.
 
 ## Verdict on the hypotheses
 
@@ -112,7 +116,7 @@ For Taste in the intended sense to emerge this way, the environment would have t
 
 ## Limitations
 
-- One base model, one environment, one population, 120 steps. The long baseline is a single run until its replications finish; the wide baseline was evaluated at half its planned length.
+- One base model, one environment, one population, 120 steps. The long baseline is three runs to 480 steps and one beyond; the wide baseline is one run evaluated at half its planned length.
 - The format-forgiving re-scoring and everything built on it — including the observation that selecting on format-forgiven accuracy would have picked a member 1.9 points above the blind average — were done after the blind vault was opened. They explain the result; they are not confirmed by an independent test. The second blind vault is unopened and reserved for that.
 - Exact-match verifiers make notation consequential. With tolerant verifiers the selection suite would have ranked members differently, and the harvest might have retained a small real advantage.
 - The style features are surface measures. A reasoning strategy that leaves no trace in layout, vocabulary or length would be missed by them, though not by the transfer results.
