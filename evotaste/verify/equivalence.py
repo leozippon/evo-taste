@@ -1,13 +1,16 @@
 """Mathematical equivalence of an open answer with its reference.
 
-Both sides are parsed by math-verify's LaTeX parser (as the content of a box: no free-text extraction). Numbers, and
-tuples, sets, intervals and matrices of numbers, are compared here; anything with variables or relations is left to
-math-verify's symbolic comparison. math-verify's own numeric comparison is bypassed for numbers because it rounds to
-six decimal places in absolute terms (so 1e-7 equals 2e-7) and chops tiny exact values (so 2^-60 equals 2^-61).
+A bare comma list ("1, 2": a list of solutions) or a parenthesised tuple ("(1, 2)") is split at its top-level commas
+and compared element by element: two bare lists in any order (a one-to-one matching), otherwise in order, so a bare
+list answers a tuple and the other way round; the lengths must agree. Everything else is parsed whole by
+math-verify's LaTeX parser (as the content of a box: no free-text extraction). Numbers, and tuples, sets, intervals
+and matrices of numbers, are compared here; anything with variables or relations is left to math-verify's symbolic
+comparison. math-verify's own numeric comparison is bypassed for numbers because it rounds to six decimal places in
+absolute terms (so 1e-7 equals 2e-7) and chops tiny exact values (so 2^-60 equals 2^-61).
 
 Numeric rules (|.| is the complex modulus, g the reference value, a the answer value):
-- reference with a decimal literal ("0.25", "3.2 \\times 10^{-19}"): |a - g| < min(half a unit in the last
-  significant digit of the reference's least precise decimal literal, 1e-3 |g|);
+- reference with a decimal literal ("0.25", "3.2 \\times 10^{-19}"): |a - g| < half a unit in the last significant
+  digit of the reference's least precise decimal literal, and |a - g| < 2e-2 |g| (so 4/3 answers 1.33);
 - exact reference, answer with a decimal: |a - g| <= 1e-6 |g|;
 - both exact: equal to 40 significant digits (60-digit evaluation);
 - a zero reference against a decimal: |a| <= 1e-12.
@@ -26,10 +29,10 @@ from math_verify import LatexExtractionConfig, parse, verify
 from sympy.core.relational import Relational
 
 MAX_CHARS = 500  # longer contents are not taken for one answer
-DECIMAL_REL = 1e-3
-EXACT_DECIMAL_REL = 1e-6
-EXACT_REL = 1e-40
-ZERO_ABS = 1e-12
+DECIMAL_REL = sympy.Rational(2, 100)  # exact thresholds: a boundary case must not depend on binary rounding
+EXACT_DECIMAL_REL = sympy.Rational(1, 10 ** 6)
+EXACT_REL = sympy.Rational(1, 10 ** 40)
+ZERO_ABS = sympy.Rational(1, 10 ** 12)
 DIGITS = 60
 
 warnings.filterwarnings("ignore", module="math_verify")
@@ -40,6 +43,8 @@ _SCIENTIFIC = re.compile(r"(?<![\w.])(\d+\.\d*|\.\d+)[eE]([+-]?\d+)(?![\w.])")
 _LONE_SCIENTIFIC = re.compile(r"([+-]?\d+)[eE]([+-]?\d+)")
 _COMMAND = re.compile(r"\\(?:text|textbf|textrm|mathrm|mathbf)\s*\{(.*)\}", re.S)
 _IMAGINARY = re.compile(r"(?<=\d)i\b")
+_THOUSANDS = re.compile(r"[+-]?\d{1,3}(?:,\d{3})+(?:\.\d+)?")
+_OPEN, _CLOSE = "([{", ")]}"
 
 
 class GoldError(ValueError):
@@ -145,7 +150,10 @@ def _exponent(x) -> int:
 def _close(g, a, gold: Parsed, gold_decimal: bool, answer_decimal: bool) -> bool:
     if g == a:
         return True
-    gv, av = sympy.N(g, DIGITS), sympy.N(a, DIGITS)
+    if g.is_Rational and a.is_Rational:  # decimals are rationals here: compare exactly
+        gv, av = g, a
+    else:
+        gv, av = sympy.N(g, DIGITS), sympy.N(a, DIGITS)
     if not (gv.is_finite and av.is_finite):
         return False
     diff, scale = abs(gv - av), abs(gv)
@@ -211,8 +219,62 @@ def _unwrap(g, a):
     return g, a
 
 
+def _top_level(s: str) -> list[str]:
+    """s split at the commas outside all brackets and braces."""
+    items, depth, start = [], 0, 0
+    for i, ch in enumerate(s):
+        depth += (ch in _OPEN) - (ch in _CLOSE)
+        if ch == "," and depth == 0:
+            items.append(s[start:i].strip())
+            start = i + 1
+    return items + [s[start:].strip()]
+
+
+def _closes_at_end(s: str) -> bool:
+    """The bracket opening s is closed by its last character."""
+    depth = 0
+    for i, ch in enumerate(s):
+        depth += (ch in _OPEN) - (ch in _CLOSE)
+        if depth == 0:
+            return i == len(s) - 1
+    return False
+
+
+def as_list(s: str) -> tuple[str, list[str]] | None:
+    """("bare", items) for a comma list of two or more items, ("paren", items) for one in parentheses, else None. A
+    number with thousands separators (1,000 or 1,\\!000) is no list, and neither is an interval with a bracket."""
+    s = re.sub(r"\\(?:left|right)(?![A-Za-z])", "", _strip(s))
+    s = re.sub(r"(?<=\d),\\!(?=\d{3})", "", s)
+    if _THOUSANDS.fullmatch(s):
+        return None
+    form = "bare"
+    if s.startswith("(") and s.endswith(")") and _closes_at_end(s):
+        form, s = "paren", s[1:-1]
+    items = _top_level(s)
+    return (form, items) if len(items) >= 2 and all(items) else None
+
+
+def _matched(answers: list[str], golds: list[str]) -> bool:
+    """A one-to-one matching of equivalent elements (greedy)."""
+    rest = list(answers)
+    for g in golds:
+        hit = next((i for i, a in enumerate(rest) if equivalent(a, g)), None)
+        if hit is None:
+            return False
+        rest.pop(hit)
+    return not rest
+
+
 def equivalent(answer: str, gold: str) -> bool:
     """Whether the answer content equals the reference. Raises GoldError if the reference does not parse."""
+    ref_list, got_list = as_list(gold), as_list(answer)
+    if ref_list and got_list:
+        (ref_form, refs), (got_form, gots) = ref_list, got_list
+        if len(refs) != len(gots):
+            return False
+        if ref_form == got_form == "bare":
+            return _matched(gots, refs)
+        return all(equivalent(a, g) for a, g in zip(gots, refs))
     ref = parse_gold(gold)
     got = parse_answer(answer)
     if got is None:

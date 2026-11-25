@@ -8,9 +8,10 @@ import pytest
 from evotaste.verify import (HELDOUT_WRAPPERS, TRAIN_WRAPPERS, WRAPPERS, Job, Verdict, gold_check, gold_ok,
                              verify_many)
 from evotaste.verify.equivalence import equivalent
-from evotaste.verify.judge import PROGRAM_TIMEOUT_S, judge, resolve_choice, resolve_label
+from evotaste.verify import judge as judge_module
+from evotaste.verify.judge import judge, resolve_choice, resolve_label
 from evotaste.verify.pool import Pool
-from evotaste.verify.sandbox import EXIT_S
+from evotaste.verify.sandbox import EXIT_S, WALL_FACTOR
 from evotaste.verify.wrappers import ANSWER_KINDS, for_kind
 
 BOTH = ("direct", "program")
@@ -31,6 +32,12 @@ def open_job(text, gold, wrapper="box", channels=("direct",)):
     ("2^{-60}", "\\frac{1}{1152921504606846976}"), ("3.14", "\\pi"), ("1.98", "1.9786"), ("1,234.5", "1234.5"),
     ("3+4i", "3 + 4i"), ("-2+3i", "3 i - 2"), ("\\mathbf{2340}", "2340"),
     ("y=2x+1", "y=1+2x"), ("x=3", "3"), ("\\infty", "\\infty"),
+    # exact or more precise answers to rounded decimal references
+    ("1.33", "\\frac{4}{3}"), ("1.33", "1.3333"), ("0.67", "\\frac{2}{3}"), ("0.9", "0.8962"), ("0.5", "0.504"),
+    # comma lists and tuples
+    ("1, 2", "2, 1"), ("1, 2", "1,2"), ("(1, 2)", "1, 2"), ("1, 2", "(1, 2)"), ("(1, 2)", "\\left( 1, 2 \\right)"),
+    ("-1, \\frac{1}{2}, 3", "3, -1, 0.5"), ("(0.5, 3)", "(\\frac{1}{2}, 3)"), ("1, 1, 2", "1, 2, 1"),
+    ("1,000", "1000"), ("10,\\!000", "10000"),
 ])
 def test_equal_values_in_other_notation_are_accepted(gold, answer):
     assert equivalent(answer, gold)
@@ -38,8 +45,9 @@ def test_equal_values_in_other_notation_are_accepted(gold, answer):
 
 @pytest.mark.parametrize("gold,answer", [
     # near-miss numbers
-    ("17", "18"), ("17", "-17"), ("17", "17.1"), ("1000", "1000.004"), ("0.5", "0.51"), ("0.5", "0.504"),
+    ("17", "18"), ("17", "-17"), ("17", "17.1"), ("1000", "1000.004"), ("0.5", "0.51"), ("0.5", "0.6"),
     ("3.14", "3.15"), ("3.14", "3.145"), ("3.14", "3.1"), ("0.0333", "0.0334"), ("1234.5", "1234.55"),
+    ("1.33", "1.34"), ("0.9", "0.94"), ("0.9", "0.86"),  # the last stated digit; the 2% cap
     ("\\frac{1}{3}", "0.333"), ("\\pi", "3.14"), ("\\frac{\\sqrt{2}}{2}", "0.7071"),
     # tiny values: math-verify's own comparison accepts all of these
     ("0.0000001", "0.0000002"), ("3.2\\times 10^{-19}", "1.6\\times 10^{-19}"), ("3.2e-19", "1.6e-19"),
@@ -50,6 +58,10 @@ def test_equal_values_in_other_notation_are_accepted(gold, answer):
     # wrong structure or form
     ("5", "x > 5"), ("(1,2)", "(2,1)"), ("[0,1)", "[0,1]"), ("1", "x^2 + 1"), ("x+1", "y+1"), ("3+4i", "3-4i"),
     ("\\infty", "-\\infty"), ("2", "The answer is 2"), ("2", ""),
+    # comma lists and tuples: order of a tuple, missing or extra elements, brackets of intervals
+    ("(1, 2)", "(2, 1)"), ("(1, 2)", "2, 1"), ("1, 2", "(2, 1)"), ("1, 2", "1"), ("1, 2", "1, 2, 3"),
+    ("1, 2, 3", "1, 2"), ("1, 1, 2", "1, 2, 2"), ("(1, 2, 3)", "(1, 2)"), ("[1, 2]", "1, 2"), ("[1, 2)", "(1, 2)"),
+    ("(1, 2]", "1, 2"), ("1, 2", "[1, 2]"), ("1, 2", "1, 3"), ("1000", "1, 000"),
 ])
 def test_wrong_answers_are_rejected(gold, answer):
     assert not equivalent(answer, gold)
@@ -136,11 +148,12 @@ def test_program_must_print_the_answer_on_its_last_line():
     ("import os\nprint(7, flush=True)\nwhile True:\n    try:\n        os.fork()\n    except OSError:\n        pass",
      "program "),
 ])
-def test_failing_hanging_or_forking_programs_are_incorrect(program, error):
+def test_failing_hanging_or_forking_programs_are_incorrect(program, error, monkeypatch):
+    monkeypatch.setattr(judge_module, "PROGRAM_TIMEOUT_S", 1)  # 1 s of CPU, 5 s of wall clock
     t0 = time.monotonic()
     v = open_job(f"```python\n{program}\n```", "7", channels=BOTH)
     assert (v.reward, v.correct_any, v.channel) == (0.0, False, "program")
-    assert v.error.startswith(error) and time.monotonic() - t0 < PROGRAM_TIMEOUT_S + EXIT_S + 2
+    assert v.error.startswith(error) and time.monotonic() - t0 < WALL_FACTOR * 1 + EXIT_S + 3
 
 
 # -- choice and verdict ---------------------------------------------------------------------------------------------
@@ -221,8 +234,8 @@ def test_programs_that_exit_skip_or_tamper_never_pass(cheat, gold):
 
 def test_slow_program_fails_at_the_item_time_limit():
     t0 = time.monotonic()
-    v = code_job("import time\ntime.sleep(30)\n" + REF, {**ASSERT, "time_limit_s": 2})
-    assert (v.reward, v.error) == (0.0, "timeout") and time.monotonic() - t0 < 2 + EXIT_S + 2
+    v = code_job("import time\ntime.sleep(30)\n" + REF, {**ASSERT, "time_limit_s": 1})
+    assert (v.reward, v.error) == (0.0, "timeout") and time.monotonic() - t0 < WALL_FACTOR * 1 + EXIT_S + 3
 
 
 def test_code_needs_a_python_tagged_block_for_the_reward():

@@ -19,7 +19,7 @@ from dataclasses import dataclass
 
 from evotaste.verify import equivalence
 from evotaste.verify.equivalence import balanced
-from evotaste.verify.sandbox import OVERHEAD_S, run_python
+from evotaste.verify.sandbox import OVERHEAD_S, WALL_FACTOR, run_python
 from evotaste.verify.wrappers import WRAPPERS, Found, for_kind, python_block
 
 KINDS = ("open", "choice", "verdict", "code")
@@ -29,6 +29,7 @@ PROGRAM_TIMEOUT_S = 5
 PROGRAM_MEMORY_MB = 512
 CODE_TIME_LIMIT_S = 10
 CODE_MEMORY_MB = 1024
+CPU_EXHAUSTED = 128 + 24  # exit status of a job killed by SIGXCPU at its CPU-time limit
 
 
 @dataclass(frozen=True)
@@ -68,8 +69,8 @@ def check_job(job: Job) -> None:
 def budget_s(job: Job) -> float:
     """Sandbox time a job may spend (a program, or the tests run on up to two extracted programs)."""
     if job.kind == "code":
-        return 2 * (float(job.gold.get("time_limit_s", CODE_TIME_LIMIT_S)) + OVERHEAD_S)
-    return PROGRAM_TIMEOUT_S + OVERHEAD_S if "program" in job.channels else 0.0
+        return 2 * (WALL_FACTOR * float(job.gold.get("time_limit_s", CODE_TIME_LIMIT_S)) + OVERHEAD_S)
+    return WALL_FACTOR * PROGRAM_TIMEOUT_S + OVERHEAD_S if "program" in job.channels else 0.0
 
 
 # -- the final answer -----------------------------------------------------------------------------------------------
@@ -206,7 +207,7 @@ def run_tests(program: str, gold: dict) -> str | None:
         return "program defines __eq__"  # an always-equal object would pass equality tests
     r = run_python(main, files=files, timeout_s=float(gold.get("time_limit_s", CODE_TIME_LIMIT_S)),
                    memory_mb=int(gold.get("memory_mb", CODE_MEMORY_MB)))
-    if r.timed_out:
+    if r.timed_out or r.returncode == CPU_EXHAUSTED:
         return "timeout"
     if r.returncode == 0 and nonce in r.stdout.split("\n"):
         return None
@@ -217,7 +218,7 @@ def run_tests(program: str, gold: dict) -> str | None:
 def program_output(program: str) -> tuple[str | None, str | None]:
     """(last non-empty line of the program's output, error) for the program channel."""
     r = run_python(program, timeout_s=PROGRAM_TIMEOUT_S, memory_mb=PROGRAM_MEMORY_MB)
-    if r.timed_out:
+    if r.timed_out or r.returncode == CPU_EXHAUSTED:
         return None, "program timeout"
     if r.returncode != 0:
         return None, f"program exit {r.returncode}: {r.stderr.strip()[-300:]}"
