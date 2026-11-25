@@ -7,7 +7,6 @@ Parts, each a fixed list of jobs (task, samples, context) cut into chunks of `ch
   train      a seeded draw from every training source's train part (capped by domain), `train.samples` per item
   selection  the first items of every selection unit (probe, then evaluation items) and of the procedural families'
              evaluation stream, `selection.samples` per item
-  channels   sweet-spot open items of the train census, `channels.samples` under each forced answer channel
   contexts   the probe set's plain items, `contexts.samples` under each context of the contexts file
 
 Generation is at temperature 1 with `max_tokens`, each request seeded by (part, uid, variant). A chunk's records are
@@ -30,7 +29,6 @@ import hashlib
 import json
 import logging
 import os
-import random
 import resource
 import subprocess
 import time
@@ -41,11 +39,10 @@ import numpy as np
 import yaml
 
 from evotaste.records import now, read_jsonl_gz, write_jsonl_gz
-from evotaste.tasks import Suites, Task, probe_set, procedural_tasks, prompt_ids, rewrap, score_many, stable_seed
+from evotaste.tasks import Suites, Task, probe_set, procedural_tasks, prompt_ids, score_many, stable_seed
 
 log = logging.getLogger("evotaste.census")
-PARTS = ("train", "selection", "channels", "contexts")
-FORCED = ("direct", "program")
+PARTS = ("train", "selection", "contexts")
 MAX_DEATHS = 5  # a chunk with more samples whose verifier or scorer process died (or 1%) is refused
 
 
@@ -112,29 +109,13 @@ def strata_table(records: list[dict], train_jobs: list[CensusJob]) -> dict[str, 
     return {uid: (sum(v), len(v)) for uid, v in passes.items()}
 
 
-def jobs_of(part: str, cfg: dict, suites: Suites, limit: int | None, base: Path) -> list[CensusJob]:
-    """The part's job list, a pure function of the config, the suites file and (for channels) the train census."""
+def jobs_of(part: str, cfg: dict, suites: Suites, limit: int | None) -> list[CensusJob]:
+    """The part's job list, a pure function of the config and the suites file."""
     p = cfg["parts"][part]
     if part == "train":
         return [CensusJob(t, p["samples"], None, "default") for t in train_items(cfg, suites, limit)]
     if part == "selection":
         return [CensusJob(t, p["samples"], None, "default") for t in selection_items(cfg, suites, limit)]
-    if part == "channels":
-        train_jobs = jobs_of("train", cfg, suites, limit, base)
-        table = strata_table(read_part(base, "train", len(chunks(train_jobs, cfg["chunk_items"]))), train_jobs)
-        by_source: dict[str, list[Task]] = collections.defaultdict(list)
-        for j in train_jobs:
-            passes, samples = table[j.task.uid]
-            if j.task.kind == "open" and _stratum(passes, samples) == "sweet":
-                by_source[j.task.family].append(j.task)
-        want = min(p["items"], limit or p["items"])
-        pools = [random.Random(stable_seed("census-channels", s)).sample(v, len(v)) for s, v in sorted(by_source.items())]
-        chosen = []
-        while len(chosen) < want and any(pools):  # equal shares of the open training sources
-            for pool in pools:
-                if pool and len(chosen) < want:
-                    chosen.append(pool.pop())
-        return [CensusJob(rewrap(t, channels=(c,)), p["samples"], None, c) for t in chosen for c in FORCED]
     if part == "contexts":
         from evotaste.config import load_contexts
 
@@ -177,7 +158,7 @@ def free_mib() -> int:
 def _records(part: str, job: CensusJob, samples, scores) -> list[dict]:
     t = job.task
     return [{"part": part, "uid": t.uid, "family": t.family, "domain": t.domain, "kind": t.kind, "wrapper": t.wrapper,
-             "channels": list(t.channels), "context": job.context, "variant": job.variant, "sample": k,
+             "context": job.context, "variant": job.variant, "sample": k,
              "text": s.text, "completion_tokens": len(s.token_ids), "finish_reason": s.finish_reason,
              "reward": sc.reward, "correct_any": sc.correct_any, "complied": sc.complied, "channel": sc.channel,
              "truncated": sc.truncated, "extracted": sc.extracted, "error": sc.error}
@@ -192,7 +173,7 @@ def run_part(config: Path, part: str, shard: str, limit: int | None, attach: str
     cfg = load_config(config)
     base = out_dir(cfg, limit)
     suites = Suites(cfg["suites"])
-    jobs = jobs_of(part, cfg, suites, limit, base)
+    jobs = jobs_of(part, cfg, suites, limit)
     allowed = _open_uids(suites) | {t.uid for t in probe_set(suites)} | {
         j.task.uid for j in jobs if j.task.kind == "procedural" and j.task.family in suites.procedural}
     stray = sum(j.task.uid not in allowed for j in jobs)
@@ -280,19 +261,11 @@ def _lengths(rs: list[dict]) -> dict:
 
 def _block(rs: list[dict]) -> dict:
     n = len(rs)
-    out = {"samples": n, "accuracy": round(sum(r["reward"] for r in rs) / n, 4),
+    return {"samples": n, "accuracy": round(sum(r["reward"] for r in rs) / n, 4),
            "correct_any": round(sum(r["correct_any"] for r in rs) / n, 4),
            "complied": round(sum(r["complied"] for r in rs) / n, 4),
            "truncated": round(sum(r["truncated"] for r in rs) / n, 4), "errors": sum(r["error"] is not None for r in rs),
            "tokens": _lengths(rs)}
-    opened = [r for r in rs if r["kind"] == "open"]
-    if opened:
-        out["channels"] = {}
-        for ch in ("direct", "program", None):
-            sub = [r for r in opened if r["channel"] == ch]
-            out["channels"][str(ch)] = {"share": round(len(sub) / len(opened), 4),
-                                        "accuracy": round(sum(r["reward"] for r in sub) / len(sub), 4) if sub else None}
-    return out
 
 
 def summarize(config: Path, limit: int | None) -> None:
@@ -302,13 +275,13 @@ def summarize(config: Path, limit: int | None) -> None:
     summary: dict = {"time": now(), "config": cfg, "limit": limit, "parts": {}}
     for part in PARTS:
         try:
-            jobs = jobs_of(part, cfg, suites, limit, base)
+            jobs = jobs_of(part, cfg, suites, limit)
             records = read_part(base, part, len(chunks(jobs, cfg["chunk_items"])))
         except SystemExit as e:
             log.warning("%s", e)
             continue
         by = collections.defaultdict(list)
-        key = {"train": "family", "selection": "family", "channels": "variant", "contexts": "context"}[part]
+        key = {"train": "family", "selection": "family", "contexts": "context"}[part]
         for r in records:
             by[r[key]].append(r)
         block = {k: _block(v) for k, v in sorted(by.items())}
@@ -326,11 +299,6 @@ def summarize(config: Path, limit: int | None) -> None:
             path.write_text(text)
             summary["strata"] = {"path": str(path), "sha256": hashlib.sha256(text.encode()).hexdigest(),
                                  "items": len(table)}
-        if part == "channels":
-            for variant in FORCED:
-                sub = by.get(variant, [])
-                block[variant]["by_source"] = {s: _block([r for r in sub if r["family"] == s])
-                                               for s in sorted({r["family"] for r in sub})}
         if part == "contexts":
             for name, rs in by.items():
                 block[name]["by_domain"] = {d: _block([r for r in rs if r["domain"] == d])

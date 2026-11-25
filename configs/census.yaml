@@ -21,8 +21,5 @@ parts:
     samples: 4
     cap: 250              # items per selection unit: its probe items, then its evaluation items
     per_family: 25        # instances of each procedural selection family (the format probe)
-  channels:               # sweet-spot open items, under each forced answer channel (direct, program)
-    samples: 4
-    items: 1500
   contexts:               # the probe set's plain items, under each context of the contexts file
     samples: 2

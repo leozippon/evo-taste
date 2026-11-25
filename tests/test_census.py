@@ -8,7 +8,7 @@ import pytest
 import yaml
 
 from evotaste import census, external
-from evotaste.records import read_jsonl_gz, write_jsonl_gz
+from evotaste.records import read_jsonl_gz
 from evotaste.tasks import Suites
 
 
@@ -46,21 +46,13 @@ def test_census_never_asks_for_the_vault(tmp_path, monkeypatch):
     monkeypatch.setattr(external, "items", spy)
     cfg_path = config(tmp_path)
     cfg, suites = census.load_config(cfg_path), Suites("configs/suites-r2.yaml")
-    base = tmp_path / "out"
-    jobs = {p: census.jobs_of(p, cfg, suites, 5, base) for p in ("train", "selection", "contexts")}
-    train = jobs["train"]
-    for c, chunk in enumerate(census.chunks(train, cfg["chunk_items"])):  # a fake train census for the channels part
-        write_jsonl_gz(census.chunk_path(base, "train", c),
-                       [{"uid": j.task.uid, "reward": float(k < 3)} for j in chunk for k in range(8)])
-    jobs["channels"] = census.jobs_of("channels", cfg, suites, 5, base)
+    jobs = {p: census.jobs_of(p, cfg, suites, 5) for p in census.PARTS}
     assert set(asked) <= {"train", "selection"} and asked
     open_uids = census._open_uids(suites)
     for part, js in jobs.items():
         assert js, part
         outside = [j for j in js if j.task.uid not in open_uids and j.task.family not in suites.procedural]
         assert not outside, part
-    assert {j.task.channels for j in jobs["channels"]} == {("direct",), ("program",)}
-    assert {j.task.uid for j in jobs["channels"]} <= {j.task.uid for j in train if j.task.kind == "open"}
     assert len({j.context for j in jobs["contexts"]}) == 12
     tree = ast.parse(pathlib.Path("evotaste/census.py").read_text())
     names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} | {
@@ -93,7 +85,7 @@ def test_run_is_resumable_and_sharded(chdir_results, monkeypatch):
     cfg_path = config(chdir_results, selection={"samples": 2, "per_family": 1})
     cfg = census.load_config(cfg_path)
     base = census.out_dir(cfg, 3)
-    jobs = census.jobs_of("selection", cfg, Suites("configs/suites-r2.yaml"), 3, base)
+    jobs = census.jobs_of("selection", cfg, Suites("configs/suites-r2.yaml"), 3)
     n_chunks = len(census.chunks(jobs, cfg["chunk_items"]))
     assert n_chunks >= 4
     census.run_part(cfg_path, "selection", "1/3", 3, "http://unused", {})

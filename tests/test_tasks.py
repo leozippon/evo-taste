@@ -20,16 +20,15 @@ def open_item(source="gsm8k_train", k=0, gold="18"):
 
 
 def test_instructions():
+    from evotaste.verify import WRAPPERS
+
     t = make_task(open_item())
-    assert (t.wrapper, t.channels) == ("box", ("direct", "program")) and "\\boxed{...}" in t.question
-    assert tasks.OPEN_INSTRUCTION in t.question and t.question.startswith(t.problem)
+    assert t.wrapper == "box" and t.question == f"{t.problem}\n\n{WRAPPERS['box'].instruction}"
+    assert "Python" not in t.question  # no program route is offered
     v = rewrap(t, "final_line")
-    assert (v.wrapper, v.channels) == ("final_line", ("direct",))
-    assert "Final answer:" in v.question and tasks.OPEN_INSTRUCTION not in v.question and "\\boxed" not in v.question
-    forced = rewrap(t, channels=("program",))
-    assert forced.question.endswith(tasks.PROGRAM_ONLY) and "\\boxed" not in forced.question
+    assert v.wrapper == "final_line" and "Final answer:" in v.question and "\\boxed" not in v.question
     choice = make_task(sources._choice("aqua", "1", "math", "Which?", ["2", "3"], 1))
-    assert choice.channels == () and "letter of the correct option" in choice.question
+    assert "letter of the correct option" in choice.question
     verdict = make_task(sources._verdict("folio", "1", "logic", "P. C?", ("True", "False", "Uncertain"), "True"))
     assert "exactly one of: True, False, Uncertain" in verdict.question
     code = make_task(Item("kodcode", "x", "code", "code", "Add two numbers.",
@@ -49,23 +48,20 @@ def test_prompt_ids_append_the_context_to_the_system_prompt():
     assert "<think>\n\n</think>" in plain  # thinking disabled
 
 
-def test_scores_follow_the_wrapper_the_channel_and_truncation():
+def test_scores_follow_the_wrapper_and_truncation():
     t = make_task(open_item())
     boxed, final = "So 18 eggs.\n\\boxed{18}", "So 18 eggs.\nFinal answer: 18"
     program = "Compute it.\n```python\nprint(20 - 2)\n```"
     s = score_many([(t, boxed, "stop"), (t, boxed, "length"), (t, final, "stop"), (t, program, "stop"),
-                    (rewrap(t, "final_line"), final, "stop"), (t, "\\boxed{17}", "stop")])
+                    (rewrap(t, "final_line"), final, "stop"), (t, "\\boxed{17}", "stop"),
+                    (t, boxed + "\n```python\nprint(17)\n```", "stop")])
     assert (s[0].reward, s[0].complied, s[0].channel, s[0].truncated) == (1.0, True, "direct", False)
     assert (s[1].reward, s[1].truncated, s[1].correct_any) == (0.0, True, True)
     assert (s[2].reward, s[2].complied, s[2].correct_any) == (0.0, False, True)  # right value, wrong wrapper
-    assert (s[3].reward, s[3].channel) == (1.0, "program")
+    assert (s[3].reward, s[3].complied) == (0.0, False)  # a program is no answer: the route is not offered
     assert s[4].reward == 1.0
     assert (s[5].reward, s[5].correct_any) == (0.0, False)
-    silent = boxed + "\n\nOr in Python:\n```python\neggs = 20 - 2\neggs\n```"  # a boxed answer always wins
-    forced = rewrap(t, channels=("program",))
-    s = score_many([(t, silent, "stop"), (forced, program, "stop"), (forced, boxed, "stop")])
-    assert (s[0].reward, s[0].channel) == (1.0, "direct")
-    assert (s[1].reward, s[1].channel) == (1.0, "program") and s[2].reward == 0.0
+    assert (s[6].reward, s[6].channel) == (1.0, "direct")  # a program after the box is ignored
 
 
 def test_procedural_scoring_is_strict_and_lenient():
@@ -196,7 +192,7 @@ def test_stream_obeys_the_mix(fake):
     assert abs(len(variants) - Fraction(3, 20) * len(noncode)) <= 1
     assert {t.wrapper for t in variants} <= set(TRAIN_WRAPPERS) and len({t.wrapper for t in variants}) > 1
     assert all(t.wrapper == "code" for b in batches for t in b if t.domain == "code")
-    assert all(tasks.OPEN_INSTRUCTION not in t.question for t in variants)
+    assert all("\\boxed" not in t.question for t in variants)
 
 
 def test_stream_draws_without_replacement_until_a_pool_is_exhausted(fake):

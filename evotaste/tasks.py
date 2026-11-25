@@ -39,14 +39,6 @@ if os.environ.get("PYTHONHASHSEED") != "0" or sys.flags.hash_randomization:
 log = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = "Reason step by step, then give your final answer in exactly the form the problem asks for."
-# The open instruction with both channels: a boxed answer always wins; only a response without one is answered by
-# its last Python block (the verifier's rule). The forced-program instruction offers that channel alone.
-OPEN_INSTRUCTION = ("Give your final answer as \\boxed{...}. If you would rather compute it, give no boxed answer and "
-                    "instead end with one Python program in a fenced block that prints the final answer; it will be "
-                    "run.")
-PROGRAM_ONLY = ("Give no boxed answer. End your response with one Python program in a fenced block (```python ... "
-                "```) that prints the final answer; it will be run, and only what it prints counts.")
-BOTH_CHANNELS = ("direct", "program")
 VAULT = "blind2"
 
 # Training stream (docs/dev/ROUND2_SPEC.md, WP-D): shares are exact fractions so that the stream's cumulative counts
@@ -79,7 +71,6 @@ class Task:
     gold: object = field(compare=False, repr=False)
     wrapper: str = "box"  # id of the answer wrapper in force (evotaste.verify.WRAPPERS)
     stratum: str | None = None  # "mastered" | "sweet" | "frontier" in the training stream, else None
-    channels: tuple[str, ...] = ()  # answer channels of an open task: ("direct", "program"), or one of them
     problem: str = field(default="", compare=False, repr=False)  # the question without its answer instruction
 
 
@@ -88,7 +79,7 @@ class Score:
     reward: float  # 1.0 iff the answer is in the wrapper asked for, verified correct, and the completion stopped
     correct_any: bool  # verified correct under tolerant extraction (any known wrapper)
     complied: bool  # a final answer was found in the wrapper asked for
-    channel: str | None  # "direct" | "program" for kind open, else None
+    channel: str | None  # "direct" for an answered open task (the program route is not offered), else None
     truncated: bool  # generation stopped for any reason other than an end-of-sequence token
     extracted: str | None
     error: str | None = None
@@ -108,21 +99,12 @@ def default_wrapper(kind: str) -> str:
     return "code" if kind == "code" else "box"
 
 
-def default_channels(kind: str, wrapper: str) -> tuple[str, ...]:
-    """An open task asked for a box may also answer by program; any other wrapper has the direct channel only."""
-    if kind != "open":
-        return ()
-    return BOTH_CHANNELS if wrapper == "box" else ("direct",)
-
-
-def instruction(kind: str, gold, wrapper: str, channels: tuple[str, ...]) -> str:
-    """The answer instruction appended to a problem."""
+def instruction(kind: str, gold, wrapper: str) -> str:
+    """The answer instruction appended to a problem: the wrapper's sentence, after what the answer is for choice,
+    verdict and code. (The verifier's program route for open answers is not offered: the base model used it in 0.2%
+    of answers and appended an ignored program after its box in 60%.)"""
     from evotaste.verify import WRAPPERS
 
-    if kind == "open" and channels == ("program",):
-        return PROGRAM_ONLY
-    if kind == "open" and channels == BOTH_CHANNELS:
-        return OPEN_INSTRUCTION
     ask = WRAPPERS[wrapper].instruction
     if kind == "choice":
         return f"Answer with the letter of the correct option. {ask}"
@@ -140,25 +122,17 @@ def instruction(kind: str, gold, wrapper: str, channels: tuple[str, ...]) -> str
     return ask
 
 
-def make_task(item, wrapper: str | None = None, stratum: str | None = None,
-              channels: tuple[str, ...] | None = None) -> Task:
-    """The task of a dataset item (`sources.Item`) under a wrapper (default: the kind's) and answer channels
-    (default: both for an open task asked for a box)."""
+def make_task(item, wrapper: str | None = None, stratum: str | None = None) -> Task:
+    """The task of a dataset item (`sources.Item`) under a wrapper (default: the kind's)."""
     wrapper = wrapper or default_wrapper(item.kind)
-    channels = default_channels(item.kind, wrapper) if channels is None else tuple(channels)
-    question = f"{item.problem}\n\n{instruction(item.kind, item.gold, wrapper, channels)}"
-    return Task(item.uid, item.source, item.domain, item.kind, question, item.gold, wrapper, stratum, channels,
-                item.problem)
+    question = f"{item.problem}\n\n{instruction(item.kind, item.gold, wrapper)}"
+    return Task(item.uid, item.source, item.domain, item.kind, question, item.gold, wrapper, stratum, item.problem)
 
 
-def rewrap(task: Task, wrapper: str | None = None, channels: tuple[str, ...] | None = None,
-           stratum: str | None = None) -> Task:
-    """The same problem under another wrapper or set of channels (a guardrail variant, a forced channel)."""
-    wrapper = wrapper or task.wrapper
-    channels = default_channels(task.kind, wrapper) if channels is None else tuple(channels)
-    question = f"{task.problem}\n\n{instruction(task.kind, task.gold, wrapper, channels)}"
-    return dataclasses.replace(task, question=question, wrapper=wrapper, channels=channels,
-                               stratum=stratum if stratum is not None else task.stratum)
+def rewrap(task: Task, wrapper: str) -> Task:
+    """The same problem under another wrapper (a guardrail variant or a held-out wrapper)."""
+    question = f"{task.problem}\n\n{instruction(task.kind, task.gold, wrapper)}"
+    return dataclasses.replace(task, question=question, wrapper=wrapper)
 
 
 def prompt_ids(tokenizer, question: str, system: str = SYSTEM_PROMPT, context: str | None = None) -> list[int]:
@@ -195,7 +169,7 @@ def procedural_task(family: str, seed: int, index: int, domain: str = "logic") -
     from evotaste.verify import WRAPPERS
 
     question = f"{entry['question']}\n\n{WRAPPERS['box'].instruction}"
-    return Task(f"{family}/{seed}/{index}", family, domain, "procedural", question, entry, "box", None, (),
+    return Task(f"{family}/{seed}/{index}", family, domain, "procedural", question, entry, "box", None,
                 entry["question"])
 
 
@@ -415,7 +389,7 @@ def score_many(jobs: list[tuple[Task, str, str]], timeout: float | None = None) 
         if not pending:
             break
         verdicts = verify_many([Job(jobs[i][0].kind, jobs[i][1], jobs[i][0].gold, jobs[i][0].wrapper,
-                                    jobs[i][0].channels or ("direct",)) for i in pending], timeout)
+                                    ("direct",)) for i in pending], timeout)
         for i, v in zip(pending, verdicts):
             stopped = jobs[i][2] == "stop"
             out[i] = Score(float(v.reward == 1.0 and stopped), bool(v.correct_any), bool(v.complied), v.channel,
