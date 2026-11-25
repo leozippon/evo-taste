@@ -18,12 +18,29 @@
 ## Decisions
 
 - **The second vault is extended, not replaced.** Its sealed contents stay, and the blind halves of the new sources join it. The spent halves of the first vault become selection material.
-- **A program may stand in for a boxed answer on math problems.** This gives the environment one countable, substantive choice of strategy. It is a design decision the census can still overturn if the base model cannot use the option.
+- **A program may stand in for a boxed answer on math problems**, to give the environment one countable, substantive choice of strategy. The smoke census overturned this the same day; see below.
 - **Stances and tactics are matched by theme** (falsification, economy, foundations, evidence, structure), so that a difference in how well they survive training reflects the level of abstraction and not the theme.
 - **One measure of how much of a context a member carries**, the same for every context: the gain in the teacher's prediction of the member's uninstructed answers when the teacher is given the context, scaled between the base model and the instructed teacher.
 - **Self-imitation of a member's own successes** is the amplification variant under test, alongside the relative-only update.
 - Qwen3-1.7B stays the base model for the pilots; Qwen3-4B-Instruct is cached and is the fallback teacher.
 
+## Build and audits
+
+Four packages were built in parallel (verifiers and sandbox; sources, suites and census; engine; analysis) and three independent audits run on them. Reports are in `docs/dev/audits/`.
+
+- **Smoke census** (100 items per source, base model). Pass rates on training sources range from 0.34 (DeepScaleR) to 0.84 (ARC); responses have a median of about 385 tokens and a 99th percentile of about 2,700, so the length slope starting at 2,048 touches very few; 0.2% are cut off at 4,096.
+- **The answer rule was wrong and is changed.** Under "whichever comes last counts", 7% of math samples lost a correct boxed answer to a program appended afterwards that printed nothing (18% on GSM8K). A boxed answer now always wins; a program answers only when there is no box.
+- **The program route is dropped.** Once a boxed answer wins, the base model answers by program in 0.2% of math answers, yet the mere offer makes it append an ignored program after the box in 60% of them; forced to use the route it scores 0.23 against 0.40 directly. The offer bought no real choice of strategy and added a large presentational artefact, so math problems now simply ask for a boxed answer. This reverses the morning's decision.
+- **Engine audit: all eleven properties hold** (losses, distillation, clone exactness, sampling seeds, resume). One gap, repeated seeds not refused, is closed. The blind guard now also refuses the base model without a committed manifest.
+- **Verifier audit, on 18,624 real responses.** One source of false credit: exact values above about 10^40 were compared to 40 digits, so off-by-one answers passed (14 cases, a quarter of the Omni-MATH selection items). Several rejections depended on style: an option letter followed by formatted option text, a correct program followed by a usage example, a program printing a symbolic constant. All fixed; after the fix none of 7,113 perturbed references is accepted. Verdicts also depended on machine load through a wall-clock limit; now only CPU time decides and a starved job is re-run. About 5% of credited code answers are wrong but pass because the dataset's own tests are weak; this is accepted and affects all members alike. No sandbox escape was found.
+- **Blind-line audit.** Assignment by item id is sound and Round 1's vault is intact by id. The de-duplication was not: its approximate matching had poor recall and ignored reformatting, leaving an estimated 135 training or selection items with a copy in the vault. The smoke census had sampled the base model on two of them, and the audit also found that three early Round 1 runs hold answers to 57 MMLU-Pro questions that a later re-deal moved into the vault. Both are recorded in `docs/blind-exposures.md`; results at the opening will be given with and without exposed items. The de-duplication was rebuilt (a properly mixing hash; comparison on letters and digits only; a rule that separates copies from problems sharing a template with other numbers). By an independent measure 3 non-blind items still have a copy in the vault, against 135 before. 88 vault items are recorded as exposed, by hash, counting copies and Round 1's evaluations of near-copies in the first vault.
+- **Analysis package, validated on simulated truth.** A naive member-by-problem interaction reads pure differences in overall level as divergence (an SD of 2.6 points where none exists); the estimator used compares members within classes of item difficulty and reads zero there. Power at the planned sizes: an interaction SD of about 4 points is detectable with 28 members and 3,000 items; clone pairs sharing half their profile are told from unrelated pairs with six parents; an intraclass correlation needs 14 parents to detect 0.6; the stance-against-tactic comparison on five themes can show an effect size but cannot reach conventional significance.
+
+## Constraints met on the way
+
+- The account's processes share a CPU quota that other jobs of the same account keep saturated. Sandboxed verification is CPU-bound (about 0.3 s per code item), so sandboxes are now reused across jobs and limits are in CPU time.
+- An update on 4,096-token rollouts costs about 2.5k tokens per second of trainer time, and with sweet-spot items most rollouts carry gradient. Pilot steps are sized at 48 problems × 4 attempts.
+
 ## In progress
 
-- Three work packages are being built in parallel: verifiers and sandbox; sources, suites and census; engine (soft length slope, centred advantage, self-imitation, distillation seeding, clones, sampling seeds, context score). An independent audit of verifiers, blind separation and the new losses follows before the census is launched.
+- The full census and the seeding pilot, on the final instructions and the regenerated suites.

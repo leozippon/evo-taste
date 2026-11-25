@@ -25,8 +25,6 @@ Training moves from short synthetic puzzles to real datasets with automatic veri
 
 **Verification by meaning.** A math answer is correct if it is mathematically equal to the reference, whatever its notation. A multiple-choice answer is correct if it identifies the right option. Code is correct if it passes the item's tests in a sandbox. The same verifiers score training, selection and the blind test, so a member cannot win on notation.
 
-**Two ways to answer a math problem.** A problem with a numeric or symbolic answer may be answered directly, or by a short program whose printed output is the answer; the program is run and its output verified like any answer. This gives the environment one clear-cut strategic choice — reason it out or compute it — with similar reward on many problems and different strengths elsewhere. Which way a member leans is a substantive trait that can be counted.
-
 **Format guardrail.** By default the final answer goes in a box (or a code block). In 15% of training prompts the problem instead asks for a different, randomly chosen answer wrapper, and the reward requires it. Following a stated output instruction therefore stays rewarded throughout training. Compliance is measured on wrappers never used in training.
 
 **Length.** The token limit rises from 1,024 to 4,096. The flat penalty for unfinished answers is replaced by a gentle slope: nothing up to 2,048 tokens, then a deduction growing linearly to 0.25 at the limit. Checking and second attempts cost nothing; only running on toward the limit does.
@@ -68,10 +66,10 @@ Members learn from their own attempts as before: several attempts per problem, e
 
 ## Pilots
 
-**A. Census (no training).** The base model attempts the training pool eight times and the selection suite four times under the new prompts and verifiers. This yields the difficulty strata, the length distribution that the slope is checked against, an audit of the verifiers for false credit, and a first look at strategy: on which math problems each way of answering works, and how the base model behaves under each seeding context.
+**A. Census (no training).** The base model attempts the training pool eight times and the selection suite four times under the new prompts and verifiers. This yields the difficulty strata, the length distribution that the slope is checked against, an audit of the verifiers for false credit, and a first look at how the base model behaves under each seeding context.
 
 **B. Seeding (no reinforcement learning).** Each context is distilled once on prompts from all domains and once on math prompts only; two contexts are also seeded by Round 1's method, imitation of the teacher's correct answers, for comparison. Measured straight after seeding: how much of the context was absorbed, whether it shows up outside the domain it was seeded in, accuracy, and recitation.
 
-**C. Amplification and twins.** Fourteen seeds (five stances, six tactics, two controls, one unseeded) are each trained under both update rules for 60 steps of 64 problems × 4 attempts. A subset is then cloned: each clone pair continues from the same weights for another 60 steps with different random draws. The four requirements above are read off this pilot: health from the selection suite, format wrappers and strata; wash-out from the context measure; substance from the member-by-problem analysis and from counted traits such as the share of math answered by program; heritability from clone pairs against unrelated pairs.
+**C. Amplification and twins.** Fourteen seeds (five stances, six tactics, two controls, one unseeded) are each trained under both update rules for 60 steps of 64 problems × 4 attempts. A subset is then cloned: each clone pair continues from the same weights for another 60 steps with different random draws. The four requirements above are read off this pilot: health from the selection suite, format wrappers and strata; wash-out from the context measure; substance from the member-by-problem analysis, from each member's profile across domains and from counted traits of its answers; heritability from clone pairs against unrelated pairs.
 
 Culling is switched off in the pilots so that failures can be observed. The population design, the harvest rule and the stopping rule are written after pilot C, in a protocol committed before the population run starts.

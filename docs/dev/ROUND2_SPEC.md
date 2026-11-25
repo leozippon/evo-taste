@@ -12,6 +12,8 @@ Internal. The scientific design is `docs/design/round-2.md`; read it first. This
 - **Concurrent commits.** Three developers share one working tree. Touch only files in your package's scope. Commit with an explicit path list (`git add <paths>` then `git commit -m "..." -- <paths>`), never `git add -A` or `git commit -a`; retry if the index is locked. Push after each commit (`git push`). Leave `.mutagenignore` and anything you did not create alone. Run only your own tests while the others are mid-change; the full suite is run at integration.
 - Environment: `source scripts/env.sh` in every shell (sets `PYTHONHASHSEED=0`, the Hugging Face cache and endpoint). `math-verify` 0.9.0, `sympy`, `pytest`, `numpy`, `pandas` are installed. New dependencies go in `pyproject.toml`.
 
+> Amendment, 25 November: the program route for `open` items is no longer offered. With the offer in the instruction the base model answered by program in 0.2% of cases, appended an ignored program after the box in 60%, and scored .23 against .40 when forced to use it. The `open` instruction is the boxed-answer instruction, channels are `("direct",)` everywhere, and the census has no forced-channel part. The verifier keeps its program support, unused. Passages below that describe the offer are superseded by this note.
+
 ## Contract between packages
 
 Field and function names below are binding; everything else is the owner's choice.
