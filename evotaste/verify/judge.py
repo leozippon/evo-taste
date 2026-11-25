@@ -197,8 +197,9 @@ def resolve_choice(content: str, options: list[str]) -> int | None:
     elif m := _LETTER_TEXT.fullmatch(s):
         i = LETTERS.find(m.group(1) or m.group(2))
         text = _clean_label(m.group(3))
-        if any(o == text.lower() for j, o in enumerate(norm) if j != i) or _OTHER_LETTER.search(text):
-            return None  # the text is another option's, or names another letter: a hedge
+        own = i < len(norm) and norm[i] == text.lower()
+        if not own and any(o == text.lower() for o in norm) or _OTHER_LETTER.search(text):
+            return None  # the text is another option's (and not this one's), or names another letter: a hedge
         named.add(i)
     named |= {i for i, o in enumerate(norm) if o == s.lower()}
     if len(named) != 1:

@@ -10,7 +10,8 @@ interval reading is ambiguous: see `ambiguity`.)
 Whole contents are parsed by math-verify's LaTeX parser (as the content of a box: no free-text extraction), with its
 own wall-clock alarms off, so that a slow parse or comparison is bounded by the pool's deadline (undecided) and never
 silently "not equal". A program's output line that is a Python expression built only from numbers, arithmetic and
-sympy's printed names (pi, E, I, oo, sqrt, log, ...) is read as such instead, without eval. Numbers, and tuples, sets,
+sympy's printed names (pi, E, I, oo, sqrt, log, ...) is also read as such, without eval, when its LaTeX reading
+does not verify. Numbers, and tuples, sets,
 intervals and matrices of numbers, are compared here; anything with variables or relations is left to math-verify's
 symbolic comparison. math-verify's numeric comparison is bypassed for numbers because it rounds to six decimal places
 in absolute terms (so 1e-7 equals 2e-7) and chops tiny exact values (so 2^-60 equals 2^-61).
@@ -55,6 +56,7 @@ _SCIENTIFIC = re.compile(r"(?<![\w.])(\d+\.\d*|\.\d+)[eE]([+-]?\d+)(?![\w.])")
 _LONE_SCIENTIFIC = re.compile(r"([+-]?\d+)[eE]([+-]?\d+)")
 _COMMAND = re.compile(r"\\(?:text|textbf|textrm|mathrm|mathbf)\s*\{(.*)\}", re.S)
 _IMAGINARY = re.compile(r"(?<=\d)i\b")
+_LONE_I = re.compile(r"(?<![A-Za-z\\])i(?![A-Za-z])")  # i as a token of its own, not inside a word such as sin
 _THOUSANDS = re.compile(r"[+-]?\d{1,3}(?:,\d{3})+(?:\.\d+)?")
 _LOG = re.compile(r"\\log(?![_A-Za-z])")
 _OPEN, _CLOSE = "([{", ")]}"
@@ -165,13 +167,16 @@ def _python_reading(s: str):
         return None
 
 
-def parse_answer(s: str, program: bool = False) -> Parsed | None:
-    """A content (or, with `program`, a program's output line) as one expression, or None if it does not parse."""
+def parse_answer(s: str, python: bool = False) -> Parsed | None:
+    """A content as one expression, read as LaTeX (box content) or, with `python`, as a Python/sympy expression;
+    None if it does not parse that way."""
     s = _strip(s)
     if not s or len(s) > MAX_CHARS:
         return None
-    expr = _python_reading(s) if program else None
-    if expr is None:
+    if python:
+        if (expr := _python_reading(s)) is None:
+            return None
+    else:
         found = parse(f"\\boxed{{{_latex(s)}}}", extraction_config=_CONFIG, fallback_mode="no_fallback",
                       extraction_mode="first_match", parsing_timeout=None)
         exprs = [e for e in found if isinstance(e, (sympy.Basic, sympy.MatrixBase))]
@@ -179,8 +184,10 @@ def parse_answer(s: str, program: bool = False) -> Parsed | None:
             return None
         expr = exprs[0]
         imaginary = {x: sympy.I for x in expr.free_symbols if isinstance(x, sympy.Symbol) and x.name == "i"}
-        if imaginary:  # math-verify leaves i a symbol, so that (1+i)^2 would not equal 2i
-            expr = expr.xreplace(imaginary)
+        if imaginary and _LONE_I.search(s):  # math-verify leaves i a symbol, so that (1+i)^2 would not equal 2i
+            replaced = expr.xreplace(imaginary)
+            if not isinstance(replaced, sympy.logic.boolalg.BooleanAtom):
+                expr = replaced
     floats = expr.atoms(sympy.Float)
     if floats:  # the parser's binary floats back to the decimals they were read from (15 significant digits)
         expr = expr.xreplace({f: sympy.Rational(str(f)) for f in floats})
@@ -312,10 +319,14 @@ def _unwrap(g, a):
 
 
 def _whole(answer: str, gold: str, program: bool) -> bool:
+    """A program's output line counts in its LaTeX reading or, failing that, its Python reading (E is a label in
+    the first and Euler's number in the second; pi/4 is only meaningful in the second)."""
     ref = parse_gold(gold)
-    got = parse_answer(answer, program)
-    if got is None:
-        return False
+    return any(got is not None and _compare(ref, got)
+               for got in (parse_answer(answer, python) for python in ((False, True) if program else (False,))))
+
+
+def _compare(ref: Parsed, got: Parsed) -> bool:
     g, a = _unwrap(ref.expr, got.expr)
     if _numbers(g) and _numbers(a):
         return _same(g, a, ref, ref.decimal, got.decimal)

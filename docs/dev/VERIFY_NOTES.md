@@ -1,32 +1,50 @@
 # Verifier notes
 
-Internal notes for `evotaste/verify/`, the verifiers and sandbox that every Round 2 reward passes through. The build specification is the WP-V section of `docs/dev/ROUND2_SPEC.md`. This file states the rules exactly as implemented, how the sandbox is built, what was measured, and the known limitations. The guiding rule is the failure principle: anything that cannot be decided scores 0 and says why; nothing is credited by default.
+Internal notes for `evotaste/verify/`, the verifiers and sandbox that every Round 2 reward passes through. The build specification is the WP-V section of `docs/dev/ROUND2_SPEC.md`; the independent audit is `docs/dev/audits/VERIFIER_AUDIT_R2_2026-11-25.md`. This file states the rules exactly as implemented, how the sandbox is built, what was measured, and the known limitations. The guiding rule is the failure principle: nothing is credited by default, and anything that cannot be decided says so instead of passing for a wrong answer.
 
 ## Interface
 
-`verify_many(jobs, timeout=None)` takes `Job(kind, text, gold, wrapper, channels)` and returns one `Verdict(reward, correct_any, complied, channel, extracted, error)` per job, in order. Truncation is the caller's business: `reward` here means the final answer is in the wrapper asked for, through a channel offered, and verified correct. A malformed job (unknown kind, a wrapper that does not apply to the kind, the program channel anywhere but kind `open` with `box`) raises `ValueError` before anything runs.
+`verify_many(jobs, timeout=None)` takes `Job(kind, text, gold, wrapper, channels)` and returns one `Verdict(reward, correct_any, complied, channel, extracted, error)` per job, in order. Truncation is the caller's business: `reward` here means the final answer is in the wrapper asked for, through a channel offered, and verified correct. A malformed job (unknown kind, a wrapper that does not apply to the kind, the program channel anywhere but kind `open` with `box`, an open gold of the wrong shape) raises `ValueError` before anything runs.
+
+A verdict whose `error` satisfies `is_undecided(error)` (it contains `undecided:`) says nothing about the answer: the program ran out of wall clock before CPU time (see Sandbox), a sandbox could not run it, or the verifier's deadline passed. Its reward is 0, but the caller must repeat it or set it aside, never count it as wrong. The same holds for `gold_check` reasons. `RULES_VERSION` changes whenever a rule that can change a verdict or a `gold_check` result changes; stored verdicts and suites built under another version are stale.
 
 Gold formats:
 
 | Kind | Gold |
 |---|---|
-| `open` | the reference as a string, LaTeX or plain |
+| `open` | the reference as a string, LaTeX or plain; or `{"answer": str, "type": t}` with `t` one of `number`, `expression`, `tuple`, `list`, `interval` |
 | `choice` | `{"options": [text, ...], "answer": "C"}`, options in letter order |
 | `verdict` | `{"labels": [...], "answer": label}` |
-| `code` | `{"harness": "pytest" \| "assert" \| "check", "tests", "reference", "entry_point" (check only), "prelude" (optional), "time_limit_s" (default 10), "memory_mb" (default 1024)}` |
+| `code` | `{"harness": "pytest" \| "assert" \| "check", "tests", "reference", "entry_point" (check only), "prelude" (optional), "time_limit_s" (CPU seconds, default 10), "memory_mb" (default 1024)}` |
 
-`gold_check(items)` renders each reference in every wrapper of its kind (for code: the reference solution in a Python block) and returns, per item, `None` or the first reason it does not earn reward 1; `gold_ok(kind, gold)` is the single-item form. A reason of `timeout` means undecided rather than wrong. The program channel is not part of the check: a program printing the reference would be verified exactly like the boxed reference.
+The type of an open reference says how it is compared:
 
-`run_python(code, *, stdin=None, files=None, timeout_s, memory_mb)` runs a program in the sandbox and returns `Result(returncode, stdout, stderr, timed_out, seconds)`.
+| Type | Reference | Correct answers |
+|---|---|---|
+| `number`, `expression` | one value | one value, compared whole; a list never answers it |
+| `tuple` | elements written `(a, b)`, `[a, b]` or `a, b` | the same elements in the same order, written with any of these brackets or none (TheoremQA lists, "from least to greatest") |
+| `list` | elements written as for `tuple`, or `\{a, b\}` | the same elements in any order (a one-to-one matching), with any of these brackets, set braces included (lists of solutions) |
+| `interval` | `(a, b)`, `[a, b)`, a union | the same interval with the same brackets |
+
+An untyped reference that is a bare comma list or a parenthesised tuple is still compared as described under Equivalence, but `gold_check` refuses it, so the data layer must state the type of every list, tuple or closed-interval reference.
+
+`gold_check(items)` returns, per item, `None` or the first reason it is unusable; `gold_ok(kind, gold)` is the single-item form. A reference is refused when it is detectably ambiguous:
+- an untyped bare list, parenthesised tuple or bracketed list (`1, 2`, `(1, 2)`, `[0.333, 0.25]`);
+- a logarithm without a base whose natural and decimal readings differ (`\log 100`; `\log 1` passes);
+- a choice item whose correct option's text is also another option's.
+
+Otherwise the reference is rendered in every wrapper of its kind and must earn reward 1 in each; a code reference (the reference solution in a Python block) must pass within half of its item's CPU limit (see Measured). Half-open intervals, sets in braces and unions are not ambiguous. The program channel is not part of the check: a program printing the reference would be verified exactly like the boxed reference.
+
+`run_python(code, *, stdin=None, files=None, timeout_s, memory_mb)` runs a program in the sandbox and returns `Result(returncode, stdout, stderr, timed_out, seconds, cpu_s, undecided)`.
 
 ## Where the final answer is
 
-Every wrapper is matched literally, case included, apart from surrounding whitespace. Line wrappers look only at the last non-empty line of the response. Delimiter and block wrappers take their last occurrence anywhere; if that occurrence is unclosed (unbalanced braces, an unterminated fence) there is no answer, and an earlier occurrence is never used instead. Content must be non-empty, and the content of an answer wrapper must not contain another answer wrapper's markup: `Final answer: \boxed{5}` or `<answer>\boxed{5}</answer>` follows the default habit, not the instruction, and is not compliance. Programs are exempt from that rule.
+Every wrapper is matched literally, case included, apart from surrounding whitespace. Line wrappers look only at the last non-empty line of the response. Delimiter and block wrappers take their last occurrence anywhere. If the last opening marker is unclosed (an unbalanced `\boxed{`, an `<answer>` or `@@` with nothing closing it, an unterminated ```` ```answer ```` or ```` ```python ```` fence), there is no answer: an earlier occurrence is never used instead, nor another channel. In tolerant extraction it also prevents any wrapper ending before it from answering. Content must be non-empty, and the content of an answer wrapper must not contain another answer wrapper's markup: `Final answer: \boxed{5}` or `<answer>\boxed{5}</answer>` follows the default habit, not the instruction, and is not compliance. Programs are exempt from that rule.
 
 | Id | Role | Form |
 |---|---|---|
 | `box` | default for open, choice, verdict | last `\boxed{...}` with balanced braces |
-| `code` | default for code | last closed fenced block tagged `python`, `py` or `python3` |
+| `code` | default for code | the closed fenced blocks tagged `python`, `py` or `python3` (see Code) |
 | `final_line` | training | last line `Final answer: X` |
 | `json` | training | last line a JSON object whose only key is `"answer"`, value a string or number |
 | `hash` | training | last line `#### X` |
@@ -39,15 +57,17 @@ Every wrapper is matched literally, case included, apart from surrounding whites
 
 A test renders every wrapper and checks that no other wrapper extracts anything from it. Each wrapper also carries one instruction sentence ("..., where X is your final answer"); what the answer is (a letter, a label) is left to the prompt.
 
-With wrapper `box` and channels `("direct", "program")`, a response containing a boxed answer is answered directly: the last box is the final answer and any program is ignored. Only a response with no box at all and at least one fenced Python block is a program answer, its last block being run. (The base model often follows a correct box with an unasked-for program that prints nothing; under "whichever comes last" that lost 165 of 2,400 correct boxes in the smoke census.) With `("program",)` boxes are ignored and the last block counts (the census's forced channel), with `("direct",)` only the box. `channel` says which case applied. A program runs in the sandbox with 5 s of CPU time and 512 MiB; the last non-empty line of its standard output is verified like box content. A non-zero exit, a timeout or no output is incorrect, with `channel="program"` and the reason in `error`.
+With wrapper `box` and channels `("direct", "program")`, a response containing a box (closed or not) is answered directly: the last box is the final answer and any program is ignored. (The base model often follows a correct box with an unasked-for program that prints nothing; under "whichever comes last" that lost 165 of 2,400 correct boxes in the smoke census.) Only a response with no box at all and at least one fenced Python block is a program answer, its last block being run. With `("program",)` boxes are ignored and the last block counts (the census's forced channel), with `("direct",)` only the box. `channel` says which case applied.
 
-`correct_any` is true when the reward is, or when the answer ending last among all wrappers of the kind is correct, or, if there is none and the program channel is offered, the program's answer; for code, an untagged fenced block also counts. It is never "some answer somewhere was right", so a response hedging across two formats gains nothing.
+A program runs in the sandbox with 5 s of CPU time and 512 MiB. The last non-empty line of its standard output is the answer. If that line is a Python expression built only from numbers, `+ - * / **`, the names `pi`, `E`, `I`, `oo` and the functions `sqrt`, `cbrt`, `root`, `exp`, `log`, `ln`, trigonometric ones, `Abs`, `factorial`, `binomial`, `Rational`, it is read as that value. The expression is evaluated from its syntax tree, without `eval`, and integer exponents are capped at 10,000. A printed Python list `[a, b]` is a bare list. Any other line is read like box content. A sentence is not an answer: `Louise needs to bake 10 more cakes.` is wrong for 10. A non-zero exit, a CPU-limit kill or no output is incorrect, with `channel="program"` and the reason in `error`.
+
+`correct_any` is true when the reward is, or when the final answer under the same rules over all wrappers of the kind is correct, or, if there is none and the program channel is offered, the program's answer; for code, untagged fenced blocks also count. It is never "some answer somewhere was right", so a response hedging across two formats gains nothing.
 
 ## Equivalence of open answers
 
-Content is cleaned first: surrounding `$`, `$$`, `\(\)`, `\[\]`, `**`, backticks and a whole-answer `\text{}`, `\textbf{}`, `\mathrm{}` or `\mathbf{}` are removed, as is a trailing period; `**` becomes `^`; e-notation becomes a power of ten when the mantissa has a point (`3.2e-19`) or when it is the whole answer (`1e-05`); a coefficient before `i` is spaced so that `3i` and `3 i` both mean the imaginary unit. Contents over 500 characters are not taken for one answer. Both sides are then parsed by math-verify's LaTeX parser as box content, with no free-text extraction and no fallback to strings (its expression extractor finds numbers anywhere in a text, which turned `x**2 + 1` into `1`). The parser's binary floats are turned back into the exact decimals they were read from.
+Content is cleaned first: surrounding `$`, `$$`, `\(\)`, `\[\]`, `**`, backticks and a whole-answer `\text{}`, `\textbf{}`, `\mathrm{}` or `\mathbf{}` are removed, as is a trailing period; `**` becomes `^`; e-notation becomes a power of ten when the mantissa has a point (`3.2e-19`) or when it is the whole answer (`1e-05`); a coefficient before `i` is spaced, and a free `i` after parsing is the imaginary unit, so `3i`, `3 i` and `(1+i)^2 = 2i` behave. Contents over 500 characters are not taken for one answer. Whole contents are parsed by math-verify's LaTeX parser as box content, with no free-text extraction, no fallback to strings, and its wall-clock alarms off: a slow parse or comparison is bounded by the pool's deadline, so it is undecided, never silently "not equal". The parser's binary floats are turned back into the exact decimals they were read from.
 
-A bare comma list (`1, 2`, read as a list of solutions) or a parenthesised tuple (`(1, 2)`, `\left( 1, 2 \right)`) is split at its top-level commas and compared element by element, each element by the rules below: two bare lists in any order (a one-to-one matching), any other pair in order, so a bare list answers a tuple and a tuple answers a bare list when the elements agree in order; the number of elements must agree. A number with thousands separators (`1,000`, `10,\!000`) is no list, and an interval with a bracket (`[0, 1)`) is not split, so it still needs the same brackets.
+An untyped bare comma list (`1, 2`) or parenthesised tuple (`(1, 2)`, `\left( 1, 2 \right)`) is split at its top-level commas and compared element by element: two bare lists in any order, any other pair in order, so a bare list answers a tuple and the other way round when the elements agree in order; the number of elements must agree. A number with thousands separators (`1,000`, `10,\!000`) is no list, and an interval with a bracket is not split, so it needs the same brackets. Typed references follow their type (Interface).
 
 Numbers, and tuples, sets, intervals and matrices of numbers, are compared by these rules (g the reference, a the answer, |.| the complex modulus):
 
@@ -55,80 +75,115 @@ Numbers, and tuples, sets, intervals and matrices of numbers, are compared by th
 |---|---|
 | the reference contains a decimal literal | \|a − g\| < ½ unit in the last stated digit of its least precise decimal literal, and \|a − g\| < 2% of \|g\| |
 | exact reference, decimal answer | \|a − g\| ≤ 10⁻⁶\|g\| |
-| both exact | equal to 40 significant digits (60-digit evaluation) |
+| both exact | exactly equal: rationals as such; otherwise the difference must be shown to be zero by sympy (its own evaluation, simplification, or for algebraic numbers the minimal polynomial); undecided means not equal |
 | zero reference, decimal involved | \|a\| ≤ 10⁻¹² |
+
+The exact rule accepts every rewriting of the same value that was tried: fractions, radicals (`\sqrt{5+2\sqrt6}` for `\sqrt2+\sqrt3`), powers, factorials, binomials, logarithms with a base, trigonometric values. It rejects `2^{2012}-1` for `2^{2012}` and `100!+1` for `100!`. Until the audit, two exact values agreeing to 40 significant digits counted as equal, which credited 14 wrong Omni-MATH answers in the census. `e^{i\pi}` against `-1` is one rewriting sympy does not decide, so it is rejected.
 
 A percentage X% has the value X/100 and also matches X, as in math-verify. Containers must have the same type and shape; tuples compare in order, sets by a one-to-one matching, intervals by endpoints and openness. An answer `x = 5` or `2 + 3 = 5` stands for its last right-hand side when the reference is no equation, and a reference `x = 5` is answered by `5`; inequalities are never unwrapped. A number against anything with variables is wrong. Everything else (expressions with variables, equations, unions) goes to math-verify's `verify`, in strict mode.
 
 math-verify's own numeric comparison is bypassed because it gives false credit: it rounds floats to six decimals in absolute terms (1e-7 equals 2e-7, 1.6e-19 equals 3.2e-19) and compares exact values with `evalf(chop=True)` (2^-60 equals 2^-61, 10^-20 equals 2·10^-20). The decimal rule lets an exact or more precise answer to a rounded reference count (4/3 and 1.3333 for `1.33`, 2/3 for `0.67`, π for `3.14`), so that exact reasoning is not penalised against decimal rounding. The 2% cap keeps one-digit references from accepting answers far off (0.94 for `0.9`); the price is that a short reference meant exactly accepts answers within 2% (0.504 for `0.5`, though not 0.51). Rationals are compared exactly, so the strict bounds hold at their boundaries.
 
-## Choice, verdict and code
+## Choice and verdict
 
-A choice answer is cleaned (math delimiters, `\text`-like commands, markdown emphasis, quotes, a trailing period) and read three ways: a capital option letter in its usual dressings (`C`, `(C)`, `[C]`, `C.`, `C)`, `C:`, `Option C`), a letter followed by that same option's exact text (`C. 42`), or the exact text of an option (case and spacing aside). It counts only if these readings name exactly one existing option, so `B or C`, `B. 43` with 43 under D, a lower-case `b`, or a text shared by two options name none. A verdict is correct when the cleaned answer equals exactly one label of the item's closed set, case aside.
+A choice answer is cleaned (math delimiters, `\text`-like commands, markdown emphasis, quotes, a trailing period) and read three ways:
+- a capital option letter in its usual dressings (`C`, `(C)`, `[C]`, `C.`, `C)`, `C:`, `Option C`);
+- a letter with a separator followed by any text (`C. 42`, `B. \frac{2}{5}`, `(D) 180 \text{ Kcal}`): the letter decides;
+- the exact text of an option (case and spacing aside).
 
-For code, the program is saved as `solution.py`, after the item's prelude if it has one (trusted dataset text such as LeetCode's `from typing import *` and `ListNode`, placed exactly as if written at the top of the file), every top-level name of that file (underscored ones too) is imported ahead of the tests, and the harness runs in the sandbox with the item's time and memory limits:
+The text after a letter only vetoes when it is exactly another option's text (`B. 43` with 43 under D), or when it names another option letter (`(B), (C)`, `B. or C`). The answer counts only if its readings name exactly one existing option, so `B or C`, a lower-case `b`, or a text shared by two options name none. A verdict is correct when the cleaned answer equals exactly one label of the item's closed set, case aside.
 
+## Code
+
+The program is saved as `solution.py`, after the item's prelude if it has one (trusted dataset text such as LeetCode's `from typing import *`, `ListNode` and `sortedcontainers` imports, placed exactly as if written at the top of the file). Every top-level name of that file (underscored ones too) is imported ahead of the tests, and the harness runs in the sandbox with the item's CPU-time and memory limits:
 - `pytest` (KodCode): the tests run as `test_solution.py`; pass means pytest exits 0 with at least one passed test, no failure and no skip or xfail.
 - `assert` (MBPP+, whose `test` field is a script of assertions calling the function by name, and MBPP-style assertion lists): the tests run as a script.
 - `check` (HumanEval+, LeetCode): the tests run as a script, then `check(<entry_point>)`.
 
-Success is a random token the harness prints after the tests, together with exit status 0, so `os._exit(0)`, `sys.exit(0)`, `exit()` or killing itself never passes. The supplied files are written read-only (mode 0444); a job can change that for its own files, but the harness and the tests have been read by then, and nothing it writes reaches a later job. A program containing `__eq__` fails unless the reference contains it too (the rule looks at the model's code only, so a prelude defining `ListNode.__eq__` licenses nothing), because an object whose `__eq__` always returns true would pass equality-based tests.
+Which program runs: the last closed Python block, unless the response has several and the last does not define every name that the tests use and the reference defines (top-level functions, classes, assignments, imports). Then all Python blocks run, concatenated in order. A correct solution followed by an example-usage block passes, while a last block that redefines the tested function is judged alone. An unterminated last ```` ```python ```` fence is no answer.
+
+Success is a random token the harness prints after the tests, together with exit status 0, so `os._exit(0)`, `sys.exit(0)`, `exit()` or killing itself never passes. The supplied files are written read-only (mode 0444); a job can change that for its own files, but the harness and the tests have been read by then, and nothing it writes reaches a later job. A program containing `__eq__` fails unless the reference contains it too, because an object whose `__eq__` always returns true would pass equality-based tests. The rule looks at the model's code only, so a prelude defining `ListNode.__eq__` licenses nothing.
 
 ## Sandbox
 
 A sandbox is a long-lived bwrap instance, one per thread that calls `run_python` (one per verifier process in the pool), started as `setpriv --pdeathsig KILL bwrap ...` in its own session. Its root is empty except for read-only binds of `/usr` (with the merged-usr symlinks `/bin`, `/lib`, `/lib64`, `/sbin`), the project's virtual environment (`sys.prefix`), the directory of uv-managed interpreters its `python` links to (`sys.base_prefix`'s parent) and the supervisor script, a fresh `/proc`, bwrap's minimal `/dev`, and a 64 MiB tmpfs at `/tmp`. The root and `/dev`, which bwrap builds as uncapped tmpfs mounts, are remounted read-only, so `/tmp` is the only writable place. The repository, `.env`, home directories, `/etc`, other users' data, host `/tmp` and host sockets do not exist inside; a bind that would expose the repository root, `/home` or the home directory as a whole is refused. All namespaces are unshared (network: only a private loopback; own pid and IPC namespaces), the environment is replaced by a fixed one (`HOME=/tmp`, UTF-8, `PYTHONHASHSEED=0`, one BLAS thread, `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`), and capabilities are dropped.
 
-Sandboxes are reused because bwrap's own setup is serialized by the kernel machine-wide: about 30 starts per second here whatever the concurrency, about 6 under other users' load (bare user and mount namespaces from `unshare` reach over 1,000 per second, so the cost is bwrap's mounts). PID 1 of each sandbox is a supervisor (`supervisor.py`, standard library only), which receives jobs over a pipe as length-prefixed JSON and runs them one at a time. For each job it writes `main.py` and the files into the empty `/tmp` with mode 0444 and starts a fresh interpreter, whose bootstrap sets hard limits the job cannot raise: address space `memory_mb`, CPU time ceil(`timeout_s`) s, 8 MiB per file (which also caps stdout and stderr, captured in memfds), 32 processes plus threads, no core dumps. When the job's interpreter exits, or after five times `timeout_s` of wall-clock time, the supervisor kills every other process in the namespace (as its init, `kill(-1)` reaches all of them, detached and re-sessioned ones included), reaps them, and empties `/tmp`. The supervisor is not dumpable and installs no signal handlers, so a job (same uid, no capabilities) can neither ptrace it nor open its `/proc` entries nor signal it.
+Sandboxes are reused because bwrap's own setup is serialized by the kernel machine-wide: about 30 starts per second here whatever the concurrency, about 6 under other users' load (bare user and mount namespaces from `unshare` reach over 1,000 per second, so the cost is bwrap's mounts). PID 1 of each sandbox is a supervisor (`supervisor.py`, standard library only), which receives jobs over a pipe as length-prefixed JSON and runs them one at a time.
 
-The time limit is CPU time because CPU time does not depend on the machine's load: this account's processes share a quota of 32 CPUs (the user slice's `cpu.max`) that other jobs saturate at times, when a busy process gets about a fifth of a CPU. The wall clock, five times as long, only stops programs that sleep or block. A job killed at its CPU limit exits with status 152 (128 + SIGXCPU) and counts as a timeout.
+For each job the supervisor writes `main.py` and the files into the empty `/tmp` with mode 0444 and starts a fresh interpreter. Its bootstrap sets hard limits the job cannot raise:
+- address space `memory_mb`;
+- CPU time ceil(`timeout_s`) s;
+- 8 MiB per file, which also caps stdout and stderr (captured in memfds);
+- 32 processes plus threads;
+- no core dumps, and no POSIX message queue bytes (`RLIMIT_MSGQUEUE` 0, so no queue can carry data to the next job).
 
-The sandbox is discarded and a new one started on the next job when a job timed out, died of a signal, left a process behind, left a System V IPC object, or `/tmp` could not be emptied, and whenever the supervisor answers late (past the wall limit plus 5 s), malformed, or not at all. The host then kills bwrap's process group; the supervisor dies with it (`--die-with-parent`), and with the namespace's init the kernel kills everything left in it. A new sandbox has 60 s to report ready; its setup never counts against a job. Because bwrap runs under `setpriv --pdeathsig KILL`, the death of the thread that started it (as when the pool kills a stuck verifier process) also tears the sandbox down. A sandbox that cannot run a job gives a timed-out result with the reason on stderr, never a verdict.
+When the job's interpreter exits, or when the wall clock runs out, the supervisor kills every other process in the namespace (as its init, `kill(-1)` reaches all of them, detached and re-sessioned ones included), reaps them, empties `/tmp`, and reports the job's CPU time (all its processes, from `RUSAGE_CHILDREN`). The supervisor is not dumpable and installs no signal handlers, so a job (same uid, no capabilities) can neither ptrace it nor open its `/proc` entries nor signal it.
+
+Only the CPU-time limit decides that a program took too long, because CPU time does not depend on the machine's load: this account's processes share a quota of 32 CPUs (the user slice's `cpu.max`) that other jobs saturate at times, when a busy process gets a fifth of a CPU or less. A job killed at its CPU limit exits with status 152 (128 + SIGXCPU), or 137 after ignoring it, and counts as a timeout: decided and wrong. The wall clock, 20 times the limit, only stops programs that sleep or block, and a run it stops decides nothing. If the job's main process had waited on a run queue for at least a quarter of its wall-clock time (`/proc/<pid>/schedstat`), it was starved, and it runs again in a fresh sandbox, up to three attempts. Otherwise it slept or blocked, and the result is undecided at once. A run that stays starved, or a sandbox that cannot run the job, is undecided too. A test pins a job using 0.7 s of its 1 s CPU limit to one core with 11 busy processes: it passes as it does on an idle core, in several times the wall-clock time.
+
+The sandbox is discarded and a new one started on the next job when a job ran out of wall clock, died of a signal, left a process behind, left a System V IPC object, or `/tmp` could not be emptied, and whenever the supervisor answers late (past the wall limit plus 5 s), malformed, or not at all. The host then kills bwrap's process group; the supervisor dies with it (`--die-with-parent`), and with the namespace's init the kernel kills everything left in it. A new sandbox has 60 s to report ready, and its setup never counts against a job. Because bwrap runs under `setpriv --pdeathsig KILL`, the death of the thread that started it (as when the pool kills a stuck verifier process) also tears the sandbox down.
 
 ## Pool
 
-`verify_many` keeps a persistent pool of `PROCESSES = 32` verifier processes per calling process (at most 48 on this shared machine): fresh interpreters started with `python -c`, not forks of the caller. Each judges one job at a time, under a 4 GiB address-space limit, and dies with its parent. A job's deadline is `timeout` if given, else 20 s plus the worst case of its sandbox runs (one program with the program channel; two test runs for code, because the tolerant extraction may run a second program), each counted as five times its time limit plus 65 s for a new sandbox's setup and the supervisor's answer. Those long deadlines are only reached by a hang outside the sandbox, which only parsing can produce. Past it the process is killed and replaced and the job gets `Verdict(0, False, False, None, None, "timeout")`; a process that dies gives error `verifier process died`, and an exception inside the judgment (for instance a reference that does not parse) gives reward 0 with the exception as error. This is what bounds sympy stuck in C code: a boxed `10^{10^{10}}` cannot be interrupted by any signal. The pool is not meant to be used from several threads at once.
+`verify_many` keeps a persistent pool of `PROCESSES = 32` verifier processes per calling process (at most 48 on this shared machine): fresh interpreters started with `python -c`, not forks of the caller. Each judges one job at a time, under a 4 GiB address-space limit, and dies with its parent.
+
+A job's deadline is `timeout` in all if given. Otherwise the pool allows 60 s outside sandbox runs (parsing and comparison) and, during each run, the longest the run may take, which the verifier process reports when the run starts and ends. A job past its deadline (sympy stuck in C code on a boxed `10^{10^{10}}`, which no signal interrupts, or a comparison starved of CPU) is ended by killing its process, which is replaced; its verdict is reward 0 with `undecided: verifier deadline`. A process that dies gives `undecided: verifier process died`. An exception inside the judgment (for instance a reference that does not parse) gives reward 0 with the exception as error. The pool is not meant to be used from several threads at once.
 
 ## Measured
 
-`python -m evotaste.verify.selfcheck` reproduces these numbers (300 references per source, seeded; only training splits, MMLU-Pro's validation split and the references of HumanEval+, MBPP+ and TheoremQA; no model). Run on 2026-11-25 with 32 processes:
+`python -m evotaste.verify.selfcheck` reproduces the reference numbers (300 references per source, seeded; only training splits, MMLU-Pro's validation split and the references of HumanEval+, MBPP+ and TheoremQA; no model). Run on 2026-11-25 with 32 processes:
 
-| Source | Kind | References verifying in every wrapper | Perturbations rejected |
+| Source | Kind | References usable | Refused as ambiguous | Perturbations rejected |
+|---|---|---|---|---|
+| math_train | open | 282/300 | 18 (untyped lists) | 1092/1092 |
+| deepscaler | open | 297/300 | 0 | 1172/1172 |
+| gsm8k_train | open | 300/300 | 0 | 1200/1200 |
+| theoremqa | open | 281/300 | 19 (untyped lists) | 1119/1119 |
+| aqua | choice | 296/300 | 4 (repeated correct option) | 592/592 |
+| logiqa | choice | 299/300 | 1 (repeated correct option) | 598/598 |
+| arc | choice | 300/300 | 0 | 600/600 |
+| mmlu_pro (validation) | choice | 70/70 | 0 | 140/140 |
+| proofwriter | verdict | 300/300 | 0 | 600/600 |
+| kodcode | code | 296/300 | | |
+| humaneval_plus | code | 161/164 | | |
+| mbpp_plus | code | 297/300 | | |
+
+Perturbations are off by one either way, sign flipped and doubled for numbers (`g + 1` and `2g` for expressions), one unit more in the last digit for decimals, another letter and another option's text for choice, every other label for verdict. The ambiguous references are untyped lists (MATH, TheoremQA) and choice items whose correct option's text is repeated (Interface; the data layer types the lists). The other unusable open references are malformed (DeepScaleR: display math with a box inside, an empty string, `33\frac{1}{3}\%`). The code failures are references that cannot pass here:
+- two KodCode items import torch, whose libraries cannot even be mapped within 1 GiB of address space (40 of KodCode's 10,000 items import torch);
+- one KodCode item needs seaborn (57 items; not installed), and one asserts a timing;
+- HumanEval/32's dataset harness is itself broken (`_poly(*candidate(*inp), inp)`);
+- HumanEval+ `special_factorial` and `string_sequence`, and two MBPP+ references (`sum_average` among them), need more than half of their 10 s CPU limit (13–40 s measured); MBPP+ `combinations_colors` needs more than 1 GiB on its largest input.
+
+A code reference must pass within half its CPU limit because CPU time itself grows on a loaded machine: two of those HumanEval+ references passed within 10 s at load average 50 and needed 13–16 s at load average 65–180 (shared cores). Items that need more get a larger `time_limit_s` from the data layer.
+
+The stored smoke census (`results/census/census-r2-limit100`, 18,620 non-procedural records whose reference is known) was re-scored with the verifier before and after the audit fixes, in the same environment. Changed verdicts:
+
+| Cell | Records | 0 → 1 | 1 → 0 |
 |---|---|---|---|
-| math_train | open | 300/300 | 1090/1090 |
-| deepscaler | open | 297/300 | 1172/1172 |
-| gsm8k_train | open | 300/300 | 1200/1200 |
-| theoremqa | open | 300/300 | 1119/1119 |
-| aqua | choice | 300/300 | 600/600 |
-| logiqa | choice | 300/300 | 600/600 |
-| arc | choice | 300/300 | 600/600 |
-| mmlu_pro (validation) | choice | 70/70 | 140/140 |
-| proofwriter | verdict | 300/300 | 600/600 |
-| kodcode | code | 297/300 | |
-| humaneval_plus | code | 163/164 | |
-| mbpp_plus | code | 298/300 | |
+| open, direct | 6,369 | 0 | 14 |
+| open, program | 403 | 0 | 1 |
+| choice | 7,760 | 85 | 0 |
+| verdict | 1,980 | 0 | 0 |
+| code | 2,108 | 33 | 0 |
 
-Perturbations are off by one either way, sign flipped and doubled for numbers (`g + 1` and `2g` for expressions), one unit more in the last digit for decimals, another letter and another option's text for choice, every other label for verdict. The three DeepScaleR failures are malformed references (display math with a box inside, an empty string, `33\frac{1}{3}\%`). The code failures are references that cannot pass here: two KodCode items import torch, whose libraries cannot even be mapped within 1 GiB of address space (40 of KodCode's 10,000 items import torch), one needs seaborn (57 items; not installed), and one, which asserts a timing, fails in some runs; HumanEval/32's dataset harness is itself broken (`_poly(*candidate(*inp), inp)`); of MBPP+, `sum_average` takes 12 s even alone and `combinations_colors` exceeds 1 GiB on its largest input. Evaluation sources therefore want per-item time and memory limits with room, set at build time.
+The 14 open losses are exactly the audit's 14 false credits (D1: `1` for `1+\frac{1}{2^{2020}}`, `2^{2014}-1` for `2^{2014}`, and the others it lists). The program loss is its D10 case, a truncated response whose last box is unclosed and whose program printed `0.9999999999999994`. The choice gains are the 85 right-letter answers with formatted option text (D3). The code gains are solutions followed by an example block (D4). No verdict is undecided. The 20 census jobs whose LeetCode prelude imports `sortedcontainers` now import it (all 20 answers are wrong).
 
-Cost per job when run alone: an open answer about 4 ms (cold, one process), choice and verdict well under 1 ms, a sandboxed program 0.09 s, a code item 0.2–0.3 s. Throughput with 32 processes, measured while the machine was loaded (load average about 52, this account's CPU quota being throttled):
-
-| Workload | Jobs per second | Before sandboxes were reused |
-|---|---|---|
-| open, box (answers rewritten by sympy) | 3,900 | 3,600 |
-| open, program channel | 226 | 28 |
-| choice | 24,000 | 17,000 |
-| verdict | 26,000 | 23,000 |
-| code (KodCode references) | 31 | 16 |
-
-Sandboxed jobs are now bound by the CPU they get (a fresh interpreter per job, pytest's import for code), not by bwrap's machine-wide start rate, which only new sandboxes pay.
+Cost per job when run alone: an open answer about 4 ms (cold, one process), choice and verdict well under 1 ms, a sandboxed program 0.09 s, a code item 0.2–0.3 s. Sandboxed jobs are bound by the CPU they get (a fresh interpreter per job, pytest's import for code), not by bwrap's machine-wide start rate, which only new sandboxes pay. On 2026-11-25, at load average about 50, 32 processes verified 518 program-channel jobs and 44 KodCode code jobs per second (28 and 16 when every job started its own sandbox).
 
 ## Known limitations
 
-- The `__eq__` rule is textual and catches only the plain always-equal object; a program built to defeat the harness (reading the token from `/tmp/main.py`, monkeypatching pytest from the solution, a `__bool__` or `__len__` trick on tests that check truth only, `__eq__` assembled at run time) can still pass. All of these need deliberate adversarial code; the census audit and record inspection should watch for them.
-- Network isolation is by namespace: a program can create a socket, but there is nothing to connect to except its own loopback.
-- Decimal references are ambiguous between exact and rounded values: a short reference meant exactly accepts answers within 2% and within half a unit of its last digit (0.504 for `0.5`). An exact reference wants six significant digits from a decimal answer (`0.7071` for √2/2 is rejected).
-- Apart from bare lists and tuples, structures must match in type (a set against an interval is wrong), and an open interval `(1, 2)` cannot be told from an ordered pair, so `1, 2` answers it. The one-to-one matching of bare lists is greedy, which can only miss a match, never invent one. Unions of intervals and expressions with variables use math-verify, whose `evalf(chop=True)` comparison can still equate expressions that differ only by a tiny constant.
-- Word-like references (`\text{Evelyn}`, `True`) parse into products of symbols and pass `gold_check`; the build must drop free-text references, and TheoremQA's boolean answers belong to kind `verdict`.
-- math-verify decides from the string whether `i` is imaginary; `\sqrt{-1}` is parsed as a real expression and does not equal `i`.
-- A timed-out job loses its compliance information (`complied` false). A program that sleeps or blocks is judged by the wall clock, which still depends on load, but only at five times its limit; when a process gets less than a fifth of a CPU the wall clock binds first. In a self-check at load average 180, two HumanEval+ and two MBPP+ references timed out that pass at load average 50, and one KodCode test failed that passed before (nothing else changed).
-- Between jobs the supervisor resets processes, `/tmp` and System V IPC; it does not reset kernel keyrings, which a job could only fill through raw system calls, and which no later job reads unless written to.
-- Not measured here: LeetCode (not in the cache yet) and the BBH, FOLIO, FLD and other unseen sources; their references go through `gold_check` at build time.
+- The `__eq__` rule is textual and catches only the plain always-equal object. A program built to defeat the harness can still pass:
+  - reading the token from `/tmp/main.py`;
+  - monkeypatching pytest from the solution;
+  - a `__bool__` or `__len__` trick on tests that check truth only;
+  - `__eq__` assembled at run time;
+  - a top-level `zip` or `enumerate` that the name import copies over the tests' builtins.
+
+  All of these need deliberate adversarial code; none appeared in the census. The census audit and record inspection should watch for them.
+- Network isolation is by namespace: a program can create a socket, but there is nothing to connect to except its own loopback. Nested user namespaces are allowed (a process hidden in one is still found and killed between jobs). Memory is bounded per process (up to 32 processes per job).
+- Decimal references are ambiguous between exact and rounded values: a short reference meant exactly accepts answers within 2% and within half a unit of its last digit (0.504 for `0.5`). An exact reference wants six significant digits from a decimal answer (`0.7071` for √2/2 is rejected, `0.9999999999999994` for `3^{16}/(3^{16}+1)` accepted).
+- Untyped bare lists and tuples follow the rules above, and an open interval `(1, 2)` cannot be told from an ordered pair, which is why `gold_check` wants a type. The one-to-one matching of lists is greedy, which can only miss a match, never invent one. Unions of intervals and expressions with variables use math-verify, whose `evalf(chop=True)` comparison can still equate expressions that differ only by a tiny constant.
+- Word-like references (`\text{Evelyn}`, `True`) parse into products of symbols and pass `gold_check`; the build must drop free-text references, and TheoremQA's boolean answers belong to kind `verdict`. References written as an equation of tuples (`(x, y, z) = (2, 1, 2)`) or a chain (`a=b=c=d`) are not unwrapped; the build should write the tuple.
+- A sandbox run that sleeps or blocks, or stays starved for three attempts, is undecided and costs up to 20 times its limit per attempt. A verifier process stuck outside a sandbox costs 60 s. A timed-out job loses its compliance information (`complied` false).
+- Between jobs the supervisor resets processes, `/tmp`, System V IPC and (by the limit) POSIX message queues; it does not reset kernel keyrings, which a job could only fill through raw system calls, and which no later job reads unless written to.
+- Not measured here: the BBH, FOLIO, FLD and other unseen sources; their references go through `gold_check` at build time.

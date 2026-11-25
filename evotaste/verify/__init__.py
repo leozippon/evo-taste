@@ -21,7 +21,7 @@ from evotaste.verify.wrappers import DEFAULT, HELDOUT_WRAPPERS, TRAIN_WRAPPERS, 
 
 # Bump on every change to a rule that can change a verdict or a gold_check result (stored verdicts and suites built
 # under another version are stale).
-RULES_VERSION = "2026-11-25.audit-1"
+RULES_VERSION = "2026-11-25.audit-2"
 
 __all__ = ["CODE_TIME_LIMIT_S", "DEFAULT", "HELDOUT_WRAPPERS", "Job", "LETTERS", "RULES_VERSION", "Result",
            "TRAIN_WRAPPERS", "Verdict", "WRAPPERS", "Wrapper", "gold_check", "gold_ok", "is_undecided", "run_python",
@@ -59,10 +59,15 @@ def _refusal(kind: str, gold) -> str | None:
     return None
 
 
+GOLD_CPU_SHARE = 0.5  # a reference solution must pass within this share of its item's CPU-time limit
+
+
 def _gold_jobs(kind: str, gold) -> list[Job]:
-    """The reference answer rendered in every wrapper of its kind."""
+    """The reference answer rendered in every wrapper of its kind (a code reference with half its CPU-time limit:
+    CPU time itself grows on a loaded machine, so an item needs headroom for its verdicts not to depend on load)."""
     if kind == "code":
-        return [Job("code", WRAPPERS["code"].render(gold["reference"]), gold, "code")]
+        limit = float(gold.get("time_limit_s", CODE_TIME_LIMIT_S)) * GOLD_CPU_SHARE
+        return [Job("code", WRAPPERS["code"].render(gold["reference"]), {**gold, "time_limit_s": limit}, "code")]
     if kind == "open":
         answer = equivalence.reference(gold)[0]
     elif kind in ("choice", "verdict"):
@@ -74,8 +79,8 @@ def _gold_jobs(kind: str, gold) -> list[Job]:
 
 def gold_check(items: list[tuple[str, object]], timeout: float | None = None) -> list[str | None]:
     """For each (kind, gold): None if the reference is unambiguous and earns reward 1 in every wrapper of its kind
-    (for code: the reference solution passes the item's tests within its time limit), else the first reason it does
-    not. A reason for which is_undecided holds decides nothing; the caller repeats or sets aside such items."""
+    (for code: the reference solution passes the item's tests within half its CPU-time limit), else the first reason
+    it does not. A reason for which is_undecided holds decides nothing; the caller repeats or sets aside such items."""
     refusals = [_refusal(kind, gold) for kind, gold in items]
     jobs = [[] if r else _gold_jobs(kind, gold) for r, (kind, gold) in zip(refusals, items)]
     flat = verify_many([j for js in jobs for j in js], timeout)
