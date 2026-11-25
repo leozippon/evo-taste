@@ -40,15 +40,17 @@ from evotaste.verify import supervisor
 TMPFS_BYTES = 64 << 20  # size of the writable /tmp
 FILE_BYTES = 8 << 20  # largest file a job may write, stdout and stderr included (RLIMIT_FSIZE)
 TASKS = 32  # processes plus threads of a job, the supervisor included (RLIMIT_NPROC, counted per user namespace)
-# Only a job's CPU-time limit decides a timeout: CPU time does not depend on the machine's load (this account's
+# A job's CPU-time limit decides a timeout: CPU time does not depend on the machine's load (this account's
 # processes share a quota of 32 CPUs that other jobs saturate at times, when a busy process gets a fifth of a CPU or
-# less). The wall clock, WALL_FACTOR times as long, stops programs that sleep or block; a job it stops is undecided.
-# If the job was mostly waiting for a CPU (starved) it is run again in a fresh sandbox, up to ATTEMPTS times.
+# less). The wall clock, WALL_FACTOR times as long, stops programs that sleep or block (a decided timeout too); but
+# if the job was mostly waiting for a CPU (starved) it is run again in a fresh sandbox, up to ATTEMPTS times, and
+# stays undecided if it never gets to run.
 WALL_FACTOR = 20
 ATTEMPTS = 3
 STARVED = 0.25  # starved: waited on a run queue for at least this share of its wall-clock time
 SETUP_LIMIT_S = 60  # longest wait for a new sandbox to be ready
-EXIT_S = 5  # allowed after a job's wall-clock limit for the supervisor's reset and answer
+EXIT_S = 5  # allowed after a job's wall-clock limit for the supervisor's answer
+RESET_S = 30  # allowed after the answer for emptying /tmp (a late reset costs the sandbox, never the verdict)
 UNDECIDED = "undecided:"  # opens the stderr of a result that decides nothing about the program
 # Called with the longest wall-clock time a sandbox run may take, before it, and with None after it (the verifier pool
 # keeps its own deadline for the time outside sandbox runs).
@@ -208,7 +210,11 @@ def _attempt(job: dict) -> dict:
     except BaseException:  # e.g. an alarm while waiting: the job's state is unknown, so the sandbox goes
         _discard()
         raise
-    if not answer["clean"]:
+    try:
+        reset = box._receive(time.monotonic() + RESET_S)
+    except (SandboxError, OSError, ValueError):
+        reset = {}
+    if not answer["clean"] or reset != {"reset": True}:
         _discard()
     return answer
 
@@ -219,8 +225,8 @@ def run_python(code: str, *, stdin: str | None = None, files: dict[str, str] | N
     it (plain file names, read-only); `stdin` is the program's standard input (empty when None). Each process may use
     ceil(`timeout_s`) seconds of CPU time (then SIGXCPU, exit status 128 + 24) and `memory_mb` MiB of address space.
     The wall clock stops the job, with everything it started, WALL_FACTOR * `timeout_s` seconds after its interpreter
-    started; such a run decides nothing. A starved run is repeated (ATTEMPTS in all); a run that slept or blocked, or
-    runs that stayed starved or a sandbox that could not run the job, give an undecided result (`undecided`, the
+    started: a run that slept or blocked is then a timeout (`timed_out`), a starved one is repeated (ATTEMPTS in all).
+    Runs that stayed starved, or a sandbox that could not run the job, give an undecided result (`undecided`, the
     reason on stderr): never a verdict on the program."""
     files = dict(files or {})
     if _MAIN in files or any(not _NAME.fullmatch(n) for n in files):
@@ -243,9 +249,9 @@ def run_python(code: str, *, stdin: str | None = None, files: dict[str, str] | N
             return Result(answer["returncode"], answer["stdout"], answer["stderr"], False, answer["seconds"],
                           answer["cpu_s"])
         wait = answer["wait_s"]
-        if wait is not None and wait < STARVED * answer["seconds"]:
-            return Result(None, answer["stdout"], f"{UNDECIDED} the wall clock ran out while the program slept or "
-                          f"blocked ({answer['cpu_s']:.2f} s of CPU)", True, answer["seconds"], answer["cpu_s"], True)
+        if wait is not None and wait < STARVED * answer["seconds"]:  # decided: repeating cannot change a sleep
+            return Result(None, answer["stdout"], f"the wall clock ran out while the program slept or blocked "
+                          f"({answer['cpu_s']:.2f} s of CPU)", True, answer["seconds"], answer["cpu_s"])
         reason = f"the wall clock ran out before the CPU-time limit ({answer['cpu_s']:.2f} s of CPU in " \
                  f"{answer['seconds']:.0f} s)"
     return Result(None, "", f"{UNDECIDED} {reason}, {ATTEMPTS} attempts", True, 0.0, 0.0, True)

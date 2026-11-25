@@ -4,9 +4,11 @@ Started by sandbox.py inside bwrap as `python -I -B /supervisor.py <request fd> 
 library only. Messages are length-prefixed JSON. Per job: write the files read-only into the empty /tmp, start the
 interpreter with the job bootstrap (hard limits on address space, CPU, file size, task count and POSIX message queue
 bytes), wait for it up to its wall-clock limit, then kill every other process in the namespace, reap them, and empty
-/tmp. The answer gives the job's CPU time (all its processes, reaped) and, when the wall clock ran out, how long its
-main process had been waiting for a CPU, and says whether the sandbox is still clean; the host discards it after a
-timeout, a death by signal, a process left behind, a failed reset or left-over System V IPC objects.
+/tmp. The answer, sent before /tmp is emptied so that a slow reset never delays a verdict, gives the job's CPU time
+(all its processes, reaped) and, when the wall clock ran out, how long its main process had been waiting for a CPU,
+and says whether the sandbox is still clean; a second message says whether the reset worked. The host discards the
+sandbox after a timeout, a death by signal, a process left behind, a failed or late reset, or left-over System V IPC
+objects.
 
 The supervisor is not dumpable, so jobs (same uid, no capabilities) cannot ptrace it or open its /proc entries, and it
 installs no signal handlers, so as the namespace's init it ignores every signal a job can send it.
@@ -163,7 +165,7 @@ def run(job: dict, python: str) -> dict:
     finally:
         for fd in fds:
             os.close(fd)
-    clean = reset_tmp() and no_ipc() and reaped and not left_behind and not timed_out and (returncode or 0) < 128
+    clean = reaped and not left_behind and not timed_out and (returncode or 0) < 128
     return {"returncode": returncode, "stdout": stdout, "stderr": stderr, "timed_out": timed_out, "seconds": seconds,
             "cpu_s": cpu, "wait_s": wait, "clean": clean}
 
@@ -175,6 +177,7 @@ def main() -> None:
     send(responses, {"ready": True})
     while (job := receive(requests)) is not None:
         send(responses, run(job, python))
+        send(responses, {"reset": reset_tmp() and no_ipc()})
 
 
 if __name__ == "__main__":

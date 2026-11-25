@@ -264,7 +264,7 @@ def run_tests(program: str, gold: dict) -> str | None:
     r = run_python(main, files=files, timeout_s=limit, memory_mb=int(gold.get("memory_mb", CODE_MEMORY_MB)))
     if r.undecided:
         return r.stderr
-    if _limited(r, limit):
+    if r.timed_out or _limited(r, limit):  # the CPU limit, or slept or blocked past the wall clock
         return "timeout"
     if r.returncode == 0 and nonce in r.stdout.split("\n"):
         return None
@@ -277,7 +277,7 @@ def program_output(program: str) -> tuple[str | None, str | None]:
     r = run_python(program, timeout_s=PROGRAM_TIMEOUT_S, memory_mb=PROGRAM_MEMORY_MB)
     if r.undecided:
         return None, r.stderr
-    if _limited(r, PROGRAM_TIMEOUT_S):
+    if r.timed_out or _limited(r, PROGRAM_TIMEOUT_S):
         return None, "program timeout"
     if r.returncode != 0:
         return None, f"program exit {r.returncode}: {r.stderr.strip()[-300:]}"
@@ -317,3 +317,17 @@ def judge(job: Job) -> Verdict:
         any_correct = correct or assess(job, tolerant)[0]
     channel = strict.channel if strict is not None and job.kind == "open" else None
     return Verdict(float(correct), bool(any_correct), strict is not None, channel, extracted, error)
+
+
+def unfinished(job: Job, error: str) -> Verdict:
+    """The decided verdict for a job whose judgment could not finish for a reason that repeating cannot change (it
+    exhausted its CPU budget, or crashed its verifier process): not verified. Where the final answer is comes from
+    extraction alone, which is cheap; nothing is compared."""
+    try:
+        strict = strict_answer(job)
+    except Exception:  # noqa: BLE001 - extraction of an unusual response; the verdict is "not verified" either way
+        strict = None
+    found = strict is not None
+    channel = strict.channel if found and job.kind == "open" else None
+    extracted = strict.found.content if found and strict.channel == "direct" else None
+    return Verdict(0.0, False, found, channel, extracted, error)

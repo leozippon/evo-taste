@@ -124,8 +124,9 @@ time.sleep(60)
     run("pass")
     before = current()
     t0 = time.monotonic()
-    r = run(code, timeout_s=0.25)  # sleeping: the wall clock (5 s) stops it, undecided at once
-    assert r.timed_out and r.undecided and r.returncode is None and time.monotonic() - t0 < WALL_FACTOR * 0.25 + EXIT_S
+    r = run(code, timeout_s=0.25)  # sleeping: the wall clock (5 s) stops it, a decided timeout
+    assert r.timed_out and not r.undecided and r.returncode is None
+    assert time.monotonic() - t0 < WALL_FACTOR * 0.25 + EXIT_S
     assert stray(marker) == "" and current() is None and before is not None and not before.alive()
 
 
@@ -329,3 +330,10 @@ def test_a_run_starved_past_the_wall_clock_is_repeated_and_then_undecided():
     r = _pinned(11, "while True:\n    pass", 0.1)  # 1 s of CPU, 2 s of wall clock: a twelfth of a CPU is too little
     assert r.undecided and r.timed_out and "before the CPU-time limit" in r.stderr and "3 attempts" in r.stderr
     assert time.monotonic() - t0 > 3 * 2
+
+
+def test_a_slow_reset_of_tmp_costs_the_sandbox_not_the_verdict():
+    run("pass")
+    r = run("import os\nfor i in range(30000):\n    open(f'f{i}', 'w').close()\nprint('made')", timeout_s=10)
+    assert r.ok and r.stdout == "made\n" and not r.undecided
+    assert run("import os\nprint(sorted(os.listdir('/tmp')))").stdout == "['main.py']\n"

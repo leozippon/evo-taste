@@ -10,7 +10,7 @@ from evotaste.verify import (HELDOUT_WRAPPERS, RULES_VERSION, TRAIN_WRAPPERS, WR
 from evotaste.verify.equivalence import equivalent
 from evotaste.verify import judge as judge_module
 from evotaste.verify.judge import judge, resolve_choice, resolve_label
-from evotaste.verify.pool import Pool
+from evotaste.verify.pool import COMPARISON_CPU_S, Pool
 from evotaste.verify.sandbox import EXIT_S, WALL_FACTOR
 from evotaste.verify.wrappers import ANSWER_KINDS, for_kind
 
@@ -175,7 +175,7 @@ def test_program_must_print_the_answer_on_its_last_line():
     ("print(7, flush=True)\nwhile True:\n    pass", "program timeout"),  # the CPU limit decides
     ("import os\nprint(7, flush=True)\nwhile True:\n    try:\n        os.fork()\n    except OSError:\n        pass",
      "program timeout"),
-    ("import time\nprint(7, flush=True)\ntime.sleep(30)", "undecided: the wall clock ran out while the program slept"),
+    ("import time\nprint(7, flush=True)\ntime.sleep(30)", "program timeout"),  # slept: decided
 ])
 def test_failing_hanging_or_forking_programs_are_incorrect(program, error, monkeypatch):
     monkeypatch.setattr(judge_module, "PROGRAM_TIMEOUT_S", 0.25)  # 1 s of CPU, 5 s of wall clock
@@ -286,12 +286,12 @@ def test_programs_that_exit_skip_or_tamper_never_pass(cheat, gold):
     assert code_job(cheat, gold).reward == 0.0
 
 
-def test_slow_program_fails_at_the_item_cpu_limit_and_a_sleeping_one_is_undecided():
+def test_slow_and_sleeping_programs_are_decided_timeouts():
     t0 = time.monotonic()
     v = code_job("while True:\n    pass\n" + REF, {**ASSERT, "time_limit_s": 1})
     assert (v.reward, v.error) == (0.0, "timeout") and time.monotonic() - t0 < WALL_FACTOR * 1 + EXIT_S
     v = code_job("import time\ntime.sleep(30)\n" + REF, {**ASSERT, "time_limit_s": 0.25})
-    assert v.reward == 0.0 and is_undecided(v.error)
+    assert (v.reward, v.error) == (0.0, "timeout")
 
 
 @pytest.mark.parametrize("gold", [PYTEST, ASSERT, CHECK])
@@ -340,17 +340,30 @@ def test_verify_many_keeps_order_and_matches_judge():
     assert [v.reward for v in verify_many(jobs)] == [0, 0, 0, 1, 0, 0]
 
 
-def test_a_job_stuck_in_c_code_is_killed_at_its_deadline():
+def test_a_comparison_that_exhausts_its_cpu_budget_is_decided_not_verified():
+    """Census answers (math_train/intermediate_algebra/1209) and the form behind the selection census's undecided
+    verdicts: power towers that sympy computes in C, where no signal reaches. The budget is CPU time, so the verdict
+    does not depend on the machine's load."""
     pool = Pool(2)
     try:
         pool.run([Job("open", "\\boxed{1}", "1", "box")] * 2)  # start both processes (imports take seconds)
-        t0 = time.monotonic()
-        out = pool.run([Job("open", "\\boxed{10^{10^{10}}}", "1", "box"), Job("open", "\\boxed{1}", "1", "box")],
-                       timeout=3)
-        assert out[0] == Verdict(0.0, False, False, None, None, "undecided: verifier deadline")
-        assert out[1].reward == 1.0 and is_undecided(out[0].error)
-        assert time.monotonic() - t0 < 8
+        out = pool.run([Job("open", "So \\boxed{\\frac{2}{2^{2^{2007}} + 1}}", "2", "box"),
+                        Job("open", "\\boxed{10^{10^{9}}}", "1", "box"), Job("open", "\\boxed{1}", "1", "box")])
+        for v, extracted in zip(out[:2], ["\\frac{2}{2^{2^{2007}} + 1}", "10^{10^{9}}"]):
+            assert v == Verdict(0.0, False, True, "direct", extracted, f"comparison exceeded its CPU budget "
+                                f"({COMPARISON_CPU_S} s)") and not is_undecided(v.error)
+        assert out[2].reward == 1.0
         assert pool.run([Job("open", "\\boxed{2}", "2", "box")])[0].reward == 1.0  # the replacement works
+    finally:
+        pool.close()
+
+
+def test_a_wall_clock_deadline_with_cpu_budget_to_spare_is_undecided():
+    pool = Pool(1)
+    try:
+        pool.run([Job("open", "\\boxed{1}", "1", "box")])
+        v = pool.run([Job("open", "\\boxed{10^{10^{10}}}", "1", "box")], timeout=2)[0]
+        assert is_undecided(v.error) and "starved" in v.error and v.reward == 0.0
     finally:
         pool.close()
 
