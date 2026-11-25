@@ -27,4 +27,13 @@ The population did not produce a model with transferable Taste. All 36 members l
 
 Two findings stand on their own. Unconstrained training costs every model about ten points of answer-format compliance on unseen tasks that the untrained model has. And training longer does harm: three of three long single-model runs kept improving on their training tasks while losing one to six points on blind tasks between 120 and 480 steps, and the one that was continued collapsed. Beyond one short run, extra compute bought nothing on blind tasks, whether spent on a longer run or on a population.
 
-The second blind vault is unopened and reserved for a redesigned experiment; what that design should change is set out at the end of the [23 November log](logbook/PROJECT_LOG_2026-11-23.md).
+## Round 2
+
+The sections above describe Round 1. Round 2 keeps the paradigm and rebuilds what that result points at; the design is in [design/round-2.md](design/round-2.md).
+
+- **Environment.** Real datasets with automatic verification (math, unit-tested code, logic and science) replace the synthetic puzzles, filtered to problems the base model solves sometimes but not always.
+- **Reward.** Answers are verified by meaning, so notation cannot win. A share of prompts asks for a varying answer format to keep instruction-following rewarded, and a gentle slope near the token limit replaces the flat penalty for unfinished answers.
+- **Seeding.** A member's starting bias is distilled from an instruction that only a frozen teacher sees. Epistemic stances, such as trying to break every answer before accepting it, are compared with mechanical tactics on the same themes.
+- **Amplification.** The Round 1 update is compared with one in which a member also imitates its own successes, which makes accidents of sampling compound.
+
+Small pilots come first. They must show that members come to solve different problems, not just to write differently, and that two copies of a member trained further stay more alike than two unrelated members. A population run and the opening of the second blind vault, which stays sealed and is extended with new unseen sources, follow only then.
