@@ -18,6 +18,7 @@ import logging
 import math
 import os
 import random
+import re
 import signal
 import subprocess
 import sys
@@ -71,7 +72,7 @@ class Task:
     question: str  # the full user turn: the problem and its answer instruction
     # open: the reference expression; choice: {"options", "answer" (letter)}; verdict: {"labels", "answer"};
     # code: {"harness", "tests", "entry_point", "signature", "prelude", "solution"}; procedural: the reasoning-gym
-    # entry, or {"exact", "ignore_spaces"} for a string answer compared exactly.
+    # entry, or {"exact", "accept", "compare"} for a string answer compared exactly after normalisation.
     gold: object = field(compare=False, repr=False)
     wrapper: str = "box"  # id of the answer wrapper in force (evotaste.verify.WRAPPERS)
     stratum: str | None = None  # "mastered" | "sweet" | "frontier" in the training stream, else None
@@ -233,9 +234,20 @@ def procedural_tasks(families: dict[str, str], key: str, per_family: int) -> lis
     return [chosen[p] for p in positions]
 
 
+_TEXT = re.compile(r"^\\text(?:bf|rm)?\{(.*)\}$", re.S)
+
+
 def _exact(answer: str, gold: dict) -> float:
-    norm = (lambda s: "".join(s.split())) if gold["ignore_spaces"] else (lambda s: " ".join(s.split()))
-    return float(norm(answer) == norm(gold["exact"]))
+    """1 if the answer equals the reference or an accepted alternative: for brackets without spaces and LaTeX escapes
+    (`\\{`), for words as a lower-case word list, whatever separates the words and with a \\text{} wrapper removed."""
+    if gold["compare"] == "brackets":
+        def norm(s):
+            return re.sub(r"\\(?=[{}<>()\[\]])|\s", "", s)
+    else:
+        def norm(s):
+            s = _TEXT.sub(r"\1", s.strip())
+            return " ".join(w for w in re.split(r"[\s,;]+", s.lower().rstrip(".")) if w)
+    return float(norm(answer) in {norm(g) for g in [gold["exact"], *gold["accept"]]})
 
 
 def raw_score(task: Task, answer: str) -> float:
@@ -416,22 +428,11 @@ def _undecided(reason: str | None) -> bool:
     return reason is not None and (reason.endswith("timeout") or "process died" in reason)
 
 
-def gold_reasons(tasks: list[Task]) -> list[str | None]:
-    """For each task None if its reference verifies against itself (code: the reference solution passes its tests;
-    procedural: the family's scorer accepts its gold answer), else why not. A check that times out or loses its
-    verifier process decides nothing, so it is repeated, up to GOLD_ATTEMPTS times; a reference that times out every
-    time is reported as "timeout", and a verifier process that keeps dying is an error, never a verdict."""
-    from evotaste.verify import WRAPPERS, gold_check
+def _verified_reasons(tasks: list[Task], indices: list[int], out: list[str | None]) -> None:
+    """gold_check on tasks[indices] into out, repeating undecided checks up to GOLD_ATTEMPTS times."""
+    from evotaste.verify import gold_check
 
-    out: list[str | None] = [None] * len(tasks)
-    procedural = [i for i, t in enumerate(tasks) if t.kind == "procedural"]
-    if procedural:
-        jobs = [(dataclasses.replace(tasks[i], wrapper="box"),
-                 WRAPPERS["box"].render(str(tasks[i].gold.get("exact", tasks[i].gold.get("answer")))), "stop")
-                for i in procedural]
-        for i, s in zip(procedural, _procedural_scores(jobs, GOLD_TIMEOUT_S)):
-            out[i] = None if s.reward == 1.0 else (s.error or "gold answer not accepted by its scorer")
-    pending = [i for i, t in enumerate(tasks) if t.kind != "procedural"]
+    pending = indices
     for _ in range(GOLD_ATTEMPTS):
         if not pending:
             break
@@ -441,6 +442,28 @@ def gold_reasons(tasks: list[Task]) -> list[str | None]:
     died = sum("process died" in out[i] for i in pending)
     if died:  # counts only: the generator checks vault items too
         raise RuntimeError(f"the verifier process died {GOLD_ATTEMPTS} times while checking {died} references")
+
+
+def gold_reasons(tasks: list[Task]) -> list[str | None]:
+    """For each task None if its reference verifies against itself (code: the reference solution passes its tests;
+    procedural: the family's scorer accepts its gold answer), else why not. A check that times out or loses its
+    verifier process decides nothing, so it is repeated, up to GOLD_ATTEMPTS times; a reference that times out every
+    time is reported as "timeout", and a verifier process that keeps dying is an error, never a verdict. A rejection
+    is confirmed by a second, separate check (under heavy load a parse can fail without reporting a timeout); only a
+    reference rejected twice is rejected."""
+    from evotaste.verify import WRAPPERS
+
+    out: list[str | None] = [None] * len(tasks)
+    procedural = [i for i, t in enumerate(tasks) if t.kind == "procedural"]
+    if procedural:
+        jobs = [(dataclasses.replace(tasks[i], wrapper="box"),
+                 WRAPPERS["box"].render(str(tasks[i].gold.get("exact", tasks[i].gold.get("answer")))), "stop")
+                for i in procedural]
+        for i, s in zip(procedural, _procedural_scores(jobs, GOLD_TIMEOUT_S)):
+            out[i] = None if s.reward == 1.0 else (s.error or "gold answer not accepted by its scorer")
+    verified = [i for i, t in enumerate(tasks) if t.kind != "procedural"]
+    _verified_reasons(tasks, verified, out)
+    _verified_reasons(tasks, [i for i in verified if out[i] is not None], out)
     return out
 
 

@@ -411,7 +411,9 @@ def _fld() -> list[Item]:
 
 
 # BBH tasks: (source id, configs of the unit, kind). Verdict tasks carry their label set; dyck_languages and
-# word_sorting have free-form string targets and are scored by exact match (kind "procedural", see tasks.py).
+# word_sorting have free-form string targets, compared exactly after normalisation (kind "procedural", see tasks.py).
+# A Dyck answer may be the completed sequence or only its closing part (the reference is the completed sequence, which
+# is balanced and so can be boxed); a word-sorting answer is its list of words, however separated.
 BBH = [
     ("bbh_boolean_expressions", ("boolean_expressions",), "verdict"),
     ("bbh_dyck_languages", ("dyck_languages",), "exact"),
@@ -452,8 +454,12 @@ def _bbh(source: str, configs: tuple[str, ...], kind: str) -> list[Item]:
                 out.append(_verdict(source, item_id, "logic", stem.strip(), _BBH_LABELS[source], target))
             elif kind == "open":
                 out.append(_open(source, item_id, "logic", stem.strip(), target))
-            else:
-                gold = {"exact": target, "ignore_spaces": source == "bbh_dyck_languages"}
+            elif source == "bbh_dyck_languages":  # the completed sequence, or only its closing part
+                opened = stem.split("Input:")[-1].strip()
+                gold = {"exact": f"{opened} {target}", "accept": [target], "compare": "brackets"}
+                out.append(Item(source, item_id, "logic", "procedural", stem.strip(), gold, stem.strip(), stem.strip()))
+            else:  # word sorting: the sorted words, whatever separates them
+                gold = {"exact": target, "accept": [], "compare": "words"}
                 out.append(Item(source, item_id, "logic", "procedural", stem.strip(), gold, stem.strip(), stem.strip()))
     return out
 

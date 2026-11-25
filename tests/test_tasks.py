@@ -72,10 +72,19 @@ def test_procedural_scoring_is_strict_and_lenient():
     assert (s[1].reward, s[1].complied, s[1].correct_any) == (0.0, False, True)  # Round 1's tags: lenient only
     assert (s[2].reward, s[2].truncated) == (0.0, True)
     assert (s[3].reward, s[3].correct_any) == (0.0, False)
-    dyck = make_task(Item("bbh_dyck_languages", "0", "logic", "procedural", "Close: ( [", {"exact": "] )",
-                          "ignore_spaces": True}, "", ""))
-    assert [x.reward for x in score_many([(dyck, "\\boxed{])}", "stop"), (dyck, "\\boxed{)]}", "stop")])] == [1.0, 0.0]
-    assert tasks.gold_ok_many([t, dyck]) == [True, True]
+
+    def exact_item(source, gold):
+        return make_task(Item(source, "0", "logic", "procedural", "...", gold, "", ""))
+
+    dyck = exact_item("bbh_dyck_languages", {"exact": "{ ( [ ] ) }", "accept": ["] ) }"], "compare": "brackets"})
+    answers = ["\\boxed{])}}", "\\boxed{{ ( [ ] ) }}", "\\boxed{\\{([])\\}}", "\\boxed{) ] }}", "\\boxed{{([)]}}"]
+    assert [x.reward for x in score_many([(dyck, a, "stop") for a in answers])] == [0.0, 1.0, 1.0, 0.0, 0.0]
+    assert score_many([(dyck, "\\boxed{] ) }", "stop")])[0].reward == 0.0  # its closing brace ends the box
+    words = exact_item("bbh_word_sorting", {"exact": "apple banana cherry", "accept": [], "compare": "words"})
+    answers = ["\\boxed{apple, banana, cherry}", "\\boxed{\\text{Apple banana cherry.}}", "\\boxed{banana apple cherry}",
+               "\\boxed{apple banana}"]
+    assert [x.reward for x in score_many([(words, a, "stop") for a in answers])] == [1.0, 1.0, 0.0, 0.0]
+    assert tasks.gold_ok_many([t, dyck, words]) == [True, True, True]
 
 
 def test_undecided_reference_checks_are_retried_and_never_verdicts(monkeypatch):
@@ -89,14 +98,22 @@ def test_undecided_reference_checks_are_retried_and_never_verdicts(monkeypatch):
 
     monkeypatch.setattr(verify, "gold_check", flaky)
     t = make_task(open_item())
-    reason = "wrapper box: timeout"
-    assert tasks.gold_reasons([t]) == [reason] and calls == [1] * tasks.GOLD_ATTEMPTS
+    reason = "wrapper box: timeout"  # undecided: repeated, then confirmed by a second round
+    assert tasks.gold_reasons([t]) == [reason] and calls == [1] * 2 * tasks.GOLD_ATTEMPTS
     reason = "wrapper box: verifier process died (0)"
     with pytest.raises(RuntimeError, match="process died"):
         tasks.gold_reasons([t])
-    reason = "wrapper box: not verified"
+    reason = "wrapper box: not verified"  # a rejection is confirmed once
     calls.clear()
-    assert tasks.gold_reasons([t]) == [reason] and calls == [1]
+    assert tasks.gold_reasons([t]) == [reason] and calls == [1, 1]
+
+    def transient(items, timeout=None):  # rejected once, then verified: not rejected
+        calls.append(len(items))
+        return ["wrapper box: GoldError: reference does not parse" if len(calls) == 1 else None for _ in items]
+
+    calls.clear()
+    monkeypatch.setattr(verify, "gold_check", transient)
+    assert tasks.gold_reasons([t]) == [None] and calls == [1, 1]
 
 
 def test_stratum_rule():

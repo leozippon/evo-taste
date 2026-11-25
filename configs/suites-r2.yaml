@@ -14,8 +14,8 @@ generated:
     max_prompt_tokens: 3500
     tokenizer: Qwen/Qwen3-1.7B
 totals:
-  train: 79260
-  selection: 16360
+  train: 79264
+  selection: 16457
   blind2: 17437
 units:
   bbh_boolean_expressions:
@@ -256,11 +256,11 @@ parts:
       sha256: 9ae62a4f361f898eeb9334a72278a59175bf56d08dfbca6cbb87eec029c7094d
   kodcode:
     train:
-      items: 8890
-      sha256: e374fcacc6fa52010a515ef4f7f95a7141facd43c9910ae211aa2a9cb977c976
+      items: 8894
+      sha256: 006f34c01e71e5981463522c68dd18bdbd337e4480649851a6e82e10d82257ce
     selection:
-      items: 474
-      sha256: b2733752d5afd1e684bb494de5882bd2a75dfeff264d6694a2252b22989b15f3
+      items: 473
+      sha256: 71eb10d9637121a96ed4fae5a01afe5e90cb9549848045a519b7f7ebdbc40184
     blind2:
       items: 490
       sha256: 0118047bc79c38dc893642a70c15c0524dfd1fbb6330c4905d7d801f02e57380
@@ -316,8 +316,8 @@ parts:
       sha256: aa16034b0a7361d1aa8516502f20590adf966ac9dc74ffb473016ddb4c338957
   mbpp_plus:
     selection:
-      items: 375
-      sha256: 43fabf33f1143630a53e44f28d57426abeb56193c222f2c2f976e41ebfbbcb0a
+      items: 374
+      sha256: b227cb46b005e7f6d722ff0b60d39af0eef24222058be6e53a9e7adf9bf57204
   leetcode:
     selection:
       items: 56
@@ -344,8 +344,8 @@ parts:
       sha256: 11c6dd5509eac9dbe8d3d3075a40a82b3bde59b6f8afd9d6e0c3def4ef973637
   bbh_dyck_languages:
     selection:
-      items: 151
-      sha256: 261dadad597dd87e314084e975fab6a4c094eb9cc9dded58955378505c16041d
+      items: 250
+      sha256: 76f3d33a39feefc12e89b220d693167cd19b1963500255e0bd35ccb3cae39e8d
   bbh_formal_fallacies:
     blind2:
       items: 250
@@ -448,9 +448,9 @@ dropped:
     'train: gold rejected': 3
   kodcode:
     'blind2: gold rejected': 12
-    'selection: gold rejected': 5
+    'selection: gold rejected': 6
     'train: copy in blind2': 1
-    'train: gold rejected': 128
+    'train: gold rejected': 124
   logiqa:
     'selection: copy in blind2': 52
     'train: copy in blind2': 1
@@ -473,11 +473,9 @@ dropped:
   humaneval_plus:
     'blind2: gold rejected': 1
   mbpp_plus:
-    'selection: gold rejected': 1
+    'selection: gold rejected': 2
   leetcode:
     'selection: gold rejected': 172
-  bbh_dyck_languages:
-    'selection: gold rejected': 99
   medmcqa:
     'selection: gold rejected': 1
   qasc:
@@ -592,7 +590,6 @@ gold_failed:
   - train/73787
   - train/8836
   kodcode:
-  - Algorithm_11846_I
   - Algorithm_1715_I
   - Algorithm_32876_I
   - Algorithm_4614_I
@@ -601,11 +598,9 @@ gold_failed:
   - 'Docs: Pandas_9971_I'
   - 'Docs: Python310_12488_I'
   - 'Docs: Python310_15486_I'
-  - 'Docs: Python310_21814_I'
   - 'Docs: Python310_24038_I'
   - 'Docs: Python310_24439_I'
   - 'Docs: Python310_28075_I'
-  - 'Docs: Python310_3057_I'
   - 'Docs: Python310_41472_I'
   - 'Docs: Python310_43745_I'
   - 'Docs: Python310_43806_I'
@@ -708,7 +703,6 @@ gold_failed:
   - Filter_1152_I
   - Filter_51950_I
   - Filter_55741_I
-  - Filter_60220_I
   - Filter_62245_I
   - Filter_65428_I
   - Filter_72715_I
@@ -718,6 +712,7 @@ gold_failed:
   - Filter_80667_I
   - Filter_84489_I
   - Package_1149_I
+  - Package_2327_I
   - Package_2367_I
   - Package_5306_I
   - Package_5607_I
@@ -757,6 +752,7 @@ gold_failed:
   - '905'
   mbpp_plus:
   - '255'
+  - '599'
   leetcode:
   - adjacent-increasing-subarrays-detection-i
   - adjacent-increasing-subarrays-detection-ii
@@ -930,105 +926,5 @@ gold_failed:
   - zero-array-transformation-ii
   - zero-array-transformation-iii
   - zigzag-grid-traversal-with-skip
-  bbh_dyck_languages:
-  - '107'
-  - '108'
-  - '111'
-  - '115'
-  - '118'
-  - '120'
-  - '121'
-  - '122'
-  - '124'
-  - '126'
-  - '129'
-  - '131'
-  - '133'
-  - '138'
-  - '14'
-  - '142'
-  - '144'
-  - '15'
-  - '150'
-  - '152'
-  - '157'
-  - '159'
-  - '160'
-  - '161'
-  - '164'
-  - '165'
-  - '166'
-  - '167'
-  - '168'
-  - '169'
-  - '171'
-  - '172'
-  - '174'
-  - '176'
-  - '178'
-  - '179'
-  - '181'
-  - '182'
-  - '185'
-  - '188'
-  - '19'
-  - '190'
-  - '196'
-  - '2'
-  - '20'
-  - '205'
-  - '207'
-  - '208'
-  - '209'
-  - '21'
-  - '210'
-  - '211'
-  - '212'
-  - '214'
-  - '215'
-  - '216'
-  - '219'
-  - '220'
-  - '223'
-  - '225'
-  - '227'
-  - '229'
-  - '23'
-  - '231'
-  - '233'
-  - '234'
-  - '236'
-  - '238'
-  - '24'
-  - '242'
-  - '243'
-  - '244'
-  - '245'
-  - '246'
-  - '29'
-  - '30'
-  - '40'
-  - '42'
-  - '43'
-  - '45'
-  - '47'
-  - '53'
-  - '57'
-  - '60'
-  - '61'
-  - '65'
-  - '66'
-  - '69'
-  - '70'
-  - '72'
-  - '76'
-  - '78'
-  - '80'
-  - '83'
-  - '84'
-  - '88'
-  - '90'
-  - '91'
-  - '98'
   medmcqa:
   - 52d643b9-6455-43f0-a04e-a838bf1ba1c8
