@@ -13,7 +13,7 @@ Gold formats:
 | `open` | the reference as a string, LaTeX or plain |
 | `choice` | `{"options": [text, ...], "answer": "C"}`, options in letter order |
 | `verdict` | `{"labels": [...], "answer": label}` |
-| `code` | `{"harness": "pytest" \| "assert" \| "check", "tests", "reference", "entry_point" (check only), "time_limit_s" (default 10), "memory_mb" (default 1024)}` |
+| `code` | `{"harness": "pytest" \| "assert" \| "check", "tests", "reference", "entry_point" (check only), "prelude" (optional), "time_limit_s" (default 10), "memory_mb" (default 1024)}` |
 
 `gold_check(items)` renders each reference in every wrapper of its kind (for code: the reference solution in a Python block) and returns, per item, `None` or the first reason it does not earn reward 1; `gold_ok(kind, gold)` is the single-item form. A reason of `timeout` means undecided rather than wrong. The program channel is not part of the check: a program printing the reference would be verified exactly like the boxed reference.
 
@@ -39,9 +39,9 @@ Every wrapper is matched literally, case included, apart from surrounding whites
 
 A test renders every wrapper and checks that no other wrapper extracts anything from it. Each wrapper also carries one instruction sentence ("..., where X is your final answer"); what the answer is (a letter, a label) is left to the prompt.
 
-With wrapper `box` and channels `("direct", "program")`, the final answer is whichever ends last in the response: the last box or the last Python block. With `("program",)` only the block counts (the census's forced channel), with `("direct",)` only the box. A program runs in the sandbox with 5 s of CPU time and 512 MiB; the last non-empty line of its standard output is verified like box content. A non-zero exit, a timeout or no output is incorrect, with `channel="program"` and the reason in `error`.
+With wrapper `box` and channels `("direct", "program")`, a response containing a boxed answer is answered directly: the last box is the final answer and any program is ignored. Only a response with no box at all and at least one fenced Python block is a program answer, its last block being run. (The base model often follows a correct box with an unasked-for program that prints nothing; under "whichever comes last" that lost 165 of 2,400 correct boxes in the smoke census.) With `("program",)` boxes are ignored and the last block counts (the census's forced channel), with `("direct",)` only the box. `channel` says which case applied. A program runs in the sandbox with 5 s of CPU time and 512 MiB; the last non-empty line of its standard output is verified like box content. A non-zero exit, a timeout or no output is incorrect, with `channel="program"` and the reason in `error`.
 
-`correct_any` is true when the reward is, or when the answer ending last among all wrappers of the kind (and the program, if offered) is correct; for code, an untagged fenced block also counts. It is never "some answer somewhere was right", so a response hedging across two formats gains nothing.
+`correct_any` is true when the reward is, or when the answer ending last among all wrappers of the kind is correct, or, if there is none and the program channel is offered, the program's answer; for code, an untagged fenced block also counts. It is never "some answer somewhere was right", so a response hedging across two formats gains nothing.
 
 ## Equivalence of open answers
 
@@ -66,13 +66,13 @@ math-verify's own numeric comparison is bypassed because it gives false credit: 
 
 A choice answer is cleaned (math delimiters, `\text`-like commands, markdown emphasis, quotes, a trailing period) and read three ways: a capital option letter in its usual dressings (`C`, `(C)`, `[C]`, `C.`, `C)`, `C:`, `Option C`), a letter followed by that same option's exact text (`C. 42`), or the exact text of an option (case and spacing aside). It counts only if these readings name exactly one existing option, so `B or C`, `B. 43` with 43 under D, a lower-case `b`, or a text shared by two options name none. A verdict is correct when the cleaned answer equals exactly one label of the item's closed set, case aside.
 
-For code, the program is saved as `solution.py`, every top-level name it defines (underscored ones too) is imported ahead of the tests, and the harness runs in the sandbox with the item's time and memory limits:
+For code, the program is saved as `solution.py`, after the item's prelude if it has one (trusted dataset text such as LeetCode's `from typing import *` and `ListNode`, placed exactly as if written at the top of the file), every top-level name of that file (underscored ones too) is imported ahead of the tests, and the harness runs in the sandbox with the item's time and memory limits:
 
 - `pytest` (KodCode): the tests run as `test_solution.py`; pass means pytest exits 0 with at least one passed test, no failure and no skip or xfail.
 - `assert` (MBPP+, whose `test` field is a script of assertions calling the function by name, and MBPP-style assertion lists): the tests run as a script.
 - `check` (HumanEval+, LeetCode): the tests run as a script, then `check(<entry_point>)`.
 
-Success is a random token the harness prints after the tests, together with exit status 0, so `os._exit(0)`, `sys.exit(0)`, `exit()` or killing itself never passes. The supplied files are written read-only (mode 0444); a job can change that for its own files, but the harness and the tests have been read by then, and nothing it writes reaches a later job. A program containing `__eq__` fails unless the reference contains it too, because an object whose `__eq__` always returns true would pass equality-based tests.
+Success is a random token the harness prints after the tests, together with exit status 0, so `os._exit(0)`, `sys.exit(0)`, `exit()` or killing itself never passes. The supplied files are written read-only (mode 0444); a job can change that for its own files, but the harness and the tests have been read by then, and nothing it writes reaches a later job. A program containing `__eq__` fails unless the reference contains it too (the rule looks at the model's code only, so a prelude defining `ListNode.__eq__` licenses nothing), because an object whose `__eq__` always returns true would pass equality-based tests.
 
 ## Sandbox
 

@@ -6,9 +6,11 @@ Gold formats by kind:
 - choice: {"options": [option text, ...], "answer": letter}, options in the order of their letters A, B, C, ...
 - verdict: {"labels": [label, ...], "answer": label}, a closed label set.
 - code: {"harness": "pytest" | "assert" | "check", "tests": str, "reference": str, optional "entry_point" (required
-  for check), "time_limit_s" (default 10), "memory_mb" (default 1024)}. The program is saved as solution.py, and
-  every top-level name it defines is imported ahead of the tests; pytest runs `tests` as test_solution.py; assert
-  runs `tests` as a script; check does the same and then calls `check(<entry_point>)`.
+  for check), "prelude" (default none), "time_limit_s" (default 10), "memory_mb" (default 1024)}. The program is
+  saved as solution.py, after the prelude if there is one (dataset text such as `from typing import *` and ListNode,
+  which the program may rely on), and every top-level name of that file is imported ahead of the tests; pytest runs
+  `tests` as test_solution.py; assert runs `tests` as a script; check does the same and then calls
+  `check(<entry_point>)`.
 """
 
 from __future__ import annotations
@@ -81,37 +83,34 @@ class Candidate:
     found: Found
 
 
-def _candidates(job: Job, wrappers) -> list[Candidate]:
-    out = [Candidate("direct", f) for w in wrappers if (f := w.find(job.text)) is not None]
-    if "program" in job.channels:
-        if (f := python_block(job.text)) is not None:
-            out.append(Candidate("program", f))
-    return out
-
-
-def _last(candidates: list[Candidate]) -> Candidate | None:
-    """The candidate ending last; on a tie the earlier one in the list (default wrapper first)."""
+def _answer(job: Job, wrappers) -> Candidate | None:
+    """A direct answer takes precedence: the one ending last among these wrappers (on a tie the earlier wrapper,
+    default first). Only a response without any is a program answer, when the program channel is offered: its last
+    fenced Python block. (A correct box followed by an unasked-for program that prints nothing is a correct box.)"""
     best = None
-    for c in candidates:
-        if best is None or c.found.end > best.found.end:
-            best = c
+    for w in wrappers:
+        if (f := w.find(job.text)) is not None and (best is None or f.end > best.found.end):
+            best = Candidate("direct", f)
+    if best is None and "program" in job.channels and (f := python_block(job.text)) is not None:
+        best = Candidate("program", f)
     return best
 
 
 def strict_answer(job: Job) -> Candidate | None:
-    """The final answer in the wrapper asked for, among the channels offered."""
+    """The final answer in the wrapper asked for, among the channels offered (with only the program channel, boxes
+    are ignored)."""
     if job.kind == "code":
         f = python_block(job.text)
         return Candidate("direct", f) if f else None
-    return _last(_candidates(job, [WRAPPERS[job.wrapper]] if "direct" in job.channels else []))
+    return _answer(job, [WRAPPERS[job.wrapper]] if "direct" in job.channels else [])
 
 
 def tolerant_answer(job: Job) -> Candidate | None:
-    """The final answer in any wrapper of the kind (the program channel if offered): the one that ends last."""
+    """The final answer in any wrapper of the kind, with the same precedence over the program (if offered)."""
     if job.kind == "code":
         f = python_block(job.text, tolerant=True)
         return Candidate("direct", f) if f else None
-    return _last(_candidates(job, for_kind(job.kind)))
+    return _answer(job, for_kind(job.kind))
 
 
 # -- correctness ----------------------------------------------------------------------------------------------------
@@ -192,7 +191,8 @@ def run_tests(program: str, gold: dict) -> str | None:
     random token printed after the tests and a zero exit status, so a program that exits early never passes."""
     harness = gold["harness"]
     nonce = secrets.token_hex(16)
-    files = {"solution.py": program}
+    prelude = gold.get("prelude", "")  # trusted dataset text, as if written at the top of the solution file
+    files = {"solution.py": f"{prelude}\n{program}" if prelude else program}
     if harness == "pytest":
         files["test_solution.py"] = _IMPORT_ALL + gold["tests"]
         main = _PYTEST_MAIN.format(nonce=nonce)
@@ -203,7 +203,7 @@ def run_tests(program: str, gold: dict) -> str | None:
         main += f"\nprint({nonce!r})\n"
     else:
         raise ValueError(f"unknown harness {harness!r}")
-    if "__eq__" in program and "__eq__" not in gold.get("reference", ""):
+    if "__eq__" in program and "__eq__" not in gold.get("reference", ""):  # the model's code only, not the prelude
         return "program defines __eq__"  # an always-equal object would pass equality tests
     r = run_python(main, files=files, timeout_s=float(gold.get("time_limit_s", CODE_TIME_LIMIT_S)),
                    memory_mb=int(gold.get("memory_mb", CODE_MEMORY_MB)))

@@ -121,16 +121,32 @@ def test_tolerant_extraction_takes_the_last_answer_not_any_answer():
     assert (v.reward, v.complied, v.correct_any) == (0.0, False, False)
 
 
-def test_program_channel_whichever_comes_last_counts():
-    program = "```python\nprint(3 + 4)\n```"
-    v = open_job(f"Compute it.\n{program}", "7", channels=BOTH)
+def test_a_boxed_answer_takes_precedence_over_any_program():
+    silent = "```python\nx = 3 + 4\n```"
+    printing = "```python\nprint(3 + 4)\n```"
+    v = open_job(f"So \\boxed{{7}}.\nCheck:\n{silent}", "7", channels=BOTH)  # box, then a silent program
+    assert (v.reward, v.channel, v.extracted, v.correct_any) == (1.0, "direct", "7", True)
+    v = open_job(f"{printing}\nIt prints 7, so \\boxed{{8}}.", "7", channels=BOTH)  # program, then box: the box
+    assert (v.reward, v.channel, v.extracted, v.correct_any) == (0.0, "direct", "8", False)
+    v = open_job(f"\\boxed{{8}}\n{printing}", "7", channels=BOTH)  # a box before a correct program still decides
+    assert (v.reward, v.channel, v.correct_any) == (0.0, "direct", False)
+    v = open_job(f"Compute it.\n{printing}", "7", channels=BOTH)  # no box, a printing program
     assert (v.reward, v.channel, v.extracted) == (1.0, "program", "7")
-    v = open_job(f"{program}\nIt prints 7, so \\boxed{{8}}.", "7", channels=BOTH)  # the box comes last
-    assert (v.reward, v.channel, v.extracted) == (0.0, "direct", "8")
-    v = open_job(f"\\boxed{{8}}\n{program}", "7", channels=("direct",))  # program not offered: the box counts
-    assert (v.reward, v.channel) == (0.0, "direct")
-    v = open_job("\\boxed{7}", "7", channels=("program",))  # only the program channel offered
+    v = open_job(f"Compute it.\n{silent}", "7", channels=BOTH)  # no box, a silent program
+    assert (v.reward, v.channel, v.complied, v.correct_any, v.error) == (0.0, "program", True, False,
+                                                                         "program printed nothing")
+    v = open_job(f"<answer>8</answer>\n\n{printing}", "8", channels=BOTH)  # for correct_any, any wrapper's answer
+    assert (v.reward, v.channel, v.correct_any) == (0.0, "program", True)  # takes precedence over the program
+
+
+def test_with_only_the_program_channel_boxes_are_ignored():
+    printing = "```python\nprint(3 + 4)\n```"
+    v = open_job(f"\\boxed{{8}}\n{printing}", "7", channels=("program",))
+    assert (v.reward, v.channel, v.extracted) == (1.0, "program", "7")
+    v = open_job("\\boxed{7}", "7", channels=("program",))
     assert (v.reward, v.complied, v.correct_any) == (0.0, False, True)
+    v = open_job(f"\\boxed{{8}}\n{printing}", "7", channels=("direct",))  # program not offered: the box counts
+    assert (v.reward, v.channel) == (0.0, "direct")
 
 
 def test_program_must_print_the_answer_on_its_last_line():
@@ -238,6 +254,25 @@ def test_slow_program_fails_at_the_item_time_limit():
     assert (v.reward, v.error) == (0.0, "timeout") and time.monotonic() - t0 < WALL_FACTOR * 1 + EXIT_S + 3
 
 
+def test_a_prelude_is_part_of_the_solution_file_but_not_of_the_model_code():
+    prelude = ("from typing import *\n\nclass ListNode:\n    def __init__(self, val=0, next=None):\n"
+               "        self.val, self.next = val, next\n    def __eq__(self, other):\n"
+               "        return isinstance(other, ListNode) and (self.val, self.next) == (other.val, other.next)\n")
+    reference = ("class Solution:\n    def first(self, head: Optional[ListNode]) -> List[int]:\n"
+                 "        return [head.val] if head else []\n")
+    tests = "def check(candidate):\n    assert candidate(ListNode(4, ListNode(5))) == [4]\n" \
+            "    assert ListNode(1) == ListNode(1)\n"
+    gold = {"harness": "check", "entry_point": "Solution().first", "tests": tests, "reference": reference,
+            "prelude": prelude}
+    assert code_job(reference, gold).reward == 1.0 and gold_ok("code", gold)
+    without = {k: v for k, v in gold.items() if k != "prelude"}
+    assert code_job(reference, without).error.startswith("tests failed") and not gold_ok("code", without)
+    cheat = reference.replace("return [head.val] if head else []",
+                              "class A:\n            def __eq__(self, o):\n                return True\n"
+                              "        return A()")
+    assert code_job(cheat, gold).error == "program defines __eq__"  # the prelude's __eq__ does not license it
+
+
 def test_code_needs_a_python_tagged_block_for_the_reward():
     v = code_job(REF, CHECK, tag="")
     assert (v.reward, v.complied, v.correct_any) == (0.0, False, True)
@@ -253,6 +288,7 @@ def test_verify_many_keeps_order_and_matches_judge():
 def test_a_job_stuck_in_c_code_is_killed_at_its_deadline():
     pool = Pool(2)
     try:
+        pool.run([Job("open", "\\boxed{1}", "1", "box")] * 2)  # start both processes (imports take seconds)
         t0 = time.monotonic()
         out = pool.run([Job("open", "\\boxed{10^{10^{10}}}", "1", "box"), Job("open", "\\boxed{1}", "1", "box")],
                        timeout=3)
