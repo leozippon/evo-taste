@@ -17,10 +17,10 @@ All commands run from the repository root after `source scripts/env.sh`.
 | Step | Command |
 |---|---|
 | Fill the dataset cache (once, through the mirror) | `python scripts/make_suites_r2.py --download` |
-| Assign parts | `python scripts/make_suites_r2.py` (about 9 minutes, mostly the reference checks with 32 verifier processes) |
+| Assign parts | `python scripts/make_suites_r2.py` (5 to 15 minutes depending on the machine's load, mostly the reference checks with 32 verifier processes) |
 | Census, one part and shard per GPU | `CUDA_VISIBLE_DEVICES=<g> python -m evotaste.census run configs/census.yaml --part <part> --shard i/n` |
 | Census summary and strata table | `python -m evotaste.census summarize configs/census.yaml` |
-| Tests | `python -m pytest tests/test_tasks.py tests/test_external.py tests/test_census.py` (about 4 minutes; they build the parts) |
+| Tests | `python -m pytest tests/test_tasks.py tests/test_external.py tests/test_census.py` (4 to 6 minutes; they build the parts) |
 
 Everything after the download reads the local cache offline. Every process that loads items rebuilds the parts from the cache (about one to two minutes on the loaded machine: loading 20 s, copy detection 30 s, tokenisation 10 s) and checks them against the suites file.
 
@@ -102,7 +102,7 @@ The census reads items only through `Suites.items` for train and selection and t
 
 - **LeetCode needs a prelude hook in the verifier.** Its problems assume the dataset's imports and helper classes (`List`, `ListNode`, `TreeNode`); the verifier saves the candidate program alone as `solution.py`, so 172 of the 228 references fail their own tests and are dropped, and the remaining 56 are those that need no prelude. Once the verifier prepends `gold["prelude"]` to the program, the suites file must be regenerated.
 - **Copy detection is lexical.** Paraphrases, translations and rewrites that change more than about half of the 5-gram shingles are not found; MinHash finds a pair at Jaccard 0.5 with probability 0.96. A copy kept by de-duplication can afterwards fail a filter while its removed twin would have passed.
-- Dyck-language targets containing `{` or `}` cannot be boxed, so 99 of 250 items are dropped; Omni-MATH loses 578 items to free-text references and keeps 276.
+- Dyck-language targets containing `{` or `}` cannot be boxed, so 99 of 250 items are dropped; Omni-MATH loses 658 items to free-text references and keeps 212.
 - MMLU-Pro counts as logic although it holds math and science questions; TheoremQA's `option` items are dropped rather than parsed.
 - Every process rebuilds the parts (one to two minutes) and holds every source in memory while doing so, vault texts included, as Round 1 did; protection of the vault is the accessor's refusal, not memory isolation.
 - Opening the vault reruns its reference checks; a verifier that changed since generation makes the hash check fail, and the suites file must then be regenerated before the vault can be read.

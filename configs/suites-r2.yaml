@@ -14,8 +14,8 @@ generated:
     max_prompt_tokens: 3500
     tokenizer: Qwen/Qwen3-1.7B
 totals:
-  train: 79265
-  selection: 16359
+  train: 79260
+  selection: 16360
   blind2: 17437
 units:
   bbh_boolean_expressions:
@@ -215,8 +215,8 @@ parts:
       sha256: d73e42446bcbe8ccfb3a35366324f108a416c228846578b6b26fd66c45895940
   math_train:
     train:
-      items: 6919
-      sha256: b9c828e3948b59871f90e923c4b930f18f9ea7ea2f4cd0502cadb305d7610e94
+      items: 6917
+      sha256: 10ae3355676509311cc2fc6387ff2577ba19cba55f71be98483a5bedec212fde
   math_test:
     selection:
       items: 2352
@@ -236,8 +236,8 @@ parts:
       sha256: a9a208ad68c9d4ed5e688b8aa076db2bd96e6778d4737dd215191fda42214007
   deepscaler:
     train:
-      items: 27847
-      sha256: 6c038fd852ca04f74662bd82a33e1f151f05aade8654aba836ad8d33c3fd3440
+      items: 27845
+      sha256: 2de25a3cac9afd11d04eaca5c86c1813aa00b2b39ad566fc8695303832cfd53c
     selection:
       items: 1409
       sha256: fa17ddbd435219b0f634a94c900518769c38cddd59a8e8d070aedafb40f43826
@@ -256,8 +256,8 @@ parts:
       sha256: 9ae62a4f361f898eeb9334a72278a59175bf56d08dfbca6cbb87eec029c7094d
   kodcode:
     train:
-      items: 8891
-      sha256: 251486dffa81856842b2f5bbce00a1734efdf38224be4010c1d4c88eb35f616e
+      items: 8890
+      sha256: e374fcacc6fa52010a515ef4f7f95a7141facd43c9910ae211aa2a9cb977c976
     selection:
       items: 474
       sha256: b2733752d5afd1e684bb494de5882bd2a75dfeff264d6694a2252b22989b15f3
@@ -308,8 +308,8 @@ parts:
       sha256: 168b48853c990cfe69cac2d3ecd4bfc1fd7a7f6feb40c18e510173a1859e857c
   omni_rest:
     selection:
-      items: 211
-      sha256: 5a5621a4bd67cd7851fb9820e368caffc647be417a083e02156f5de07b6c270c
+      items: 212
+      sha256: 9c681b30d39ac838dc8850b958b82041bee33defdbca34700f37d26f69025d46
   humaneval_plus:
     blind2:
       items: 163
@@ -410,7 +410,7 @@ dropped:
     'train: copy in selection': 170
     'train: copy in the same part': 1
     'train: free-text gold': 237
-    'train: gold rejected': 6
+    'train: gold rejected': 8
     'train: no gold': 2
   math_test:
     'blind2: free-text gold': 95
@@ -440,7 +440,7 @@ dropped:
     'train: copy in selection': 161
     'train: copy in the same part': 8963
     'train: free-text gold': 238
-    'train: gold rejected': 88
+    'train: gold rejected': 90
   aqua:
     'train: copy in blind2': 5
     'train: copy in selection': 11
@@ -450,7 +450,7 @@ dropped:
     'blind2: gold rejected': 12
     'selection: gold rejected': 5
     'train: copy in blind2': 1
-    'train: gold rejected': 127
+    'train: gold rejected': 128
   logiqa:
     'selection: copy in blind2': 52
     'train: copy in blind2': 1
@@ -468,7 +468,7 @@ dropped:
   omni_rest:
     'selection: copy in blind2': 1
     'selection: free-text gold': 658
-    'selection: gold rejected': 26
+    'selection: gold rejected': 25
     'selection: in DeepScaleR': 3532
   humaneval_plus:
     'blind2: gold rejected': 1
@@ -484,7 +484,9 @@ dropped:
     'selection: copy in blind2': 1
 gold_failed:
   math_train:
+  - algebra/1637
   - counting_and_probability/163
+  - intermediate_algebra/1250
   - intermediate_algebra/579
   - number_theory/661
   - number_theory/663
@@ -504,6 +506,7 @@ gold_failed:
   - '1993'
   - '22840'
   - '23912'
+  - '25405'
   - '2624'
   - '27641'
   - '27791'
@@ -581,6 +584,7 @@ gold_failed:
   - '6406'
   - '6408'
   - '6415'
+  - '77'
   - '8619'
   - '99'
   aqua:
@@ -588,8 +592,8 @@ gold_failed:
   - train/73787
   - train/8836
   kodcode:
+  - Algorithm_11846_I
   - Algorithm_1715_I
-  - Algorithm_2166_I
   - Algorithm_32876_I
   - Algorithm_4614_I
   - Data_Structure_28057_I
@@ -704,6 +708,7 @@ gold_failed:
   - Filter_1152_I
   - Filter_51950_I
   - Filter_55741_I
+  - Filter_60220_I
   - Filter_62245_I
   - Filter_65428_I
   - Filter_72715_I
@@ -729,7 +734,6 @@ gold_failed:
   - '1076'
   - '114'
   - '1276'
-  - '1676'
   - '2428'
   - '335'
   - '3857'
