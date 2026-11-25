@@ -1,9 +1,9 @@
 """Sandboxed execution of model-written Python with bubblewrap.
 
-The sandbox sees a new, empty root: read-only `/usr` (with the merged-usr symlinks), the project's virtual
-environment and the uv-managed interpreter it links to, a fresh `/proc` and minimal `/dev`, and a size-capped tmpfs at
-`/tmp`, which is the working directory. Nothing else of the host exists inside, so `.env`, the repository, home
-directories, other users' data, host `/tmp` and unix sockets are unreachable. All namespaces are unshared (no network
+The sandbox sees a new, read-only root holding only read-only `/usr` (with the merged-usr symlinks), the project's
+virtual environment and the uv-managed interpreter it links to, a fresh `/proc`, a minimal read-only `/dev`, and a
+size-capped tmpfs at `/tmp`, the working directory and the only writable place. Nothing else of the host exists inside,
+so `.env`, the repository, home directories, other users' data, host `/tmp` and unix sockets are unreachable. All namespaces are unshared (no network
 but a private loopback, own pid namespace), the environment is cleared, capabilities are dropped, and the supplied
 files are bind-mounted read-only. Inside, before the program runs, hard limits are set on address space, CPU time,
 file size (which also caps stdout and stderr), process and thread count, and core dumps.
@@ -85,7 +85,10 @@ def _bwrap_args() -> list[str]:
             args += ["--symlink", os.readlink(Path("/", name)), f"/{name}"]
     for root in _readonly_roots():
         args += ["--ro-bind", str(root), str(root)]
-    args += ["--proc", "/proc", "--dev", "/dev", "--size", str(TMPFS_BYTES), "--tmpfs", "/tmp", "--chdir", "/tmp"]
+    # bwrap's root and its /dev are uncapped tmpfs mounts of their own: made read-only, so that /tmp is the only
+    # writable place (device nodes such as /dev/null still work)
+    args += ["--proc", "/proc", "--dev", "/dev", "--size", str(TMPFS_BYTES), "--tmpfs", "/tmp", "--remount-ro", "/dev",
+             "--remount-ro", "/", "--chdir", "/tmp"]
     for k, v in _ENV.items():
         args += ["--setenv", k, v]
     return args
