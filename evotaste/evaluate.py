@@ -366,6 +366,7 @@ def harvest(run_dir: Path, tag: str, step: int | None = None) -> None:
 # -- context score -------------------------------------------------------------------------------------------------
 
 SCORE_COLUMNS = ("subject", "lineage", "step", "context", "domain", "responses", "tokens", "delta_sum", "delta_mean")
+RESPONSE_COLUMNS = ("subject", "lineage", "step", "uid", "domain", "context", "tokens", "delta_sum")
 # Forward-only passes keep no activations, so they take micro-batches of this many times the trainer's token budget.
 SCORE_BUDGET_FACTOR = 4
 
@@ -409,9 +410,12 @@ def score_selection(run: Run, base_records: list[dict], items: int | None, conte
             take[d] += 1
         positions = sorted(i for d, v in by_domain.items()
                            for i in random.Random(stable_seed("context-score", items, d)).sample(v, take[d]))
+    uids = [base_records[i]["uid"] for i in positions]
+    if len(set(uids)) != len(uids):
+        raise RuntimeError("the probe set repeats a uid; per-response context scores would be ambiguous")
     key = hashlib.sha256(json.dumps({"positions": positions, "contexts": contexts}).encode()).hexdigest()[:10]
     return {"name": f"{len(positions)}items-{len(contexts)}contexts-{key}", "positions": positions,
-            "uids": [base_records[i]["uid"] for i in positions], "contexts": contexts}
+            "uids": uids, "contexts": contexts}
 
 
 def context_deltas(run: Run, policy: Policy, records: list[dict], contexts: list[str],
@@ -443,7 +447,8 @@ def context_score(run_dir: Path, items: int | None = None, contexts: list[str] |
     """For each subject and selected context, the mean over completion tokens of log p_base(token | context prompt) -
     log p_base(token | plain prompt), by domain, on the selected probe items. Each selection has its own directory
     runs/<name>/context_score/<selection>/ with selection.json, one cache file per subject (keyed by the SHA-256 of
-    its responses file) and table.csv, which holds every subject scored under that selection. `lineages` and `steps`
+    its responses file), table.csv, which holds every subject scored under that selection by context and domain, and
+    responses.csv with the same values per scored response (uid, context). `lineages` and `steps`
     choose which lineages' probes are scored now; the base references are always scored."""
     run = Run(run_dir)
     base_records = read_jsonl_gz(run.dir / "base" / "probe_responses.jsonl.gz")
@@ -453,13 +458,14 @@ def context_score(run_dir: Path, items: int | None = None, contexts: list[str] |
         raise SystemExit(f"{out}: selection.json describes another selection")
     write_json(out / "selection.json", selection)
     budget = SCORE_BUDGET_FACTOR * run.cfg.trainer.token_budget
-    policy, rows = None, []
+    policy, rows, responses = None, [], []
     for subject, lineage, step, path in score_subjects(run, selection["contexts"]):
         cache = out / f"{subject.replace(':', '--')}.json"
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         cached = read_json(cache) if cache.exists() else None
-        if cached and cached["sha256"] == digest:
+        if cached and cached["sha256"] == digest and isinstance(cached.get("responses"), list):  # older: no values
             rows += cached["rows"]
+            responses += cached["responses"]
             continue
         if lineage is not None and ((lineages is not None and lineage not in lineages)
                                     or (steps is not None and step not in steps)):
@@ -471,20 +477,25 @@ def context_score(run_dir: Path, items: int | None = None, contexts: list[str] |
         if policy is None:
             policy = Policy(run.cfg.model, run.cfg.lora, run.cfg.trainer)
         t0 = time.perf_counter()
-        subject_rows = score_rows(subject, lineage, step, context_deltas(run, policy, picked, selection["contexts"],
-                                                                         budget))
+        deltas = context_deltas(run, policy, picked, selection["contexts"], budget)
+        subject_rows = score_rows(subject, lineage, step, deltas)
+        subject_responses = [{"subject": subject, "lineage": lineage, "step": step, "uid": r["uid"], "domain": d,
+                              "context": c, "tokens": n, "delta_sum": x}
+                             for c, values in deltas.items() for r, (d, x, n) in zip(picked, values)]
         seconds = round(time.perf_counter() - t0, 1)
-        write_json(cache, {"time": now(), "responses": str(path), "sha256": digest, "seconds": seconds,
-                           "rows": subject_rows})
+        write_json(cache, {"time": now(), "file": str(path), "sha256": digest, "seconds": seconds,
+                           "rows": subject_rows, "responses": subject_responses})
         rows += subject_rows
+        responses += subject_responses
         log.info("context score of %s: %d responses x %d prompts in %.0f s", subject, len(picked),
                  1 + len(selection["contexts"]), seconds)
-    text = io.StringIO()
-    writer = csv.DictWriter(text, fieldnames=SCORE_COLUMNS)
-    writer.writeheader()
-    writer.writerows(rows)
-    atomic_write(out / "table.csv", text.getvalue().encode())
-    log.info("wrote %s (%d rows)", out / "table.csv", len(rows))
+    for name, columns, table in (("table.csv", SCORE_COLUMNS, rows), ("responses.csv", RESPONSE_COLUMNS, responses)):
+        text = io.StringIO()
+        writer = csv.DictWriter(text, fieldnames=columns)
+        writer.writeheader()
+        writer.writerows(table)
+        atomic_write(out / name, text.getvalue().encode())
+        log.info("wrote %s (%d rows)", out / name, len(table))
 
 
 def _names(text: str | None) -> list[str] | None:

@@ -161,6 +161,16 @@ def test_context_score(finished, monkeypatch):
     subjects = {r["subject"] for r in rows}
     assert {"base", "base:refute", "a@0", "a@4", "a1@1", "c@2"} <= subjects and len(subjects) == 13 + 3 + 3 + 2 + 3 + 3
     assert {r["context"] for r in rows} == set(run.contexts)
+    with open(run.dir / "context_score" / full / "responses.csv") as f:
+        per_response = list(csv.DictReader(f))
+    assert list(per_response[0]) == list(evaluate.RESPONSE_COLUMNS)
+    assert len(per_response) == len(subjects) * 6 * 12  # every subject, item and context, references included
+    for r in rows:  # the aggregate is the sum of the per-response values
+        mine = [x for x in per_response if (x["subject"], x["context"], x["domain"]) == (r["subject"], r["context"],
+                                                                                          r["domain"])]
+        assert len(mine) == int(r["responses"]) and sum(int(x["tokens"]) for x in mine) == int(r["tokens"])
+        assert sum(float(x["delta_sum"]) for x in mine) == pytest.approx(float(r["delta_sum"]), abs=1e-9)
+    assert {x["uid"] for x in per_response if x["subject"] == "base:map"} == {t.uid for t in run.probe_tasks}
 
     # one subject recomputed by hand: token-mean of log p_base(token | context prompt) - log p_base(token | plain)
     records = read_jsonl_gz(run.dir / "members" / "a" / "probe_responses" / "step_000002.jsonl.gz")
