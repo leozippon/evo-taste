@@ -21,11 +21,11 @@ def open_item(source="gsm8k_train", k=0, gold="18"):
 
 def test_instructions():
     t = make_task(open_item())
-    assert (t.wrapper, t.channels) == ("box", ("direct", "program")) and "\\boxed{}" in t.question
-    assert tasks.PROGRAM_OFFER in t.question and t.question.startswith(t.problem)
+    assert (t.wrapper, t.channels) == ("box", ("direct", "program")) and "\\boxed{...}" in t.question
+    assert tasks.OPEN_INSTRUCTION in t.question and t.question.startswith(t.problem)
     v = rewrap(t, "final_line")
     assert (v.wrapper, v.channels) == ("final_line", ("direct",))
-    assert "Final answer:" in v.question and tasks.PROGRAM_OFFER not in v.question and "\\boxed" not in v.question
+    assert "Final answer:" in v.question and tasks.OPEN_INSTRUCTION not in v.question and "\\boxed" not in v.question
     forced = rewrap(t, channels=("program",))
     assert forced.question.endswith(tasks.PROGRAM_ONLY) and "\\boxed" not in forced.question
     choice = make_task(sources._choice("aqua", "1", "math", "Which?", ["2", "3"], 1))
@@ -61,6 +61,11 @@ def test_scores_follow_the_wrapper_the_channel_and_truncation():
     assert (s[3].reward, s[3].channel) == (1.0, "program")
     assert s[4].reward == 1.0
     assert (s[5].reward, s[5].correct_any) == (0.0, False)
+    silent = boxed + "\n\nOr in Python:\n```python\neggs = 20 - 2\neggs\n```"  # a boxed answer always wins
+    forced = rewrap(t, channels=("program",))
+    s = score_many([(t, silent, "stop"), (forced, program, "stop"), (forced, boxed, "stop")])
+    assert (s[0].reward, s[0].channel) == (1.0, "direct")
+    assert (s[1].reward, s[1].channel) == (1.0, "program") and s[2].reward == 0.0
 
 
 def test_procedural_scoring_is_strict_and_lenient():
@@ -191,7 +196,7 @@ def test_stream_obeys_the_mix(fake):
     assert abs(len(variants) - Fraction(3, 20) * len(noncode)) <= 1
     assert {t.wrapper for t in variants} <= set(TRAIN_WRAPPERS) and len({t.wrapper for t in variants}) > 1
     assert all(t.wrapper == "code" for b in batches for t in b if t.domain == "code")
-    assert all(tasks.PROGRAM_OFFER not in t.question for t in variants)
+    assert all(tasks.OPEN_INSTRUCTION not in t.question for t in variants)
 
 
 def test_stream_draws_without_replacement_until_a_pool_is_exhausted(fake):
@@ -248,6 +253,12 @@ def test_probe_set_and_evaluation_set_are_disjoint_and_run_independent():
     assert not {t.uid for t in evaluation} & {t.uid for t in probe}
     selection = {t.uid for s in suites.selection for t in suites.items(s, "selection")}
     assert {t.uid for t in probe + evaluation if t.kind != "procedural"} <= selection
+    from evotaste import census  # an evaluation within the census size uses censused items only
+
+    cfg = census.load_config("configs/census.yaml")
+    censused = {t.uid for t in census.selection_items(cfg, suites, None)}
+    assert {t.uid for t in evaluation} <= censused
+    assert {t.uid for t in probe if t.kind != "procedural"} <= censused
 
 
 def test_engine_code_never_names_the_vault():

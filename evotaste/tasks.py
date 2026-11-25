@@ -39,10 +39,13 @@ if os.environ.get("PYTHONHASHSEED") != "0" or sys.flags.hash_randomization:
 log = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = "Reason step by step, then give your final answer in exactly the form the problem asks for."
-PROGRAM_OFFER = ("or end with one Python program in a fenced block whose printed output is the final answer; "
-                 "whichever comes last counts")
-PROGRAM_ONLY = ("End your response with one Python program in a fenced block (```python ... ```) whose printed "
-                "output is the final answer.")
+# The open instruction with both channels: a boxed answer always wins; only a response without one is answered by
+# its last Python block (the verifier's rule). The forced-program instruction offers that channel alone.
+OPEN_INSTRUCTION = ("Give your final answer as \\boxed{...}. If you would rather compute it, give no boxed answer and "
+                    "instead end with one Python program in a fenced block that prints the final answer; it will be "
+                    "run.")
+PROGRAM_ONLY = ("Give no boxed answer. End your response with one Python program in a fenced block (```python ... "
+                "```) that prints the final answer; it will be run, and only what it prints counts.")
 BOTH_CHANNELS = ("direct", "program")
 VAULT = "blind2"
 
@@ -118,9 +121,9 @@ def instruction(kind: str, gold, wrapper: str, channels: tuple[str, ...]) -> str
 
     if kind == "open" and channels == ("program",):
         return PROGRAM_ONLY
-    ask = WRAPPERS[wrapper].instruction
     if kind == "open" and channels == BOTH_CHANNELS:
-        return f"{ask.rstrip('.')}, {PROGRAM_OFFER}."
+        return OPEN_INSTRUCTION
+    ask = WRAPPERS[wrapper].instruction
     if kind == "choice":
         return f"Answer with the letter of the correct option. {ask}"
     if kind == "verdict":
@@ -417,10 +420,6 @@ def score_many(jobs: list[tuple[Task, str, str]], timeout: float | None = None) 
     return out
 
 
-def score(task: Task, text: str, finish_reason: str) -> Score:
-    return score_many([(task, text, finish_reason)])[0]
-
-
 GOLD_ATTEMPTS = 3  # a reference check that times out is repeated; one that always times out counts as failed
 
 
@@ -558,9 +557,10 @@ def probe_set(suites: Suites) -> list[Task]:
 
 def fixed_tasks(suites: Suites, part: str, per_source: int, per_family: int | None = None,
                 receipt: BlindReceipt | None = None) -> list[Task]:
-    """Evaluation set of a part: for each dataset source its last `per_source` items in the part's order (excluding
-    the probe's items; the whole remainder if smaller), and `per_family` (default `per_source`) instances of each
-    procedural family (stream `eval`). The vault needs the guard's receipt."""
+    """Evaluation set of a part: for each dataset source the first `per_source` items of the part's order that are not
+    probe items (fewer if the part is smaller), and the first `per_family` (default `per_source`) instances of each
+    procedural family in stream `eval`. These are the items the selection census covers first (census.py), so an
+    evaluation of up to the census size uses censused items only. The vault needs the guard's receipt."""
     from evotaste import external
 
     per_family = per_source if per_family is None else per_family
@@ -575,8 +575,7 @@ def fixed_tasks(suites: Suites, part: str, per_source: int, per_family: int | No
         raise ValueError(f"no evaluation set for part {part!r}")
     out = []
     for s in srcs:
-        part_items = external.items(s, part, receipt, suites=suites.path)[skip[s]:]
-        out += part_items[max(0, len(part_items) - per_source):]
+        out += external.items(s, part, receipt, suites=suites.path)[skip[s]:skip[s] + per_source]
     return out + (procedural_tasks(families, "eval", per_family) if families else [])
 
 

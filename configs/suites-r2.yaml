@@ -14,8 +14,8 @@ generated:
     max_prompt_tokens: 3500
     tokenizer: Qwen/Qwen3-1.7B
 totals:
-  train: 79264
-  selection: 16457
+  train: 79263
+  selection: 19117
   blind2: 17437
 units:
   bbh_boolean_expressions:
@@ -256,8 +256,8 @@ parts:
       sha256: 9ae62a4f361f898eeb9334a72278a59175bf56d08dfbca6cbb87eec029c7094d
   kodcode:
     train:
-      items: 8894
-      sha256: 006f34c01e71e5981463522c68dd18bdbd337e4480649851a6e82e10d82257ce
+      items: 8893
+      sha256: 158c8547bb182a0f08627e6b1899fd208dee1919f3fbffe4bf7fe7f0a04ed8cc
     selection:
       items: 473
       sha256: 71eb10d9637121a96ed4fae5a01afe5e90cb9549848045a519b7f7ebdbc40184
@@ -320,8 +320,8 @@ parts:
       sha256: b227cb46b005e7f6d722ff0b60d39af0eef24222058be6e53a9e7adf9bf57204
   leetcode:
     selection:
-      items: 56
-      sha256: e8da2496a0fd081bf3ef88c108bc27fa26ccdb31baf9e984792a5b32c11486f6
+      items: 2716
+      sha256: bf2647356c3af817d6dda4975aabaa2488f66526874f863ee36b7e48066d3ba5
   folio:
     blind2:
       items: 1204
@@ -450,6 +450,7 @@ dropped:
     'blind2: gold rejected': 12
     'selection: gold rejected': 6
     'train: copy in blind2': 1
+    'train: copy in selection': 1
     'train: gold rejected': 124
   logiqa:
     'selection: copy in blind2': 52
@@ -475,7 +476,7 @@ dropped:
   mbpp_plus:
     'selection: gold rejected': 2
   leetcode:
-    'selection: gold rejected': 172
+    'selection: gold rejected': 108
   medmcqa:
     'selection: gold rejected': 1
   qasc:
@@ -754,177 +755,113 @@ gold_failed:
   - '255'
   - '599'
   leetcode:
-  - adjacent-increasing-subarrays-detection-i
-  - adjacent-increasing-subarrays-detection-ii
-  - apply-substitutions
-  - assign-elements-to-groups-with-constraints
-  - button-with-longest-push-time
-  - check-if-dfs-strings-are-palindromes
-  - check-if-digits-are-equal-in-string-after-operations-ii
-  - check-if-grid-can-be-cut-into-sections
-  - choose-k-elements-with-maximum-sum
-  - closest-equal-element-queries
-  - construct-2d-grid-matching-graph-layout
-  - construct-string-with-minimum-cost-easy
-  - construct-the-minimum-bitwise-array-i
-  - construct-the-minimum-bitwise-array-ii
-  - constructing-two-increasing-arrays
-  - count-almost-equal-pairs-i
-  - count-almost-equal-pairs-ii
-  - count-beautiful-numbers
-  - count-beautiful-splits-in-an-array
-  - count-k-reducible-numbers-less-than-n
-  - count-mentions-per-user
-  - count-non-decreasing-subarrays-after-k-operations
-  - count-number-of-balanced-permutations
-  - count-of-substrings-containing-every-vowel-and-k-consonants-i
-  - count-of-substrings-containing-every-vowel-and-k-consonants-ii
-  - count-partitions-with-even-sum-difference
-  - count-paths-with-the-given-xor-value
-  - count-special-subsequences
-  - count-subarrays-of-length-three-with-a-condition
-  - count-substrings-that-can-be-rearranged-to-contain-a-string-i
-  - count-substrings-that-can-be-rearranged-to-contain-a-string-ii
-  - count-substrings-that-satisfy-k-constraint-ii
-  - count-substrings-with-k-frequency-characters-i
-  - count-substrings-with-k-frequency-characters-ii
-  - count-the-number-of-good-nodes
-  - count-the-number-of-winning-sequences
-  - eat-pizzas
-  - final-array-state-after-k-multiplication-operations-i
-  - final-array-state-after-k-multiplication-operations-ii
-  - find-a-safe-walk-through-a-grid
-  - find-indices-of-stable-mountains
-  - find-maximum-removals-from-source-string
-  - find-minimum-cost-to-remove-array-elements
-  - find-minimum-time-to-reach-last-room-i
-  - find-minimum-time-to-reach-last-room-ii
-  - find-mirror-score-of-a-string
-  - find-subtree-sizes-after-changes
-  - find-the-count-of-good-integers
-  - find-the-count-of-monotonic-pairs-i
-  - find-the-count-of-monotonic-pairs-ii
-  - find-the-k-th-character-in-string-game-ii
-  - find-the-largest-almost-missing-integer
-  - find-the-last-marked-nodes-in-tree
-  - find-the-maximum-factor-score-of-array
-  - find-the-maximum-sequence-value-of-array
-  - find-the-number-of-k-even-arrays
+  - add-one-row-to-tree
+  - add-two-numbers
+  - avoid-flood-in-the-city
+  - beautiful-towers-i
+  - binary-tree-coloring-game
+  - block-placement-queries
+  - bricks-falling-when-hit
+  - check-if-an-original-string-exists-given-two-encoded-strings
+  - closest-binary-search-tree-value
+  - closest-room
+  - closest-subsequence-sum
+  - coin-change
+  - confusing-number-ii
+  - contains-duplicate-iii
+  - continuous-subarrays
+  - count-complete-substrings
+  - count-pairs-of-equal-substrings-with-minimum-difference
+  - count-servers-that-communicate
+  - count-ways-to-build-good-strings
+  - course-schedule-iv
+  - cousins-in-binary-tree
+  - delete-columns-to-make-sorted-ii
+  - delete-leaves-with-a-given-value
+  - delivering-boxes-from-storage-to-ports
+  - depth-of-bst-given-insertion-order
+  - digit-operations-to-make-two-integers-equal
+  - distribute-money-to-maximum-children
+  - divide-an-array-into-subarrays-with-minimum-cost-ii
+  - divide-two-integers
+  - find-array-given-subset-sums
+  - find-distance-in-a-binary-tree
+  - find-servers-that-handled-most-number-of-requests
+  - find-the-minimum-cost-array-permutation
   - find-the-number-of-subsequences-with-equal-gcd
-  - find-the-original-typed-string-i
   - find-the-original-typed-string-ii
-  - find-the-power-of-k-size-subarrays-i
-  - find-the-power-of-k-size-subarrays-ii
-  - find-the-sequence-of-strings-appeared-on-the-screen
-  - find-valid-pair-of-adjacent-digits-in-string
+  - find-the-winning-player-in-coin-game
   - find-x-sum-of-all-k-long-subarrays-i
   - find-x-sum-of-all-k-long-subarrays-ii
+  - flip-game-ii
   - frequencies-of-shortest-supersequences
-  - fruits-into-baskets-ii
-  - fruits-into-baskets-iii
-  - identify-the-largest-outlier-in-an-array
-  - k-th-largest-perfect-subtree-size-in-binary-tree
-  - k-th-nearest-obstacle-queries
-  - length-of-longest-v-shaped-diagonal-segment
+  - get-biggest-three-rhombus-sums-in-a-grid
+  - insufficient-nodes-in-root-to-leaf-paths
+  - kth-largest-sum-in-a-binary-tree
+  - last-visited-integers
+  - left-and-right-sum-differences
+  - letter-tile-possibilities
+  - linked-list-cycle
   - longest-common-prefix-of-k-strings-after-removal
-  - longest-palindromic-subsequence-after-at-most-k-operations
-  - make-array-elements-equal-to-zero
-  - manhattan-distances-of-all-arrangements-of-pieces
-  - maximize-active-section-with-trade-i
-  - maximize-active-section-with-trade-ii
-  - maximize-amount-after-two-days-of-conversions
+  - longest-continuous-subarray-with-absolute-diff-less-than-or-equal-to-limit
+  - longest-special-path
+  - longest-unequal-adjacent-groups-subsequence-i
+  - longest-unequal-adjacent-groups-subsequence-ii
+  - make-array-empty
+  - max-sum-of-rectangle-no-larger-than-k
+  - maximize-grid-happiness
   - maximize-profit-from-task-assignment
-  - maximize-score-after-pair-deletions
-  - maximize-score-of-numbers-in-ranges
-  - maximize-subarray-sum-after-removing-all-occurrences-of-one-element
-  - maximize-sum-of-weights-after-edge-removals
-  - maximize-the-distance-between-points-on-a-square
-  - maximize-the-number-of-target-nodes-after-connecting-trees-i
-  - maximize-the-number-of-target-nodes-after-connecting-trees-ii
-  - maximize-the-total-height-of-unique-towers
-  - maximum-amount-of-money-robot-can-earn
-  - maximum-area-rectangle-with-point-constraints-i
-  - maximum-area-rectangle-with-point-constraints-ii
-  - maximum-coin-collection
-  - maximum-difference-between-adjacent-elements-in-a-circular-array
-  - maximum-difference-between-even-and-odd-frequency-i
-  - maximum-difference-between-even-and-odd-frequency-ii
-  - maximum-energy-boost-from-two-drinks
-  - maximum-frequency-of-an-element-after-performing-operations-i
-  - maximum-frequency-of-an-element-after-performing-operations-ii
-  - maximum-multiplication-score
-  - maximum-number-of-distinct-elements-after-operations
-  - maximum-number-of-matching-indices-after-right-shifts
+  - maximum-and-sum-of-array
+  - maximum-increasing-triplet-value
+  - maximum-length-of-a-concatenated-string-with-unique-characters
+  - maximum-number-of-intersections-on-the-chart
   - maximum-number-of-moves-to-kill-all-pawns
-  - maximum-points-tourist-can-earn
-  - maximum-possible-number-by-binary-concatenation
-  - maximum-students-on-a-single-bench
-  - maximum-subarray-sum-with-length-divisible-by-k
-  - maximum-subarray-with-equal-products
-  - maximum-sum-with-at-most-k-elements
-  - maximum-total-area-occupied-by-pistons
-  - maximum-unique-subarray-sum-after-deletion
+  - maximum-path-quality-of-a-graph
   - maximum-value-sum-by-placing-three-rooks-i
   - maximum-value-sum-by-placing-three-rooks-ii
-  - maximum-xor-score-subarray-queries
-  - minimize-connected-groups-by-inserting-interval
-  - minimum-cost-good-caption
-  - minimum-cost-to-divide-array-into-subarrays
-  - minimum-cost-to-make-arrays-identical
-  - minimum-cost-to-reach-every-position
-  - minimum-division-operations-to-make-array-non-decreasing
-  - minimum-element-after-replacement-with-digit-sum
-  - minimum-increments-for-target-multiples-in-an-array
-  - minimum-number-of-operations-to-make-elements-in-array-distinct
-  - minimum-number-of-seconds-to-make-mountain-height-zero
-  - minimum-number-of-valid-strings-to-form-target-i
-  - minimum-number-of-valid-strings-to-form-target-ii
-  - minimum-operations-to-make-array-values-equal-to-k
-  - minimum-operations-to-make-columns-strictly-increasing
-  - minimum-operations-to-make-elements-within-k-subarrays-equal
+  - merge-two-binary-trees
+  - minimize-manhattan-distances
+  - minimum-absolute-difference-between-elements-with-constraint
+  - minimum-array-sum
+  - minimum-cost-to-merge-stones
+  - minimum-cost-walk-in-weighted-graph
+  - minimum-hours-of-training-to-win-a-competition
+  - minimum-incompatibility
+  - minimum-knight-moves
+  - minimum-number-of-food-buckets-to-feed-the-hamsters
+  - minimum-number-of-work-sessions-to-finish-the-tasks
   - minimum-operations-to-make-subarray-elements-equal
-  - minimum-positive-sum-subarray
-  - minimum-runes-to-add-to-cast-spell
-  - minimum-total-operations
-  - minimum-unlocked-indices-to-sort-nums
-  - number-of-subsequences-with-odd-sum
-  - permutations-iii
-  - permutations-iv
-  - phone-number-prefix
-  - properties-graph
-  - reach-end-of-array-with-max-score
-  - rearrange-k-substrings-to-form-target-string
-  - remove-methods-from-project
-  - report-spam-message
+  - minimum-time-for-k-virus-variants-to-spread
+  - minimum-time-to-break-locks-i
+  - minimum-time-to-kill-all-monsters
+  - minimum-xor-sum-of-two-arrays
+  - next-greater-element-iv
+  - next-greater-numerically-balanced-number
+  - number-of-nodes-with-value-one
+  - number-of-valid-words-for-each-puzzle
+  - number-of-ways-to-wear-different-hats-to-each-other
+  - odd-even-jump
+  - paint-house-iv
+  - path-sum-ii
+  - path-with-maximum-gold
+  - range-addition
   - reschedule-meetings-for-maximum-free-time-ii
-  - select-cells-in-grid-with-maximum-score
-  - separate-squares-ii
-  - shift-distance-between-two-strings
-  - shortest-distance-after-road-addition-queries-i
-  - shortest-distance-after-road-addition-queries-ii
-  - shortest-matching-substring
-  - smallest-divisible-digit-product-i
-  - smallest-divisible-digit-product-ii
-  - smallest-substring-with-identical-characters-i
-  - smallest-substring-with-identical-characters-ii
-  - snake-in-matrix
-  - sort-matrix-by-diagonals
-  - sorted-gcd-pair-queries
-  - subsequences-with-a-unique-middle-mode-i
-  - subsequences-with-a-unique-middle-mode-ii
-  - sum-of-consecutive-subarrays
-  - sum-of-consecutive-subsequences
-  - sum-of-good-numbers
-  - sum-of-good-subsequences
+  - rotating-the-box
+  - search-in-a-binary-search-tree
+  - selling-pieces-of-wood
+  - shortest-distance-to-target-string-in-a-circular-array
+  - smallest-common-region
+  - special-permutations
+  - stickers-to-spell-word
+  - sum-of-imbalance-numbers-of-all-subarrays
   - sum-of-k-subarrays-with-length-at-least-m
-  - sum-of-variable-length-subarrays
-  - the-two-sneaky-numbers-of-digitville
-  - transform-array-by-parity
-  - transformed-array
-  - unique-3-digit-even-numbers
-  - zero-array-transformation-i
-  - zero-array-transformation-ii
+  - swap-adjacent-in-lr-string
+  - tiling-a-rectangle-with-the-fewest-squares
+  - trim-a-binary-search-tree
+  - unique-paths-iii
+  - valid-tic-tac-toe-state
+  - water-and-jug-problem
+  - ways-to-express-an-integer-as-sum-of-powers
   - zero-array-transformation-iii
-  - zigzag-grid-traversal-with-skip
   medmcqa:
   - 52d643b9-6455-43f0-a04e-a838bf1ba1c8

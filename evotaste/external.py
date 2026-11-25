@@ -16,16 +16,21 @@ Every item of every source belongs to exactly one part: `train`, `selection` or 
    a prompt over 3,500 tokens, and a gold its own verifier rejects (`gold_ok`). Gold verdicts of train and selection items come
    from the suites file, where the generator recorded them; blind items are checked when the vault is opened.
 
-The suites file pins a SHA-256 of every part's uid list; loading recomputes the parts and refuses a mismatch. Only
-the requested part is ever turned into tasks, and blind items only with the guard's receipt. Blind item lists are
-never written anywhere.
+The suites file pins a SHA-256 of every part's uid list; loading recomputes the parts (or reads the train and
+selection parts from a disk cache written for the same suites file and code) and refuses a mismatch. Only the
+requested part is ever turned into tasks, and blind items only with the guard's receipt. Blind items and their ids
+are never written anywhere.
 """
 
 from __future__ import annotations
 
 import collections
+import dataclasses
 import functools
+import gzip
 import hashlib
+import json
+import os
 import random
 import re
 import zlib
@@ -41,6 +46,11 @@ PARTS = ("train", "selection", "blind2")
 VAULT = "blind2"
 PART_RANK = {"blind2": 0, "selection": 1, "train": 2}  # lower survives a duplicate
 SUITES = Path("configs/suites-r2.yaml")
+# Built open parts, one file per (suites file, building code), outside git; safe to delete. The key covers the code
+# below the package root that decides which items an open part holds and how they are worded, not the dataset cache.
+CACHE_DIR = Path("results/cache/parts")
+BUILD_CODE = ("sources.py", "external.py", "tasks.py", "verify/wrappers.py")
+_PACKAGE = Path(__file__).parent
 SPLIT_SEED_R2 = 20261125
 HELD_OUT_SHARE = 20  # training sources without a test split: 1/20 to selection, 1/20 to blind2
 MAX_GOLD_CHARS = 40
@@ -327,22 +337,55 @@ class SuitesFile:
                                                    for p, v in ps.items()}
 
 
+def cache_key(path: str | Path) -> str:
+    """SHA-256 of the suites file and of the code that builds, filters and words the open parts."""
+    h = hashlib.sha256(Path(path).read_bytes())
+    for name in BUILD_CODE:
+        h.update(b"\0" + name.encode() + b"\0" + (_PACKAGE / name).read_bytes())
+    return h.hexdigest()
+
+
+def _read_cache(key: str) -> dict | None:
+    path = CACHE_DIR / f"{key}.json.gz"
+    if not path.exists():
+        return None
+    data = json.loads(gzip.decompress(path.read_bytes()))
+    return {(e["source"], e["part"]): tuple(sources.Item(**d) for d in e["items"]) for e in data["parts"]}
+
+
+def _write_cache(key: str, parts: dict[tuple[str, str], tuple[sources.Item, ...]]) -> None:
+    """The open parts only: a vault item reaching this function is a bug, and nothing is written."""
+    if any(part == VAULT for _, part in parts):
+        raise RuntimeError("refusing to cache the vault")
+    entries = [{"source": s, "part": p, "items": [dataclasses.asdict(it) for it in v]} for (s, p), v in parts.items()]
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = CACHE_DIR / f".{key}.{os.getpid()}.tmp"
+    tmp.write_bytes(gzip.compress(json.dumps({"key": key, "parts": entries}).encode(), compresslevel=1))
+    os.replace(tmp, CACHE_DIR / f"{key}.json.gz")  # concurrent writers write the same content
+
+
 @functools.lru_cache(maxsize=2)
 def _open_parts(path: str) -> dict[tuple[str, str], tuple[sources.Item, ...]]:
     """Train and selection items by (source, part), after every filter, each list in a fixed seeded order and checked
-    against the suites file's hashes. Blind items are not kept."""
+    against the suites file's hashes. Read from the disk cache when it was written for this suites file and this code;
+    otherwise built and then cached. Blind items are not kept, and never cached."""
     f = SuitesFile(path)
-    items, parts, reasons, _ = build(f.units, f.tokenizer)
-    out = collections.defaultdict(list)
-    for it, part, why in zip(items, parts, reasons):
-        if why is None and part != VAULT and it.uid not in f.gold_failed:
-            out[(it.source, part)].append(it)
-    keys = {k for k in f.hashes if k[1] != VAULT} | set(out)
+    key = cache_key(path)
+    parts = _read_cache(key)
+    if parts is None:
+        items, provisional, reasons, _ = build(f.units, f.tokenizer)
+        out = collections.defaultdict(list)
+        for it, part, why in zip(items, provisional, reasons):
+            if why is None and part != VAULT and it.uid not in f.gold_failed:
+                out[(it.source, part)].append(it)
+        parts = {k: tuple(sorted(v, key=lambda it: _hash2(it.uid))) for k, v in out.items()}
+        _write_cache(key, parts)
+    keys = {k for k in f.hashes if k[1] != VAULT} | set(parts)
     for source, part in sorted(keys):
-        if uid_hash(it.uid for it in out.get((source, part), ())) != f.hashes.get((source, part)):
+        if uid_hash(it.uid for it in parts.get((source, part), ())) != f.hashes.get((source, part)):
             raise RuntimeError(f"{source}/{part}: the items differ from those {path} was generated for (code, data "
                                "or verifier changed); regenerate it with scripts/make_suites_r2.py")
-    return {key: tuple(sorted(v, key=lambda it: _hash2(it.uid))) for key, v in out.items()}
+    return parts
 
 
 @functools.lru_cache(maxsize=None)

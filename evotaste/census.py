@@ -4,8 +4,9 @@
   python -m evotaste.census summarize configs/census.yaml [--limit N]
 
 Parts, each a fixed list of jobs (task, samples, context) cut into chunks of `chunk_items` jobs:
-  train      the train part of every training source (capped per source), `train.samples` samples per item
-  selection  the selection part and the procedural selection families, `selection.samples` per item
+  train      a seeded draw from every training source's train part (capped by domain), `train.samples` per item
+  selection  the first items of every selection unit (probe, then evaluation items) and of the procedural families'
+             evaluation stream, `selection.samples` per item
   channels   sweet-spot open items of the train census, `channels.samples` under each forced answer channel
   contexts   the probe set's plain items, `contexts.samples` under each context of the contexts file
 
@@ -79,13 +80,24 @@ def _open_uids(suites: Suites) -> set[str]:
 
 
 def train_items(cfg: dict, suites: Suites, limit: int | None) -> list[Task]:
-    """The first `cap` items of each training source's train part (all of an uncapped source; at most `limit`)."""
-    p, out = cfg["parts"]["train"], []
+    """The first `cap[domain]` items of each training source's train part, whose order is a seeded draw (at most
+    `limit`)."""
+    from evotaste.sources import SOURCES
+
+    caps, out = cfg["parts"]["train"]["cap"], []
     for s in suites.train:
-        items = suites.items(s, "train")
-        cap = len(items) if s in p["uncapped"] else p["cap"]
-        out += items[:min(cap, limit or cap)]
+        cap = caps[SOURCES[s].domain]
+        out += suites.items(s, "train")[:min(cap, limit or cap)]
     return out
+
+
+def selection_items(cfg: dict, suites: Suites, limit: int | None) -> list[Task]:
+    """The first `cap` items of each selection source's part, the probe items and then the evaluation items
+    (tasks.fixed_tasks draws from these first), and the procedural families' first evaluation instances."""
+    p = cfg["parts"]["selection"]
+    cap, per_family = min(p["cap"], limit or p["cap"]), min(p["per_family"], limit or p["per_family"])
+    tasks = [t for s in suites.selection for t in suites.items(s, "selection")[:cap]]
+    return tasks + (procedural_tasks(suites.procedural, "eval", per_family) if suites.procedural else [])
 
 
 def strata_table(records: list[dict], train_jobs: list[CensusJob]) -> dict[str, tuple[int, int]]:
@@ -106,10 +118,7 @@ def jobs_of(part: str, cfg: dict, suites: Suites, limit: int | None, base: Path)
     if part == "train":
         return [CensusJob(t, p["samples"], None, "default") for t in train_items(cfg, suites, limit)]
     if part == "selection":
-        tasks = [t for s in suites.selection for t in suites.items(s, "selection")[:limit]]
-        per_family = min(p["per_family"], limit or p["per_family"])
-        tasks += procedural_tasks(suites.procedural, "census", per_family) if suites.procedural else []
-        return [CensusJob(t, p["samples"], None, "default") for t in tasks]
+        return [CensusJob(t, p["samples"], None, "default") for t in selection_items(cfg, suites, limit)]
     if part == "channels":
         train_jobs = jobs_of("train", cfg, suites, limit, base)
         table = strata_table(read_part(base, "train", len(chunks(train_jobs, cfg["chunk_items"]))), train_jobs)

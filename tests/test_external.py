@@ -2,6 +2,9 @@
 unit draw, and the vault's guard. Failure messages report counts only, never blind items."""
 
 import collections
+import gzip
+import json
+import shutil
 import subprocess
 import types
 
@@ -122,6 +125,36 @@ def test_every_item_in_exactly_one_part(built):
         by_text[external.normalized(it.problem)].add(p)
     crossing = sum(len(ps) > 1 for ps in by_text.values())
     assert crossing == 0, f"{crossing} problem texts appear in more than one part"
+
+
+def test_the_parts_cache_holds_no_vault_item_and_is_not_used_when_stale(built, tmp_path, monkeypatch):
+    monkeypatch.setattr(external, "CACHE_DIR", tmp_path / "cache")
+    suites = tmp_path / "suites.yaml"
+    shutil.copyfile(SUITES, suites)
+    external._open_parts.cache_clear()
+    monkeypatch.setattr(external, "build", lambda *a: built)  # the module fixture's build, not a second one
+    parts = external._open_parts(str(suites))  # built, checked against the file's hashes, then cached
+    files = list((tmp_path / "cache").iterdir())
+    assert [f.name for f in files] == [f"{external.cache_key(suites)}.json.gz"]
+    data = json.loads(gzip.decompress(files[0].read_bytes()))
+    items, provisional, _, _ = built
+    vault = {it.uid for it, p in zip(items, provisional) if p == external.VAULT}
+    cached = {d["source"] + "/" + d["id"] for e in data["parts"] for d in e["items"]}
+    assert vault and not cached & vault and {e["part"] for e in data["parts"]} == {"train", "selection"}
+    with pytest.raises(RuntimeError, match="vault"):
+        external._write_cache("x", {("svamp", external.VAULT): ()})
+
+    monkeypatch.setattr(external, "build", lambda *a: pytest.fail("rebuilt"))
+    external._open_parts.cache_clear()
+    assert external._open_parts(str(suites)) == parts  # a matching cache is read, nothing is built
+    suites.write_text(suites.read_text() + "# another suites file\n")
+    external._open_parts.cache_clear()
+    with pytest.raises(pytest.fail.Exception, match="rebuilt"):  # a stale cache is not read
+        external._open_parts(str(suites))
+    key = external.cache_key(suites)
+    monkeypatch.setattr(external, "BUILD_CODE", external.BUILD_CODE + ("census.py",))
+    assert external.cache_key(suites) != key  # the key covers the building code
+    external._open_parts.cache_clear()
 
 
 def test_open_parts_match_the_suites_file_and_hold_no_vault_items():

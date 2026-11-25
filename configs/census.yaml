@@ -16,10 +16,10 @@ server:                   # vLLM footprint on a shared card: about the KV budget
 parts:
   train:                  # difficulty strata: frontier 0, sweet 1-6, mastered 7-8 of 8
     samples: 8
-    cap: 8000             # items per training source, the first of its train part's seeded order
-    uncapped: [math_train, kodcode]
-  selection:
+    cap: {math: 3000, logic: 2500, code: 7000}  # items per training source, a seeded draw (the part's order)
+  selection:              # the items evaluations draw from first
     samples: 4
+    cap: 250              # items per selection unit: its probe items, then its evaluation items
     per_family: 25        # instances of each procedural selection family (the format probe)
   channels:               # sweet-spot open items, under each forced answer channel (direct, program)
     samples: 4

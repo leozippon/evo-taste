@@ -283,20 +283,29 @@ def _mbpp_plus() -> list[Item]:
     return out
 
 
+LEETCODE_MIN_ASSERTS = 5
+
+
 def _leetcode() -> list[Item]:
-    """The test split (problems dated 2024-08 to 2025-03), whose generated tests contain no assertion expecting None
-    from an invalid input (68 of the train split's 2,641 do). The prompt's imports and helpers are the prelude; the
-    tests end by calling `check` on the entry point (`Solution().method`)."""
+    """Both splits. The generated tests are one assertion per line; those expecting None (the reference's reply to an
+    invalid input, in 68 train problems) are dropped, and a problem keeps at least LEETCODE_MIN_ASSERTS assertions or
+    is dropped. The dataset's import and helper preamble is the prelude; the tests end by calling `check` on the entry
+    point (`Solution().method`)."""
     out = []
-    for r in _load("newfacade/LeetCodeDataset", None, "test"):
-        if "== None" in r["test"]:
-            continue
-        problem = (f"{r['problem_description'].strip()}\n\nUse this starter code:\n```python\n"
-                   f"{r['starter_code'].rstrip()}\n```")
-        gold = {"harness": "assert", "tests": f"{r['test'].rstrip()}\n\ncheck({r['entry_point']})\n",
-                "reference": r["completion"], "entry_point": r["entry_point"], "signature": None,
-                "prelude": r["prompt"]}
-        out.append(_code("leetcode", r["task_id"], problem, gold))
+    for split in ("train", "test"):
+        for r in _load("newfacade/LeetCodeDataset", None, split):
+            head, *body = r["test"].rstrip().splitlines()
+            asserts = [line for line in body if line.strip()]
+            kept = [line for line in asserts if "== None" not in line]
+            if (head.strip() != "def check(candidate):" or not all(a.startswith("    assert ") for a in asserts)
+                    or len(kept) < LEETCODE_MIN_ASSERTS):
+                continue
+            problem = (f"{r['problem_description'].strip()}\n\nUse this starter code:\n```python\n"
+                       f"{r['starter_code'].rstrip()}\n```")
+            tests = "\n".join([head, *kept]) + f"\n\n\ncheck({r['entry_point']})\n"
+            gold = {"harness": "assert", "tests": tests, "reference": r["completion"], "entry_point": r["entry_point"],
+                    "signature": None, "prelude": r["prompt"]}
+            out.append(_code("leetcode", r["task_id"], problem, gold))
     return out
 
 
