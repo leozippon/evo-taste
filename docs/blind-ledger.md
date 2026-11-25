@@ -1,6 +1,6 @@
 # Blind ledger
 
-Appended by `evotaste.evaluate` before any generation on a blind vault. Commit it together with the results.
+Appended by `evotaste.evaluate` before any generation on a blind vault. Commit it together with the results. Outputs on vault items outside an opening are recorded in [blind-exposures.md](blind-exposures.md).
 
 | time | vault | revision | manifest sha256 | adapters | per family x samples | tasks |
 |---|---|---|---|---|---|---|
