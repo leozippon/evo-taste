@@ -1,39 +1,64 @@
-"""External benchmarks behind the task interface: GSM8K, MATH-500 and MMLU-Pro.
+"""Round 2 dataset items behind the task interface: parts, de-duplication, filters and guarded access.
 
-Each item belongs to exactly one part (foundation, blind1, blind2), decided by a seeded hash of its normalised question
-text, so identical questions under different ids (MMLU-Pro has 357 such texts) share a part, in every source. Which
-parts exist per source is fixed here, which suite uses which source is fixed in configs/suites.yaml. Blind parts are
-returned only with a receipt from the blind guard, and only the requested part is ever turned into tasks.
+Every item of every source belongs to exactly one part: `train`, `selection` or the vault `blind2`.
+
+1. Provisional part. Round 1's assignment is frozen for its three datasets (GSM8K train -> train; GSM8K test and
+   MATH-500 blind1 -> selection, blind2 -> blind2; MMLU-Pro foundation -> train, blind1 -> selection, blind2 ->
+   blind2), computed by Round 1's own function. Other held-out items of training sources (official test splits) are
+   halved between selection and blind2 by a seeded hash of their text; training sources without a test split give 5%
+   to each. An unseen unit goes whole to the part its seeded draw gave it (configs/suites-r2.yaml).
+2. De-duplication over all sources: exact copies (normalised problem text) and near copies (Jaccard similarity of word
+   shingles of the question stem, options excluded). Near copies count only between different sources or different
+   parts; within one source and part, items sharing a context (ProofWriter theories, FOLIO premises) are distinct
+   items. Of two copies the one in the higher part survives (blind2 over selection over train), within a part the one
+   of the smaller source. Omni-MATH items with a copy in DeepScaleR are removed whatever their parts.
+3. Filters: no gold, free-text gold (an open gold with \\text or \\mbox, a bare word, or longer than 40 characters),
+   a prompt over 3,500 tokens, and a gold its own verifier rejects (`gold_ok`). Gold verdicts of train and selection items come
+   from the suites file, where the generator recorded them; blind items are checked when the vault is opened.
+
+The suites file pins a SHA-256 of every part's uid list; loading recomputes the parts and refuses a mismatch. Only
+the requested part is ever turned into tasks, and blind items only with the guard's receipt. Blind item lists are
+never written anywhere.
 """
 
 from __future__ import annotations
 
+import collections
 import functools
 import hashlib
-import os
+import random
 import re
+import zlib
+from pathlib import Path
 
-from evotaste.tasks import BlindReceipt, Task, check_receipt
+import numpy as np
+import yaml
+
+from evotaste import sources
+from evotaste.tasks import BlindReceipt, Task, check_receipt, make_task, stable_seed
+
+PARTS = ("train", "selection", "blind2")
+VAULT = "blind2"
+PART_RANK = {"blind2": 0, "selection": 1, "train": 2}  # lower survives a duplicate
+SUITES = Path("configs/suites-r2.yaml")
+SPLIT_SEED_R2 = 20261125
+HELD_OUT_SHARE = 20  # training sources without a test split: 1/20 to selection, 1/20 to blind2
+MAX_GOLD_CHARS = 40
+MAX_PROMPT_TOKENS = 3500
+SHINGLE_TOKENS = 5
+# Pairs between 0.5 and 0.7 are mostly reformatted copies and rewrites with changed numbers; 24 bands of 3 rows find
+# a pair at 0.5 with probability 0.96 and at 0.6 with 0.995.
+NEAR_JACCARD = 0.5
+MINHASH_PERMS, MINHASH_BANDS = 72, 24
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Round 1's part assignment, frozen (identical to evotaste/external.py at the tag round-1).
 
 SPLIT_SEED = 20261122
-PARTS = {
-    "gsm8k_train": ("foundation",),
-    "gsm8k_test": ("blind1", "blind2"),
-    "math500": ("blind1", "blind2"),
-    "mmlu_pro": ("foundation", "blind1", "blind2"),
-}
-_HF = {  # source -> (dataset id, config, split)
-    "gsm8k_train": ("openai/gsm8k", "main", "train"),
-    "gsm8k_test": ("openai/gsm8k", "main", "test"),
-    "math500": ("HuggingFaceH4/MATH-500", None, "test"),
-    "mmlu_pro": ("TIGER-Lab/MMLU-Pro", None, "test"),
-}
-LETTERS = "ABCDEFGHIJ"
-
-
-# MMLU-Pro questions that repeat a MATH-500 problem (normalised text); they stay in MATH-500 only, because MATH-500
-# has no foundation part to share. GSM8K train, GSM8K test and MATH-500 share no question text with each other.
-MMLU_PRO_DROPPED = {"7744", "8289", "8591", "8823", "8830"}
+ROUND1_PARTS = {"gsm8k_train": ("foundation",), "gsm8k_test": ("blind1", "blind2"), "math500": ("blind1", "blind2"),
+                "mmlu_pro": ("foundation", "blind1", "blind2")}
+ROUND1_TO_ROUND2 = {"foundation": "train", "blind1": "selection", "blind2": "blind2"}
 
 
 def _hash(key: str) -> int:
@@ -44,104 +69,320 @@ def normalized(text: str) -> str:
     return re.sub(r"\s+", " ", text.strip().lower())
 
 
-def part_of(source: str, question: str) -> str:
-    """Part of an item, a function of its question text only: the same text gets the same vault in every source,
-    and in MMLU-Pro a third of the texts go to the foundation part instead."""
+def round1_part(source: str, question: str) -> str:
+    """Round 1's part of an item of gsm8k_train, gsm8k_test, math500 or mmlu_pro (a function of its text only)."""
     h = _hash(normalized(question))
     vault = ("blind1", "blind2")[h % 2]
-    if PARTS[source] == ("foundation",):
+    if ROUND1_PARTS[source] == ("foundation",):
         return "foundation"
-    if "foundation" in PARTS[source] and (h // 2) % 3 == 0:
+    if "foundation" in ROUND1_PARTS[source] and (h // 2) % 3 == 0:
         return "foundation"
     return vault
 
 
-def _rows(source: str):
-    """(item id, row) pairs of a source, read from the local Hugging Face cache."""
-    os.environ.setdefault("HF_DATASETS_OFFLINE", "1")
-    from datasets import load_dataset
-
-    name, config, split = _HF[source]
-    ds = load_dataset(name, config, split=split)
-    if source.startswith("gsm8k"):
-        return [(str(i), r) for i, r in enumerate(ds)]
-    if source == "math500":
-        return [(r["unique_id"], r) for r in ds]
-    return [(str(r["question_id"]), r) for r in ds if str(r["question_id"]) not in MMLU_PRO_DROPPED]
+# ---------------------------------------------------------------------------------------------------------------
+# Provisional parts
 
 
-def question_text(r: dict) -> str:
-    return r["problem"] if "problem" in r else r["question"]
+def _hash2(key: str) -> int:
+    return int.from_bytes(hashlib.sha256(f"{SPLIT_SEED_R2}/{key}".encode()).digest()[:8], "big")
 
 
-def _task(source: str, item_id: str, r: dict) -> Task:
-    uid = f"{source}/{item_id}"
-    if source.startswith("gsm8k"):
-        gold = r["answer"].split("####")[-1].strip().replace(",", "")
-        return Task(uid, source, r["question"], gold)
-    if source == "math500":
-        gold = r["answer"]
-        return Task(uid, source, r["problem"], gold)
-    options = "\n".join(f"{LETTERS[i]}. {o}" for i, o in enumerate(r["options"]))
-    question = f"{r['question']}\n\nOptions:\n{options}\n\nAnswer with the letter of the correct option."
-    gold = r["answer"]
-    return Task(uid, source, question, gold)
+@functools.lru_cache(maxsize=1)
+def _math500() -> frozenset[str]:
+    return frozenset(normalized(p) for p in sources.math500_problems())
 
 
-@functools.lru_cache(maxsize=None)
-def _part_tasks(source: str, part: str) -> tuple[Task, ...]:
-    rows = [(i, r) for i, r in _rows(source) if part_of(source, question_text(r)) == part]
-    rows.sort(key=lambda x: _hash(f"{source}/{x[0]}"))
-    return tuple(_task(source, i, r) for i, r in rows)
+def provisional_part(item: sources.Item, units: dict[str, str], copied: bool = False) -> str:
+    """The part an item gets before de-duplication; `copied`: the item has a copy in another source, which keeps an
+    item of a source without a test split in training (its held-out shares are drawn from its own problems only, so
+    that DeepScaleR's copies of MATH-train problems do not pull those out of training)."""
+    source = sources.SOURCES[item.source]
+    if source.role == "unseen":
+        return units[source.unit]
+    if item.source in ("gsm8k_train", "gsm8k_test", "mmlu_pro"):
+        return ROUND1_TO_ROUND2[round1_part(item.source, item.group)]
+    if item.source == "math_test" and normalized(item.group) in _math500():
+        return ROUND1_TO_ROUND2[round1_part("math500", item.group)]
+    h = _hash2(normalized(item.group))
+    if item.held_out:
+        return ("selection", "blind2")[h % 2]
+    if not source.test_split and not copied:
+        return {0: "selection", 1: "blind2"}.get(h % HELD_OUT_SHARE, "train")
+    return "train"
 
 
-def items(source: str, part: str, receipt: BlindReceipt | None = None) -> list[Task]:
-    """Tasks of one part of a source, in a fixed seeded order. Vault parts need the blind guard's receipt."""
-    if part not in PARTS[source]:
-        raise ValueError(f"{source} has no part {part!r} (parts: {PARTS[source]})")
-    if part != "foundation":
-        check_receipt(receipt, part)
-    return list(_part_tasks(source, part))
+def draw_units(unit_domains: dict[str, str], seed: int = SPLIT_SEED_R2) -> dict[str, str]:
+    """Unseen unit -> selection or blind2: within each domain a seeded shuffle, then alternating parts from a seeded
+    start, so that the two halves of a domain differ by at most one unit."""
+    out = {}
+    for domain in sorted(set(unit_domains.values())):
+        units = sorted(u for u, d in unit_domains.items() if d == domain)
+        rng = random.Random(stable_seed(seed, "units", domain))
+        rng.shuffle(units)
+        first = rng.randrange(2)
+        for k, u in enumerate(units):
+            out[u] = ("selection", "blind2")[(k + first) % 2]
+    return out
 
 
 # ---------------------------------------------------------------------------------------------------------------
-# Scorers (binary). They receive the extracted <answer> content.
+# De-duplication
 
-_NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
-
-
-def score_number(answer: str, gold: str) -> float:
-    """GSM8K: the answer must contain exactly one number (commas and $ ignored) equal to the gold number."""
-    numbers = _NUMBER.findall(answer.replace(",", "").replace("$", ""))
-    return float(len(numbers) == 1 and abs(float(numbers[0]) - float(gold)) < 1e-6)
+_LATEX_NOISE = re.compile(r"\\(?:left|right|displaystyle|[!,;:])|\$")
+_TOKEN = re.compile(r"\w+|[^\w\s]")
 
 
-def _math(s: str):
-    from math_verify import ExprExtractionConfig, LatexExtractionConfig, parse
-
-    s = s.replace("\\$", "").strip()  # MATH answers escape currency signs
-    if "$" not in s and "\\boxed" not in s:
-        s = f"${s}$"
-    return parse(s, extraction_config=[LatexExtractionConfig(), ExprExtractionConfig()])
-
-
-def score_math(answer: str, gold: str) -> float:
-    """MATH-500: mathematical equivalence of the parsed expressions (math-verify)."""
-    from math_verify import verify
-
-    target = _math(gold)
-    if not target:
-        raise ValueError(f"gold answer does not parse: {gold!r}")
-    return float(verify(target, _math(answer)))
+def shingles(text: str) -> np.ndarray:
+    """Sorted unique 32-bit hashes of the word 5-grams of a text (lower case, LaTeX spacing commands removed)."""
+    t = _LATEX_NOISE.sub(" ", text.lower().replace("\\dfrac", "\\frac").replace("\\tfrac", "\\frac"))
+    tokens = _TOKEN.findall(t)
+    n = SHINGLE_TOKENS
+    grams = [" ".join(tokens[i:i + n]) for i in range(max(1, len(tokens) - n + 1))] if tokens else []
+    return np.unique(np.fromiter((zlib.crc32(g.encode()) for g in grams), dtype=np.uint64, count=len(grams)))
 
 
-_LETTER = re.compile(r"^\(?([A-J])\)?(?:[\s.:)]|$)")
+def jaccard(a: np.ndarray, b: np.ndarray) -> float:
+    if not len(a) or not len(b):
+        return 0.0
+    inter = len(np.intersect1d(a, b, assume_unique=True))
+    return inter / (len(a) + len(b) - inter)
 
 
-def score_letter(answer: str, gold: str) -> float:
-    """MMLU-Pro: the answer starts with the gold option letter (optionally in parentheses)."""
-    m = _LETTER.match(answer.strip())
-    return float(m is not None and m.group(1) == gold)
+def _minhash_params():
+    rng = np.random.default_rng(SPLIT_SEED_R2)
+    return (rng.integers(1, 2**31 - 1, MINHASH_PERMS, dtype=np.uint64),
+            rng.integers(0, 2**31 - 1, MINHASH_PERMS, dtype=np.uint64))
 
 
-SCORERS = {"gsm8k_train": score_number, "gsm8k_test": score_number, "math500": score_math, "mmlu_pro": score_letter}
+def near_pairs(stems: list[np.ndarray], keys: list[tuple], threshold: float = NEAR_JACCARD) -> set[tuple[int, int]]:
+    """Index pairs (i < j) whose shingle sets have Jaccard similarity >= threshold, among pairs with different keys
+    (MinHash LSH for candidates, exact Jaccard to confirm)."""
+    a, b = _minhash_params()
+    prime = np.uint64((1 << 61) - 1)
+    rows = MINHASH_PERMS // MINHASH_BANDS
+    buckets: dict[tuple, list[int]] = collections.defaultdict(list)
+    for i, s in enumerate(stems):
+        if not len(s):
+            continue
+        sig = ((s[:, None] * a[None, :] + b[None, :]) % prime).min(axis=0)
+        for band in range(MINHASH_BANDS):
+            buckets[(band, sig[band * rows:(band + 1) * rows].tobytes())].append(i)
+    pairs: set[tuple[int, int]] = set()
+    checked: set[tuple[int, int]] = set()
+    for members in buckets.values():
+        if len(members) < 2:
+            continue
+        by_key = collections.defaultdict(list)
+        for i in members:
+            by_key[keys[i]].append(i)
+        if len(by_key) < 2:
+            continue
+        groups = list(by_key.values())
+        for x in range(len(groups)):
+            for y in range(x + 1, len(groups)):
+                for i in groups[x]:
+                    for j in groups[y]:
+                        p = (i, j) if i < j else (j, i)
+                        if p in checked:
+                            continue
+                        checked.add(p)
+                        if jaccard(stems[i], stems[j]) >= threshold:
+                            pairs.add(p)
+    return pairs
+
+
+def copies(items: list[sources.Item]) -> tuple[list[list[int]], set[tuple[int, int]]]:
+    """(groups of exact copies: same normalised problem; near pairs: stem Jaccard >= NEAR_JACCARD). Near pairs are
+    looked for between sources, and within a training source (whose items fall into different parts); within an
+    unseen source, which is one unit in one part, only exact copies count."""
+    exact = collections.defaultdict(list)
+    for k, it in enumerate(items):
+        exact[normalized(it.problem)].append(k)
+    keys = [it.source if sources.SOURCES[it.source].role == "unseen" else it.uid for it in items]
+    return [ks for ks in exact.values() if len(ks) > 1], near_pairs([shingles(it.stem) for it in items], keys)
+
+
+def copied_elsewhere(items: list[sources.Item], groups: list[list[int]], near: set[tuple[int, int]]) -> set[int]:
+    """Items with a copy in another source."""
+    out = {k for g in groups if len({items[k].source for k in g}) > 1 for k in g}
+    out.update(k for i, j in near if items[i].source != items[j].source for k in (i, j))
+    return out
+
+
+def deduplicate(items: list[sources.Item], parts: list[str], groups: list[list[int]],
+                near: set[tuple[int, int]]) -> tuple[list[str | None], collections.Counter]:
+    """For every item the reason it is removed (None: kept), and removal counts by (source, part, reason).
+
+    An item is removed when it is a copy of a better-ranked item: rank is (part, size of the source, table order,
+    position), parts ranked blind2, selection, train, so that within a part the smaller source keeps its copy (about
+    600 TheoremQA problems recur in MMLU-Pro, 7,300 MATH-train problems in DeepScaleR). Every exact copy counts; a near
+    copy counts between different sources or different parts (within one source and part, items sharing a context,
+    such as questions on one ProofWriter theory, are distinct items). Omni-MATH items with a copy in DeepScaleR are
+    removed whatever their parts: omni_rest is Omni-MATH minus DeepScaleR."""
+    order = {s: k for k, s in enumerate(sources.SOURCES)}
+    size = collections.Counter(it.source for it in items)
+    rank = [(PART_RANK[p], size[it.source], order[it.source], k) for k, (it, p) in enumerate(zip(items, parts))]
+    pairs = [(i, j) for g in groups for x, i in enumerate(g) for j in g[x + 1:]]
+    pairs += [(i, j) for i, j in near if items[i].source != items[j].source or parts[i] != parts[j]]
+    removed: list[str | None] = [None] * len(items)
+    for i, j in pairs:
+        si, sj = items[i].source, items[j].source
+        if {si, sj} == {"omni_rest", "deepscaler"}:
+            loser, why = (i if si == "omni_rest" else j), "in DeepScaleR"
+        else:
+            loser = i if rank[i] > rank[j] else j
+            winner = j if loser == i else i
+            why = "copy in the same part" if parts[i] == parts[j] else f"copy in {parts[winner]}"
+        if removed[loser] is None:
+            removed[loser] = why
+    counts = collections.Counter((it.source, p, why) for it, p, why in zip(items, parts, removed) if why)
+    return removed, counts
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Filters
+
+
+_ENVIRONMENT = re.compile(r"\\(?:begin|end)\{[A-Za-z*]+\}")
+_WORD = re.compile(r"(?<![\\A-Za-z])[A-Za-z]{3,}")
+MATH_WORDS = {"sin", "cos", "tan", "cot", "sec", "csc", "log", "exp", "sqrt", "arcsin", "arccos", "arctan", "sinh",
+              "cosh", "tanh", "max", "min", "gcd", "lcm", "mod", "det", "deg", "inf", "lim"}
+
+
+def free_text(item: sources.Item) -> bool:
+    """An open reference that is text rather than mathematics: \\text or \\mbox, more than MAX_GOLD_CHARS characters,
+    or a bare word of three or more letters (`9 and -7`, `all`, `Saturday`), which math-verify would read as a product
+    of symbols, so that any anagram would match it."""
+    if item.kind != "open":
+        return False
+    gold = item.gold
+    if "\\text" in gold or "\\mbox" in gold or len(gold) > MAX_GOLD_CHARS:
+        return True
+    return any(w.lower() not in MATH_WORDS for w in _WORD.findall(_ENVIRONMENT.sub(" ", gold)))
+
+
+@functools.lru_cache(maxsize=2)
+def _tokenizer(name: str):
+    from transformers import AutoTokenizer
+
+    return AutoTokenizer.from_pretrained(name)
+
+
+def prompt_tokens(tasks: list[Task], tokenizer_name: str) -> list[int]:
+    """Prompt length of each task under the system prompt and chat template: the question's tokens plus the template's
+    (tokenised separately, so at most a token or two off at the seam)."""
+    from evotaste.tasks import prompt_ids
+
+    tok = _tokenizer(tokenizer_name)
+    overhead = len(prompt_ids(tok, ""))
+    lengths = tok([t.question for t in tasks], add_special_tokens=False).input_ids if tasks else []
+    return [len(ids) + overhead for ids in lengths]
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Building the parts
+
+
+def uid_hash(uids) -> str:
+    return hashlib.sha256("\n".join(sorted(uids)).encode()).hexdigest()
+
+
+def candidates() -> list[sources.Item]:
+    """Every source's items with a gold reference, in table order."""
+    return [it for s in sources.SOURCES.values() for it in s.load()]
+
+
+def build(units: dict[str, str], tokenizer_name: str):
+    """(items, parts, reasons, dedup counts): every candidate item, its part, and why it is excluded (None if it is
+    kept, gold_ok aside); reasons are "no gold", a de-duplication reason, "free-text gold" or "prompt too long"."""
+    items = candidates()
+    groups, near = copies(items)
+    copied = copied_elsewhere(items, groups, near)
+    parts = [provisional_part(it, units, k in copied) for k, it in enumerate(items)]
+    removed, counts = deduplicate(items, parts, groups, near)
+    reasons: list[str | None] = [("no gold" if it.gold is None else why) for it, why in zip(items, removed)]
+    for k, it in enumerate(items):
+        if reasons[k] is None and free_text(it):
+            reasons[k] = "free-text gold"
+    alive = [k for k, r in enumerate(reasons) if r is None]
+    lengths = prompt_tokens([make_task(items[k]) for k in alive], tokenizer_name)
+    for k, n in zip(alive, lengths):
+        if n > MAX_PROMPT_TOKENS:
+            reasons[k] = "prompt too long"
+    return items, parts, reasons, counts
+
+
+class SuitesFile:
+    """What loading needs from configs/suites-r2.yaml: the unit draw, the tokenizer, the gold verdicts of train and
+    selection items, and the uid hash of every part."""
+
+    def __init__(self, path: str | Path):
+        data = yaml.safe_load(Path(path).read_text())
+        self.path = Path(path)
+        self.units: dict[str, str] = {u: v["part"] for u, v in data["units"].items()}
+        self.tokenizer: str = data["generated"]["rules"]["tokenizer"]
+        self.gold_failed: set[str] = {f"{s}/{i}" for s, ids in (data.get("gold_failed") or {}).items() for i in ids}
+        self.hashes: dict[tuple[str, str], str] = {(s, p): v["sha256"] for s, ps in data["parts"].items()
+                                                   for p, v in ps.items()}
+
+
+@functools.lru_cache(maxsize=2)
+def _open_parts(path: str) -> dict[tuple[str, str], tuple[sources.Item, ...]]:
+    """Train and selection items by (source, part), after every filter, each list in a fixed seeded order and checked
+    against the suites file's hashes. Blind items are not kept."""
+    f = SuitesFile(path)
+    items, parts, reasons, _ = build(f.units, f.tokenizer)
+    out = collections.defaultdict(list)
+    for it, part, why in zip(items, parts, reasons):
+        if why is None and part != VAULT and it.uid not in f.gold_failed:
+            out[(it.source, part)].append(it)
+    keys = {k for k in f.hashes if k[1] != VAULT} | set(out)
+    for source, part in sorted(keys):
+        if uid_hash(it.uid for it in out.get((source, part), ())) != f.hashes.get((source, part)):
+            raise RuntimeError(f"{source}/{part}: the items differ from those {path} was generated for (code, data "
+                               "or verifier changed); regenerate it with scripts/make_suites_r2.py")
+    return {key: tuple(sorted(v, key=lambda it: _hash2(it.uid))) for key, v in out.items()}
+
+
+@functools.lru_cache(maxsize=None)
+def _open_tasks(path: str, source: str, part: str) -> tuple[Task, ...]:
+    return tuple(make_task(it) for it in _open_parts(path).get((source, part), ()))
+
+
+@functools.lru_cache(maxsize=1)
+def _vault_candidates(path: str) -> dict[str, list[sources.Item]]:
+    """The vault's items by source before the gold check; reached only after the receipt check in `items`."""
+    f = SuitesFile(path)
+    items, parts, reasons, _ = build(f.units, f.tokenizer)
+    out = collections.defaultdict(list)
+    for it, part, why in zip(items, parts, reasons):
+        if why is None and part == VAULT:
+            out[it.source].append(it)
+    return dict(out)
+
+
+def _blind_part(path: str, source: str) -> tuple[sources.Item, ...]:
+    """Blind items of one source, gold-checked now (their verdicts are never stored) and checked against the hash."""
+    from evotaste.tasks import gold_ok_many
+
+    f = SuitesFile(path)
+    vault = _vault_candidates(path).get(source, [])
+    ok = gold_ok_many([make_task(it) for it in vault])
+    vault = [it for it, good in zip(vault, ok) if good]
+    if uid_hash(it.uid for it in vault) != f.hashes.get((source, VAULT), uid_hash([])):
+        raise RuntimeError(f"{source}/{VAULT}: the vault's items differ from those {path} was generated for")
+    return tuple(sorted(vault, key=lambda it: _hash2(it.uid)))
+
+
+def items(source: str, part: str, receipt: BlindReceipt | None = None, suites: str | Path = SUITES) -> list[Task]:
+    """Tasks of one part of a source (default wrapper, no stratum), in a fixed seeded order. The vault needs the
+    blind guard's receipt."""
+    if part not in PARTS:
+        raise ValueError(f"unknown part {part!r} (parts: {PARTS})")
+    if source not in sources.SOURCES:
+        raise ValueError(f"unknown source {source!r}")
+    if part == VAULT:
+        check_receipt(receipt, VAULT)
+        return [make_task(it) for it in _blind_part(str(suites), source)]
+    return list(_open_tasks(str(suites), source, part))

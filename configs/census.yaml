@@ -1,0 +1,28 @@
+# Census of the base model on the Round 2 environment (docs/design/round-2.md, pilot A; evotaste/census.py).
+# Outputs, outside git: results/census/<name>/ (records per part and chunk, strata.tsv, summary.json).
+name: census-r2
+model: Qwen/Qwen3-1.7B
+suites: configs/suites-r2.yaml
+contexts: configs/contexts.yaml
+max_tokens: 4096
+chunk_items: 256          # jobs per chunk: the unit of resumption and sharding
+need_free_mib: 20000      # refuse to start on a GPU with less free memory
+server:                   # vLLM footprint on a shared card: about the KV budget plus 7 GiB
+  kv_cache: 12G
+  gpu_memory_utilization: 0.42
+  max_num_seqs: 512
+  max_num_batched_tokens: 8192
+  max_loras: 1
+parts:
+  train:                  # difficulty strata: frontier 0, sweet 1-6, mastered 7-8 of 8
+    samples: 8
+    cap: 8000             # items per training source, the first of its train part's seeded order
+    uncapped: [math_train, kodcode]
+  selection:
+    samples: 4
+    per_family: 25        # instances of each procedural selection family (the format probe)
+  channels:               # sweet-spot open items, under each forced answer channel (direct, program)
+    samples: 4
+    items: 1500
+  contexts:               # the probe set's plain items, under each context of the contexts file
+    samples: 2
