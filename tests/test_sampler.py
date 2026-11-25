@@ -1,4 +1,7 @@
-"""Transport faults: a transient one is retried within a bound; HTTP errors and timeouts are never retried."""
+"""Requests carry their sampling seed; a transient transport fault is retried within a bound; HTTP errors and
+timeouts are never retried."""
+
+import json
 
 import httpx
 import pytest
@@ -12,11 +15,12 @@ OK = {"choices": [{"index": 0, "text": "<answer>1</answer>", "token_ids": [5, 6]
 
 def serve(monkeypatch, outcomes):
     """A Sampler whose requests meet `outcomes` in turn (an exception class, a status code, or 200 = success)."""
-    calls = []
+    calls, bodies = [], []
 
     def handler(request):
         outcome = outcomes[min(len(calls), len(outcomes) - 1)]
         calls.append(outcome)
+        bodies.append(json.loads(request.content))
         if isinstance(outcome, type):
             raise outcome("injected", request=request)
         return httpx.Response(outcome, json=OK if outcome == 200 else {"error": "bad request"})
@@ -26,17 +30,21 @@ def serve(monkeypatch, outcomes):
     monkeypatch.setattr(sampler, "RETRY_DELAY_S", 0.0)
     s = Sampler.__new__(Sampler)  # skips the server handshake
     s.url, s.base_model = "http://test", "m"
+    s.bodies = bodies
     return s, calls
 
 
 def generate(s):
-    return s.generate([Request("m", [1, 2, 3], 1, 8)])
+    return s.generate([Request("m", [1, 2, 3], 1, 8, seed=1234)])
 
 
 def test_transient_fault_is_retried(monkeypatch):
     s, calls = serve(monkeypatch, [httpx.ReadError, httpx.RemoteProtocolError, 200])
     [[sample]] = generate(s)
     assert sample.token_ids == [5, 6] and sample.logprob == -0.75 and len(calls) == 3
+    assert [b["seed"] for b in s.bodies] == [1234] * 3  # a resent request keeps its seed
+    assert {k: s.bodies[0][k] for k in ("temperature", "top_p", "n", "max_tokens")} == {
+        "temperature": 1.0, "top_p": 1.0, "n": 1, "max_tokens": 8}
 
 
 def test_retry_bound_fails_loudly(monkeypatch):

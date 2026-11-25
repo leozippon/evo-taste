@@ -35,10 +35,11 @@ def check(planted_fn, tmp_path):
     noise = [torch.tensor([rng.gauss(0, 0.006) for _ in range(LENGTH)]) for _ in range(n)]
     planted = [noise[i] + planted_fn(i) for i in range(n)]
     cfg = config.parse({"name": "t", "model": "m", "seed": 0, "amplification": {"rollouts": K},
-                        "members": [{"id": "m0", "arm": "plain", "seed": 1}]}, set())
+                        "seeding": {"method": "none"}, "strata": {"path": "strata.tsv", "sha256": "0" * 64},
+                        "members": [{"id": "m0", "seed": 1}]}, set())
     run = SimpleNamespace(dir=tmp_path, cfg=cfg, policy=StubPolicy(sampler, planted))
-    member = Member(run, Lineage("m0", "m0", 0, "plain", None, 1, status="active"))
-    return member.consistency_check(seqs, sampler)
+    member = Member(run, Lineage("m0", "m0", 0, None, 1, status="active"))
+    return member.consistency_check(seqs, sampler, K)
 
 
 def one_token(i, nats=3.0):

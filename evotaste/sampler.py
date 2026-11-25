@@ -99,6 +99,7 @@ class Request:
     prompt: list[int]
     n: int
     max_tokens: int
+    seed: int  # sampling seed; vLLM gives the k-th of the n samples seed + k and draws by (seed, position)
 
 
 @dataclass
@@ -114,7 +115,8 @@ class Sample:
 
 
 class Sampler:
-    """Client of one server: generation at temperature 1 and adapter versions under a private /dev/shm directory."""
+    """Client of one server: seeded generation at temperature 1, and adapter versions under a private /dev/shm
+    directory."""
 
     def __init__(self, url: str, base_model: str, run_name: str):
         self.url, self.base_model = url, base_model
@@ -192,7 +194,7 @@ class Sampler:
             return await asyncio.gather(*(self._one(client, slots, r) for r in requests))
 
     async def _one(self, client, slots, req: Request) -> list[Sample]:
-        body = {"model": req.model, "prompt": req.prompt, "n": req.n, "max_tokens": req.max_tokens,
+        body = {"model": req.model, "prompt": req.prompt, "n": req.n, "max_tokens": req.max_tokens, "seed": req.seed,
                 "temperature": 1.0, "top_p": 1.0, "logprobs": 0, "return_token_ids": True}
         async with slots:
             for attempt in range(RETRIES + 1):

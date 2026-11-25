@@ -11,14 +11,15 @@ from evotaste.evaluate import expand_adapters, population_at, step_harvest
 from evotaste.records import write_json
 from evotaste.trainer import adapter_sha256
 
-MEMBERS = [{"id": "a", "arm": "plain", "seed": 1}, {"id": "b", "arm": "plain", "seed": 2},
-           {"id": "c", "arm": "plain", "seed": 3}, {"id": "bl", "arm": "plain", "seed": 9, "role": "baseline"}]
+MEMBERS = [{"id": "a", "seed": 1}, {"id": "b", "seed": 2}, {"id": "c", "seed": 3},
+           {"id": "bl", "seed": 9, "role": "baseline"}]
+UNSEEDED = {"seeding": {"method": "none"}, "strata": {"path": "strata.tsv", "sha256": "0" * 64}}
 
 
 def lineage(run_dir, lid, slot, status="active", step=30, replaced_by=None, checkpoints=(15, 30)):
     d = run_dir / "members" / lid
-    write_json(d / "state.json", {"id": lid, "slot": slot, "generation": int("~" in lid), "arm": "plain",
-                                  "scaffold": None, "seed": 1, "status": status, "step": step, "probes": [],
+    write_json(d / "state.json", {"id": lid, "slot": slot, "generation": int("~" in lid), "context": None,
+                                  "seed": 1, "parent": None, "status": status, "step": step, "probes": [],
                                   "cull_reason": "test" if status == "culled" else None, "replaced_by": replaced_by})
     for s in checkpoints:
         c = d / "checkpoints" / f"step_{s:06d}"
@@ -29,7 +30,7 @@ def lineage(run_dir, lid, slot, status="active", step=30, replaced_by=None, chec
 
 @pytest.fixture
 def run(tmp_path):
-    cfg = config.parse({"name": "r", "model": "m", "seed": 0, "members": MEMBERS}, set())
+    cfg = config.parse({"name": "r", "model": "m", "seed": 0, "members": MEMBERS, **UNSEEDED}, set())
     lineage(tmp_path, "a", "a", status="done")
     lineage(tmp_path, "b", "b")
     lineage(tmp_path, "c", "c", status="culled", step=30, replaced_by="c~1")  # culled after step 15
@@ -88,7 +89,7 @@ def test_exhausted_slot_is_recorded(run):
 
 
 def test_analysis_reads_step_labels():
-    specs = {m["id"]: {"arm": m["arm"], "scaffold": None, "role": m.get("role", "member")} for m in MEMBERS}
+    specs = {m["id"]: {"arm": "plain", "scaffold": None, "role": m.get("role", "member")} for m in MEMBERS}
     roles = adapter_roles(["base", "a@15", "b@15", "c~1@15", "bl@15", "bl@60"], specs)
     assert {a: r["role"] for a, r in roles.items()} == {"base": "base", "a@15": "member", "b@15": "member",
                                                        "c~1@15": "member", "bl@15": "baseline", "bl@60": "baseline"}
@@ -104,9 +105,8 @@ def test_baseline_only_harvest_and_guard(tmp_path, monkeypatch):
     from evotaste import evaluate
     from evotaste.analysis import harvest as analysis_harvest
 
-    cfg = config.parse({"name": "rep", "model": "m", "seed": 0, "members": [
-        {"id": "lb", "arm": "plain", "seed": 1, "role": "baseline"},
-        {"id": "lc", "arm": "plain", "seed": 2, "role": "baseline"}]}, set())
+    cfg = config.parse({"name": "rep", "model": "m", "seed": 0, **UNSEEDED, "members": [
+        {"id": "lb", "seed": 1, "role": "baseline"}, {"id": "lc", "seed": 2, "role": "baseline"}]}, set())
     run_dir = tmp_path / "runs" / "rep"
     lineage(run_dir, "lb", "lb", step=240, checkpoints=(120, 240))
     lineage(run_dir, "lc", "lc", step=240, checkpoints=(120, 240))

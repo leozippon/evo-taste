@@ -1,36 +1,39 @@
-"""Final evaluation of adapters (or the base model) on a suite, the harvest manifest, and the blind guard.
+"""Final evaluation of adapters (or the base model) on a suite, the harvest manifest, the blind guard, and the
+context score.
 
   python -m evotaste.evaluate run runs/<name> --suite selection --adapters base,m00,m01 --per-family 50 [--per-source 500]
   python -m evotaste.evaluate harvest runs/<name> --tag n50x1
+  python -m evotaste.evaluate context-score runs/<name> [--members m00,m01]
 
-Suites: train (fresh train-family instances), selection (selection families + foundation items), blind1, blind2.
-Adapters: `base`, a lineage id (its last checkpoint) or `<lineage>@<step>`. `--shard i/n` splits the
-(adapter, instance) jobs across GPUs; every shard writes its own record file and the summary covers all files of
-the tag. A blind vault is opened only through `blind_guard`, which needs a committed, unmodified harvest manifest
+Suites: the task layer's evaluation sets, selection and the vault blind2 (dataset items and procedural instances).
+Adapters: `base`, a lineage id (its last checkpoint), `<lineage>@<step>` or `population@<step>`. `--shard i/n`
+splits the (adapter, item) jobs across GPUs; every shard writes its own record file and the summary covers all files
+of the tag. A blind vault is opened only through `blind_guard`, which needs a committed, unmodified harvest manifest
 listing every adapter with its content hash (base-model calibration is exempt) and appends to the blind ledger
-before anything is generated.
+before anything is generated. The context score needs no vLLM: it runs the frozen base model on the visible GPU.
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
+import io
 import logging
 import subprocess
 from pathlib import Path
 
-from evotaste import external
 from evotaste.member import Run, load_lineage, response_records
-from evotaste.records import now, read_json, read_jsonl_gz, write_json, write_jsonl_gz
+from evotaste.records import atomic_write, now, read_json, read_jsonl_gz, write_json, write_jsonl_gz
 from evotaste.sampler import Request, Sampler
-from evotaste.tasks import BlindReceipt, blind_suite, check_gold, fixed_tasks, usable_items
-from evotaste.trainer import adapter_sha256
+from evotaste.tasks import VAULT, BlindReceipt, check_gold, fixed_tasks, stable_seed
+from evotaste.trainer import Policy, Sequence, adapter_sha256
 from evotaste.worker import (apply_server, logged, revision, server_options, server_overrides, setup_logging,
                              start_server)
 
 log = logging.getLogger("evotaste.evaluate")
-SUITES = ("train", "selection", "blind1", "blind2")
-VAULTS = ("blind1", "blind2")
+SUITES = ("selection", VAULT)  # the evaluation sets of the task layer; blind1 was spent in Round 1
+VAULTS = ("blind1", "blind2")  # names the guard and the ledger know (Round 1's ledger records blind1)
 LEDGER = Path("docs/blind-ledger.md")
 LEDGER_HEADER = ("# Blind ledger\n\nAppended by `evotaste.evaluate` before any generation on a blind vault. Commit it "
                  "together with the results.\n\n| time | vault | revision | manifest sha256 | adapters | per family "
@@ -100,18 +103,9 @@ def resolve_adapter(run: Run, spec: str) -> Path | None:
 
 
 def suite_tasks(run: Run, suite: str, per_family: int, receipt: BlindReceipt | None, per_source: int | None = None):
-    """Instances of a suite: `per_family` per procedural family, `per_source` (default `per_family`; at most the
-    whole part) per external source."""
-    per_source = per_family if per_source is None else per_source
-    if suite == "train":
-        return fixed_tasks(run.suites.train, "eval", per_family)
-    if suite == "selection":
-        return fixed_tasks(run.suites.selection, "eval", per_family) + [
-            t for s in run.suites.foundation
-            for t in usable_items(external.items(s, "foundation"), per_source, from_end=True)]
-    families, sources = blind_suite(run.cfg.suites, suite, receipt)
-    return fixed_tasks(families, "eval", per_family) + [
-        t for s in sources for t in usable_items(external.items(s, suite, receipt), per_source)]
+    """Items of a suite: `per_family` per procedural family, `per_source` (default `per_family`; at most what the part
+    holds besides the probe set) per dataset source. The vault needs the guard's receipt."""
+    return fixed_tasks(run.suites, suite, per_family if per_source is None else per_source, per_family, receipt)
 
 
 def eval_params(suite: str, per_family: int, samples: int, per_source: int | None) -> tuple[dict, str]:
@@ -137,7 +131,7 @@ def summarize(records: list[dict], tasks: list, samples: int) -> dict:
     files) and covers the requested grid exactly: every (family, instance, sample) once. Raises IncompleteEvaluation
     when records are only missing, ValueError for anything else."""
     expected = {(t.family, t.uid, i) for t in tasks for i in range(samples)}
-    external_sources = {t.family for t in tasks if t.entry is None}
+    external_sources = {t.family for t in tasks if t.kind != "procedural"}
     out, incomplete = {}, []
     for label in sorted({r["adapter"] for r in records}):
         rs = [r for r in records if r["adapter"] == label]
@@ -158,7 +152,8 @@ def summarize(records: list[dict], tasks: list, samples: int) -> dict:
         out[label] = {"adapter_sha256": rs[0]["adapter_sha256"], "n": len(rs),
                       "n_by_family": {f: len(v) for f, v in sorted(fams.items())},
                       "macro": sum(procedural) / len(procedural) if procedural else None,
-                      "by_family": acc, "parsed": sum(r["parsed"] for r in rs) / len(rs),
+                      "by_family": acc, "complied": sum(r["complied"] for r in rs) / len(rs),
+                      "correct_any": sum(r["correct_any"] for r in rs) / len(rs),
                       "truncated": sum(r["truncated"] for r in rs) / len(rs),
                       "completion_tokens": sum(r["completion_tokens"] for r in rs) / len(rs)}
     if incomplete:
@@ -201,8 +196,9 @@ def evaluate(run_dir: Path, suite: str, adapter_specs: list[str], per_family: in
         names = {label: run.cfg.model if path is None else sampler.load_existing(label, path)
                  for label, path in adapters.items()}
         hashes = {label: None if path is None else adapter_sha256(path) for label, path in adapters.items()}
-        results = sampler.generate([Request(names[label], run.prompt(t.question), samples,
-                                            run.cfg.probes.max_tokens) for label, t in jobs])
+        # the seed is a function of the adapter's content and the item: the same in every shard and under any label
+        results = sampler.generate([Request(names[label], run.prompt(t.question), samples, run.cfg.probes.max_tokens,
+                                            stable_seed("eval", hashes[label] or "base", t.uid)) for label, t in jobs])
     finally:
         if sampler:
             sampler.close()
@@ -289,7 +285,7 @@ def step_harvest(run: Run, summary: dict, step: int) -> tuple[list, list, list, 
                 if summary[label]["adapter_sha256"] != adapter_sha256(path):
                     problems.append(f"{label}: the evaluated adapter differs from {path}")
                     continue
-                baselines.append({"lineage": lin.id, "slot": spec.id, "arm": lin.arm, "scaffold": lin.scaffold,
+                baselines.append({"lineage": lin.id, "slot": spec.id, "context": lin.context,
                                   "step": int(at) if at else lin.step, "label": label,
                                   "selection_macro": summary[label]["macro"], "adapter": str(path),
                                   "sha256": summary[label]["adapter_sha256"]})
@@ -305,7 +301,7 @@ def step_harvest(run: Run, summary: dict, step: int) -> tuple[list, list, list, 
             problems.append(f"{spec.id}: the evaluated {s['label']} differs from {s['path']}")
         else:
             lin = s["lineage"]
-            ranking.append({"lineage": lin.id, "slot": spec.id, "arm": lin.arm, "scaffold": lin.scaffold,
+            ranking.append({"lineage": lin.id, "slot": spec.id, "context": lin.context,
                             "step": step, "label": s["label"], "selection_macro": summary[s["label"]]["macro"],
                             "adapter": str(s["path"]), "sha256": summary[s["label"]]["adapter_sha256"]})
     return ranking, baselines, culled, problems
@@ -353,7 +349,7 @@ def harvest(run_dir: Path, tag: str, step: int | None = None) -> None:
         adapter = resolve_adapter(run, lin.id)
         if s is None or s["adapter_sha256"] != adapter_sha256(adapter):
             raise SystemExit(f"{lin.id}: final adapter not evaluated on selection under tag {tag}")
-        entry = {"lineage": lin.id, "slot": lin.slot, "arm": lin.arm, "scaffold": lin.scaffold,
+        entry = {"lineage": lin.id, "slot": lin.slot, "context": lin.context,
                  "selection_macro": s["macro"], "adapter": str(adapter), "sha256": s["adapter_sha256"]}
         (baselines if run.cfg.member(lin.slot).role == "baseline" else ranking).append(entry)
     if not ranking:
@@ -365,6 +361,80 @@ def harvest(run_dir: Path, tag: str, step: int | None = None) -> None:
                 "top3": [e["lineage"] for e in ranking[:3]], "ranking": ranking, "baselines": baselines}
     write_json(manifest_path(run.cfg.name), manifest)
     print(f"wrote {manifest_path(run.cfg.name)}; commit it before any blind evaluation")
+
+
+# -- context score -------------------------------------------------------------------------------------------------
+
+SCORE_COLUMNS = ("subject", "lineage", "step", "context", "domain", "responses", "tokens", "delta_sum", "delta_mean")
+
+
+def score_subjects(run: Run, lineages: list[str] | None) -> list[tuple[str, str | None, int | None, Path]]:
+    """(subject, lineage, step, probe responses) to score: the base model's plain answers ("base") and its answers
+    under each context ("base:<context>"), then every committed probe of every lineage (or of `lineages`)."""
+    out = [("base", None, None, run.dir / "base" / "probe_responses.jsonl.gz")]
+    out += [(f"base:{c}", None, None, run.dir / "base" / "contexts" / f"{c}.jsonl.gz") for c in sorted(run.contexts)]
+    for state in sorted((run.dir / "members").glob("*/state.json")):
+        lin = load_lineage(run, state.parent.name)
+        if lin.status == "new" or (lineages is not None and lin.id not in lineages):
+            continue
+        for path in sorted((state.parent / "probe_responses").glob("step_*.jsonl.gz")):
+            step = int(path.name[5:11])
+            if step <= lin.step:  # later files are not committed (a kill between probe and checkpoint)
+                out.append((f"{lin.id}@{step}", lin.id, step, path))
+    return out
+
+
+def context_deltas(run: Run, policy: Policy, records: list[dict]) -> dict[str, list[tuple[str, float, int]]]:
+    """Per context, per response: (domain, sum over completion tokens of log p_base(token | prompt with the context)
+    - log p_base(token | plain prompt), completion tokens). The completion is the stored sampled token ids."""
+    plain = policy.base_logprobs([Sequence(run.prompt(r["question"]), r["token_ids"]) for r in records])
+    out = {}
+    for context in sorted(run.contexts):
+        lps = policy.base_logprobs([Sequence(run.prompt(r["question"], context), r["token_ids"]) for r in records])
+        out[context] = [(r["domain"], float((a - b).sum()), len(a)) for r, a, b in zip(records, lps, plain)]
+    return out
+
+
+def score_rows(subject: str, lineage: str | None, step: int | None, deltas: dict) -> list[dict]:
+    """The table rows of one subject: per context and domain, the token-mean delta and its parts."""
+    rows = []
+    for context, per_response in deltas.items():
+        for domain in sorted({d for d, _, _ in per_response}):
+            mine = [(x, n) for d, x, n in per_response if d == domain]
+            total, tokens = sum(x for x, _ in mine), sum(n for _, n in mine)
+            rows.append({"subject": subject, "lineage": lineage, "step": step, "context": context, "domain": domain,
+                         "responses": len(mine), "tokens": tokens, "delta_sum": total, "delta_mean": total / tokens})
+    return rows
+
+
+def context_score(run_dir: Path, lineages: list[str] | None = None) -> None:
+    """For each subject and context, the mean over completion tokens of log p_base(token | context prompt) -
+    log p_base(token | plain prompt), by domain, written to runs/<name>/context_score/table.csv. Each subject's rows
+    are cached next to it with the SHA-256 of its responses file, so a rerun scores only new or rewritten probes."""
+    run = Run(run_dir)
+    out = run.dir / "context_score"
+    policy = None
+    rows = []
+    for subject, lineage, step, path in score_subjects(run, lineages):
+        cache = out / f"{subject.replace(':', '--')}.json"
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        cached = read_json(cache) if cache.exists() else None
+        if cached and cached["sha256"] == digest and {r["context"] for r in cached["rows"]} == set(run.contexts):
+            rows += cached["rows"]
+            continue
+        if policy is None:
+            policy = Policy(run.cfg.model, run.cfg.lora, run.cfg.trainer)
+        records = read_jsonl_gz(path)
+        subject_rows = score_rows(subject, lineage, step, context_deltas(run, policy, records))
+        write_json(cache, {"time": now(), "responses": str(path), "sha256": digest, "rows": subject_rows})
+        rows += subject_rows
+        log.info("context score of %s: %d responses", subject, len(records))
+    text = io.StringIO()
+    writer = csv.DictWriter(text, fieldnames=SCORE_COLUMNS)
+    writer.writeheader()
+    writer.writerows(rows)
+    atomic_write(out / "table.csv", text.getvalue().encode())
+    log.info("wrote %s (%d rows)", out / "table.csv", len(rows))
 
 
 def main(argv=None) -> None:
@@ -389,11 +459,18 @@ def main(argv=None) -> None:
     h.add_argument("--tag", required=True)
     h.add_argument("--step", type=int, help="harvest every population slot's checkpoint at this step, evaluated as "
                                             "<lineage>@<step> (default: final adapters of finished lineages)")
+    c = sub.add_parser("context-score", help="how much better each context lets the base model predict the stored "
+                                             "probe answers (a table; the index is computed in analysis)")
+    c.add_argument("run_dir", type=Path)
+    c.add_argument("--members", help="comma-separated lineage ids to score (default: all; the base references always)")
     args = ap.parse_args(argv)
     if args.cmd == "run":
         setup_logging(args.run_dir.name, f"eval-{args.suite}")
         logged(evaluate, args.run_dir, args.suite, [a for a in args.adapters.split(",") if a], args.per_family,
                args.samples, args.shard, args.tag, args.attach, args.per_source, server_overrides(args))
+    elif args.cmd == "context-score":
+        setup_logging(args.run_dir.name, "context-score")
+        logged(context_score, args.run_dir, [m for m in args.members.split(",") if m] if args.members else None)
     else:
         harvest(args.run_dir, args.tag, args.step)
 

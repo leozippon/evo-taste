@@ -1,24 +1,30 @@
 """Evaluation summaries: one adapter per label, and the full (family, instance, sample) grid, or no summary."""
 
+from types import SimpleNamespace
+
 import pytest
 
 from evotaste.evaluate import IncompleteEvaluation, eval_params, same_params, summarize
-from evotaste.tasks import Task
 
-TASKS = [Task(f"fam/0/{i}", "fam", "q", "a", entry={}) for i in range(3)] + [Task("gsm8k_train/1", "gsm8k_train", "q", "1")]
+
+def Task(uid, family, kind):  # the fields summarize reads
+    return SimpleNamespace(uid=uid, family=family, kind=kind)
+
+
+TASKS = [Task(f"fam/0/{i}", "fam", "procedural") for i in range(3)] + [Task("gsm8k_train/1", "gsm8k_train", "open")]
 
 
 def records(label="m0", sha="h", samples=2, drop=0):
     rs = [{"adapter": label, "adapter_sha256": sha, "family": t.family, "uid": t.uid, "sample": i,
-           "reward": float(i == 0), "parsed": True, "truncated": False, "completion_tokens": 5}
-          for t in TASKS for i in range(samples)]
+           "reward": float(i == 0), "complied": True, "correct_any": i == 0, "truncated": False,
+           "completion_tokens": 5} for t in TASKS for i in range(samples)]
     return rs[:len(rs) - drop]
 
 
 def test_complete_grid_is_summarized():
     s = summarize(records() + records("base", None), TASKS, 2)
     assert s["m0"]["n"] == 8 and s["m0"]["macro"] == 0.5 and s["m0"]["by_family"]["gsm8k_train"] == 0.5
-    assert s["base"]["adapter_sha256"] is None
+    assert s["base"]["adapter_sha256"] is None and s["m0"]["complied"] == 1.0 and s["m0"]["correct_any"] == 0.5
 
 
 def test_incomplete_grid_is_not_summarized():
@@ -41,9 +47,9 @@ def test_no_duplicates_or_foreign_records():
 
 
 def test_external_sources_can_have_more_items_than_families():
-    tasks = TASKS + [Task(f"gsm8k_train/{i}", "gsm8k_train", "q", "1") for i in range(2, 6)]  # 3 per family, 5 items
+    tasks = TASKS + [Task(f"gsm8k_train/{i}", "gsm8k_train", "open") for i in range(2, 6)]  # 3 per family, 5 items
     full = [{"adapter": "m0", "adapter_sha256": "h", "family": t.family, "uid": t.uid, "sample": 0, "reward": 1.0,
-             "parsed": True, "truncated": False, "completion_tokens": 5} for t in tasks]
+             "complied": True, "correct_any": True, "truncated": False, "completion_tokens": 5} for t in tasks]
     assert summarize(full, tasks, 1)["m0"]["n_by_family"] == {"fam": 3, "gsm8k_train": 5}
     with pytest.raises(IncompleteEvaluation, match="m0: 7 of 8"):
         summarize(full[:-1], tasks, 1)

@@ -2,7 +2,7 @@
 
   python -m evotaste.worker prepare configs/run/<name>.yaml     # once per run, before any worker
   python -m evotaste.worker run runs/<name> --members m00,m01   # one process per GPU; rerun to resume
-  python -m evotaste.worker fork runs/<source> configs/run/<name>.yaml [--dry-run]   # reuse the source's seeding
+  python -m evotaste.worker fork runs/<source> configs/run/<name>.yaml [--dry-run]   # reuse the source's seeded members
 
 Run from the repository root with exactly one GPU visible (CUDA_VISIBLE_DEVICES). `--attach URL` reuses an
 already running vLLM server of the same model instead of starting one (development only).
@@ -28,10 +28,11 @@ import torch
 import yaml
 
 from evotaste import config
-from evotaste.member import Lineage, Member, Run, current_lineage, lineage_dir, response_records, summarize_probe
+from evotaste.member import (Member, Run, current_lineage, first_lineage, lineage_dir, probe_requests,
+                             response_records, summarize_probe)
 from evotaste.records import atomic_write, now, read_json, read_jsonl, write_json, write_jsonl_gz
-from evotaste.sampler import Request, Sampler, Server
-from evotaste.tasks import check_gold, score_many
+from evotaste.sampler import Sampler, Server
+from evotaste.tasks import check_gold
 from evotaste.trainer import Policy, gpu_processes
 
 log = logging.getLogger("evotaste.worker")
@@ -136,20 +137,29 @@ def start_server(run: Run, attach: str | None, label: str) -> tuple[Server | Non
 
 # -- prepare -------------------------------------------------------------------------------------------------------
 
+FROZEN = ("suites", "contexts")  # files copied next to the frozen config
+
+
 def freeze(config_path: Path) -> Path:
-    """Copy the config, suites and scaffolds into runs/<name>/ once; later calls must find them unchanged."""
-    config.load(config_path)  # validate before writing anything
+    """Copy the config, suites, contexts and the strata table into runs/<name>/ once; later calls must find them
+    unchanged. The strata table must have its pinned SHA-256."""
+    cfg = config.load(config_path)  # validate before writing anything
     data = yaml.safe_load(config_path.read_text())
     run_dir = Path("runs") / data["name"]
-    sources = {"suites.yaml": Path(data.get("suites", config.RunConfig.suites)),
-               "scaffolds.yaml": Path(data.get("scaffolds", config.RunConfig.scaffolds))}
-    data.update(suites=str(run_dir / "suites.yaml"), scaffolds=str(run_dir / "scaffolds.yaml"))
+    sources = {f"{key}.yaml": Path(getattr(cfg, key)) for key in FROZEN}
+    data.update({key: str(run_dir / f"{key}.yaml") for key in FROZEN})
+    if cfg.strata is not None:
+        if hashlib.sha256(Path(cfg.strata.path).read_bytes()).hexdigest() != cfg.strata.sha256:
+            raise SystemExit(f"{cfg.strata.path} does not have the pinned SHA-256 {cfg.strata.sha256}")
+        sources["strata.tsv"] = Path(cfg.strata.path)
+        data["strata"] = {**data["strata"], "path": str(run_dir / "strata.tsv")}
     text = yaml.safe_dump(data, sort_keys=False)
     if (run_dir / "config.yaml").exists():
         same = (run_dir / "config.yaml").read_text() == text and all(
             (run_dir / name).read_bytes() == src.read_bytes() for name, src in sources.items())
         if not same:
-            raise SystemExit(f"{run_dir} exists with a different config, suites or scaffolds; use a new run name")
+            raise SystemExit(f"{run_dir} exists with a different config, suites, contexts or strata; use a new run "
+                             "name")
         return run_dir
     run_dir.mkdir(parents=True)
     for name, src in sources.items():
@@ -158,57 +168,37 @@ def freeze(config_path: Path) -> Path:
     return run_dir
 
 
-def teachers(cfg) -> list[str]:
-    return sorted({"plain"} | {m.scaffold for m in cfg.members if m.scaffold})
+def base_probe(run: Run, sampler: Sampler, context: str | None = None) -> None:
+    """The base model's answers to the probe set: plain (every member's reference), or behind the prompt that carries
+    a context (the instructed reference of the context score). The summary is written last and marks completion."""
+    prompt = run.prompt if context is None else (lambda q: run.prompt(q, context))
+    seed_parts = ("base",) if context is None else ("base", context)
+    samples = sampler.generate(probe_requests(run.cfg.model, run.probe_tasks, prompt, run.cfg.probes.max_tokens,
+                                              *seed_parts))
+    records = [{"step": None, "context": context, **r}
+               for r in response_records([(t, g[0]) for t, g in zip(run.probe_tasks, samples)], token_ids=True)]
+    summary = {"time": now(), "context": context, **summarize_probe(records)}
+    responses, summary_path = base_files(run.dir, context)
+    write_jsonl_gz(responses, records)
+    write_json(summary_path, summary)
+    log.info("base probe%s: accuracy %.3f %s", f" under context {context}" if context else "", summary["accuracy"],
+             {k: round(v, 3) for k, v in summary["by_domain"].items()})
 
 
-def build_pool(run: Run, sampler: Sampler, teacher: str, tasks) -> None:
-    """The base model answers the seeding pool once under the teacher prompt; correct, stopped samples are kept."""
-    s = run.cfg.seeding
-    t0 = time.perf_counter()
-    samples = sampler.generate([Request(run.cfg.model, run.prompt(t.question, teacher), s.samples, s.max_tokens)
-                                for t in tasks])
-    records, families = [], {}
-    rewards = iter(s.reward for s in score_many([(t, x.text, x.finish_reason) for t, g in zip(tasks, samples) for x in g]))
-    for task, group in zip(tasks, samples):
-        fam = families.setdefault(task.family, {"prompts": 0, "samples": 0, "correct": 0, "prompts_with_correct": 0})
-        correct = [x for x in group if next(rewards) == 1.0]
-        fam["prompts"] += 1
-        fam["samples"] += len(group)
-        fam["correct"] += len(correct)
-        fam["prompts_with_correct"] += bool(correct)
-        records += [{"uid": task.uid, "family": task.family, "prompt_ids": run.prompt(task.question),
-                     "completion_ids": x.token_ids, "text": x.text, "teacher_logprob": x.logprob} for x in correct]
-    summary = {"teacher": teacher, "time": now(), "generate_s": round(time.perf_counter() - t0, 1),
-               "prompts": len(tasks), "samples": sum(f["samples"] for f in families.values()),
-               "correct": len(records), "prompts_with_correct": len({r["uid"] for r in records}),
-               "by_family": families}
-    write_jsonl_gz(run.dir / "seeding" / f"{teacher}.jsonl.gz", records)
-    write_json(run.dir / "seeding" / f"{teacher}.json", summary)
-    log.info("seeding pool %s: %d correct samples on %d of %d prompts (%.0f s)", teacher, summary["correct"],
-             summary["prompts_with_correct"], len(tasks), summary["generate_s"])
-
-
-def base_probe(run: Run, sampler: Sampler) -> None:
-    samples = sampler.generate([Request(run.cfg.model, run.prompt(t.question), 1, run.cfg.probes.max_tokens)
-                                for _, t in run.probe_tasks])
-    records = [{"step": None, "suite": suite, **r} for (suite, _), r in
-               zip(run.probe_tasks, response_records([(t, g[0]) for (_, t), g in zip(run.probe_tasks, samples)]))]
-    write_jsonl_gz(run.dir / "base" / "probe_responses.jsonl.gz", records)
-    summary = {"time": now(), **summarize_probe(records)}
-    write_json(run.dir / "base" / "probe_summary.json", summary)
-    log.info("base probe: %s", {k: round(v, 3) for k, v in summary["accuracy"].items()})
+def base_files(run_dir: Path, context: str | None) -> tuple[Path, Path]:
+    """(responses, summary) of the base model's plain probe answers or of its answers under a context."""
+    if context is None:
+        return run_dir / "base" / "probe_responses.jsonl.gz", run_dir / "base" / "probe_summary.json"
+    return run_dir / "base" / "contexts" / f"{context}.jsonl.gz", run_dir / "base" / "contexts" / f"{context}.json"
 
 
 def prepare(config_path: Path, attach: str | None, server: dict | None = None) -> None:
     run_dir = freeze(config_path)
     run = Run(run_dir)
     apply_server(run, server)
-    pool_tasks = run.streams.seed_pool(run.cfg.seeding.pool_prompts)
-    check_gold([t for _, t in run.probe_tasks] + pool_tasks)
-    todo = [t for t in teachers(run.cfg) if not (run.dir / "seeding" / f"{t}.jsonl.gz").exists()]
-    need_base = not (run.dir / "base" / "probe_summary.json").exists()
-    if todo or need_base:
+    check_gold(run.probe_tasks)
+    todo = [c for c in [None, *run.contexts] if not base_files(run.dir, c)[1].exists()]
+    if todo:
         server, url = start_server(run, attach, "prepare")
         sampler = None
         try:
@@ -216,33 +206,33 @@ def prepare(config_path: Path, attach: str | None, server: dict | None = None) -
                 server.wait_ready()
                 url = server.url
             sampler = Sampler(url, run.cfg.model, run.cfg.name)
-            for teacher in todo:
-                build_pool(run, sampler, teacher, pool_tasks)
-            if need_base:
-                base_probe(run, sampler)
+            for context in todo:
+                base_probe(run, sampler, context)
         finally:
             if sampler:
                 sampler.close()
             if server:
                 server.stop()
     run.check_probe_set()
-    write_json(run.dir / "prepared.json", {"time": now(), "revision": revision(), "teachers": teachers(run.cfg)})
+    write_json(run.dir / "prepared.json", {"time": now(), "revision": revision(), "contexts": sorted(run.contexts)})
     log.info("run %s prepared", run.dir)
 
 
 # -- fork ----------------------------------------------------------------------------------------------------------
 
-FORK_IDENTICAL = ("model", "seed", "lora", "seeding", "probes", "trainer")  # plus suites and scaffolds content
+FORK_IDENTICAL = ("model", "seed", "lora", "seeding", "probes", "trainer")  # plus suites and contexts content
 
 
 def _fork_member(src: Path, src_cfg, new_cfg, spec) -> str | None:
     """None if the source lineage's seeding can be reused for `spec`, else the reason why not."""
+    if spec.parent is not None:
+        return "a clone starts from its parent in this run"
     try:
         old = src_cfg.member(spec.id)
     except KeyError:
         return "not in the source run"
-    if (old.arm, old.scaffold, old.seed) != (spec.arm, spec.scaffold, spec.seed):
-        return "arm, scaffold or seed differ"
+    if old.parent is not None or (old.context, old.seed) != (spec.context, spec.seed):
+        return "context or seed differ, or a clone in the source"
     seeding = new_cfg.settings(spec)[0]
     if src_cfg.settings(old)[0] != seeding:
         return "effective seeding settings differ"
@@ -255,18 +245,19 @@ def _fork_member(src: Path, src_cfg, new_cfg, spec) -> str | None:
              d / "probe_responses" / "step_000000.jsonl.gz"]
     if not all(f.exists() for f in files):
         return "step-0 checkpoint or probe answers missing in the source"
-    if sum(r["phase"] == "seed" for r in read_jsonl(d / "history.jsonl")) != seeding.steps:
+    steps = 0 if seeding.method == "none" else seeding.steps
+    if sum(r["phase"] == "seed" for r in read_jsonl(d / "history.jsonl")) != steps:
         return "incomplete seeding history in the source"
     return None
 
 
 def plan_fork(src: Path, config_path: Path) -> dict:
-    """What a fork of `src` under `config_path` reuses. Refuses unless everything that determines the seeding
-    pools, the base probe answers and the step-0 adapters is identical; amplification, culling, server and member
-    overrides of those may differ."""
+    """What a fork of `src` under `config_path` reuses. Refuses unless everything that determines the base model's
+    reference answers and the step-0 adapters is identical; amplification, culling, server and member overrides of
+    those may differ."""
     src_cfg, new_cfg = config.load(src / "config.yaml"), config.load(config_path)
     differ = [f for f in FORK_IDENTICAL if getattr(src_cfg, f) != getattr(new_cfg, f)]
-    differ += [f"{f} content" for f in ("suites", "scaffolds")
+    differ += [f"{f} content" for f in FROZEN
                if Path(getattr(src_cfg, f)).read_bytes() != Path(getattr(new_cfg, f)).read_bytes()]
     if differ:
         raise SystemExit(f"cannot fork {src}: {', '.join(differ)} differ from the source run")
@@ -274,40 +265,34 @@ def plan_fork(src: Path, config_path: Path) -> dict:
         raise SystemExit(f"runs/{new_cfg.name} is the source or exists already; a fork needs a new run name")
     if not (src / "prepared.json").exists():
         raise SystemExit(f"{src} is not prepared")
-    missing = [t for t in teachers(new_cfg)
-               if not all((src / "seeding" / f"{t}{ext}").exists() for ext in (".jsonl.gz", ".json"))]
-    if missing:
-        raise SystemExit(f"{src} has no seeding pool for teacher(s) {missing}")
     return {"source": src, "source_revision": read_json(src / "prepared.json")["revision"], "name": new_cfg.name,
-            "teachers": teachers(new_cfg),
             "members": {m.id: _fork_member(src, src_cfg, new_cfg, m) for m in new_cfg.members}}
 
 
 def fork(src: Path, config_path: Path, dry_run: bool) -> None:
-    """Create a prepared run that shares the source's seeding pools and base probe answers and starts every
-    reusable member at amplification step 0 from the source lineage's step-0 checkpoint. Only copies; the source may
-    be live, and only committed step-0 artefacts are read."""
+    """Create a prepared run that shares the source's base reference answers and starts every reusable member at
+    amplification step 0 from the source lineage's step-0 checkpoint. Only copies; the source may be live, and only
+    committed step-0 artefacts are read."""
     plan = plan_fork(src, config_path)
     reuse = [m for m, why in plan["members"].items() if why is None]
-    files = ([src / "seeding" / f"{t}{ext}" for t in plan["teachers"] for ext in (".jsonl.gz", ".json")]
-             + [src / "base" / "probe_responses.jsonl.gz", src / "base" / "probe_summary.json"])
+    base = sorted(p for p in (src / "base").rglob("*") if p.is_file())
     print(f"fork {src} (prepared at {plan['source_revision']}) -> runs/{plan['name']}")
-    print(f"identical: {', '.join(FORK_IDENTICAL)}, suites and scaffolds content")
-    print(f"copy {len(files)} shared files ({sum(f.stat().st_size for f in files) / 2**20:.0f} MiB): "
-          f"seeding pools {plan['teachers']}, base probe answers")
+    print(f"identical: {', '.join(FORK_IDENTICAL)}, suites and contexts content")
+    print(f"copy {len(base)} base reference files ({sum(f.stat().st_size for f in base) / 2**20:.0f} MiB)")
     ckpt_mib = sum(f.stat().st_size for m in reuse
                    for f in (src / "members" / m / "checkpoints" / "step_000000").iterdir()) / 2**20
     print(f"start at amplification step 0 from the source's step-0 checkpoint ({len(reuse)}, {ckpt_mib:.0f} MiB): "
           f"{', '.join(reuse)}")
     for m, why in plan["members"].items():
         if why is not None:
-            print(f"seed normally: {m} ({why})")
+            print(f"start normally: {m} ({why})")
     if dry_run:
         return
     run_dir = freeze(config_path)
-    for f in files:
-        (run_dir / f.parent.name).mkdir(exist_ok=True)
-        shutil.copy2(f, run_dir / f.parent.name / f.name)
+    for f in base:
+        target = run_dir / f.relative_to(src)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(f, target)
     run = Run(run_dir)
     run.check_probe_set()
     for slot in reuse:
@@ -319,11 +304,11 @@ def fork(src: Path, config_path: Path, dry_run: bool) -> None:
         shutil.copy2(s / "probe_responses" / "step_000000.jsonl.gz", d / "probe_responses" / "step_000000.jsonl.gz")
         atomic_write(d / "history.jsonl", "".join(json.dumps(r) + "\n" for r in seed_history).encode())
         atomic_write(d / "probes.jsonl", (json.dumps(probe0) + "\n").encode())
-        spec = run.cfg.member(slot)
-        status = "active" if run.cfg.settings(spec)[1].steps > 0 else "done"
-        write_json(d / "state.json", dataclasses.asdict(
-            Lineage(slot, slot, 0, spec.arm, spec.scaffold, spec.seed, status=status, step=0, probes=[probe0])))
-    write_json(run.dir / "prepared.json", {"time": now(), "revision": revision(), "teachers": plan["teachers"],
+        lin = first_lineage(run.cfg, slot)
+        lin.status = "active" if run.cfg.settings(run.cfg.member(slot))[1].steps > 0 else "done"
+        lin.probes = [probe0]
+        write_json(d / "state.json", dataclasses.asdict(lin))
+    write_json(run.dir / "prepared.json", {"time": now(), "revision": revision(), "contexts": sorted(run.contexts),
                                            "fork": {"source": str(src), "source_revision": plan["source_revision"],
                                                     "members": reuse}})
     log.info("run %s forked from %s; %d members start at amplification step 0", run.dir, src, len(reuse))
@@ -350,9 +335,32 @@ def probe(run: Run, members: list[Member]) -> None:
         m.finish_probe(samples)
 
 
+def seed_members(run: Run, members: list[Member]) -> None:
+    """Seed several members in lockstep: round i makes update i of every member that has one, with one joint
+    generation for all of them."""
+    for m in members:
+        m.begin_seeding()
+    for i in range(max(m.seeding_steps for m in members)):
+        active = [m for m in members if i < m.seeding_steps]
+        for m in active:
+            if m.seeding.method == "opcd" and m.version is None:
+                m.publish()
+        tasks = {m.lin.id: m.seed_tasks(i) for m in active}
+        per_member, seconds = generate_for(run, active, lambda m: m.seed_requests(i, tasks[m.lin.id]))
+        for m, samples in zip(active, per_member):
+            m.seed_update(i, tasks[m.lin.id], samples, seconds, len(active))
+        log.info("seeding update %d: %s (generation %.0f s)", i, ", ".join(m.lin.id for m in active), seconds)
+    for m in members:
+        m.end_seeding()
+
+
+POLL_S = 60  # a worker whose only remaining members are clones waiting for a parent in another worker polls this often
+
+
 def advance(run: Run, slots: list[str], checkpoint_every: int | None = None) -> None:
-    """Advance the slots' members to the end of their courses; besides the probe-step checkpoints, a light
-    checkpoint (no probe) is written every `checkpoint_every` steps."""
+    """Advance the slots' members to the end of their courses: seed new members, start clones once their parent has
+    committed the clone point, then step. Besides the probe-step checkpoints, a light checkpoint (no probe) is written
+    every `checkpoint_every` steps and at every clone point."""
     checkpoint_every = checkpoint_every or run.cfg.probes.every
     members: dict[str, Member] = {}
 
@@ -368,18 +376,38 @@ def advance(run: Run, slots: list[str], checkpoint_every: int | None = None) -> 
             out.append(members[lin.id])
         return out
 
+    waiting_logged = False
     while live := living():
-        fresh = [m for m in live if m.lin.status == "new"]
+        seeding = [m for m in live if m.lin.status == "new" and not m.is_clone]
+        clones = [m for m in live if m.lin.status == "new" and m.is_clone]
+        starting = []
+        for m in clones:
+            if m.weights is None and (ckpt := m.parent_checkpoint()) is not None:
+                m.start_clone(ckpt)
+            if m.weights is not None:
+                starting.append(m)
+        if seeding:
+            seed_members(run, seeding)
+        fresh = seeding + starting
         for m in fresh:
-            m.seed()
-        for m in live:
             if m.version is None:
                 m.publish()
         if fresh:
             probe(run, fresh)
         stepping = [m for m in live if m.lin.status == "active" and m.lin.step < m.amp.steps]
         if not fresh and not stepping:
+            if len(starting) < len(clones):  # clones whose parents another worker advances
+                if not waiting_logged:
+                    log.info("waiting for parents: %s", ", ".join(f"{m.lin.id} <- {m.lin.parent['lineage']}@"
+                                                                  f"{m.lin.parent['step']}" for m in clones))
+                    waiting_logged = True
+                time.sleep(POLL_S)
+                continue
             raise RuntimeError(f"no member can make progress: {live}")
+        waiting_logged = False
+        for m in stepping:
+            if m.version is None:
+                m.publish()
         if stepping:
             tasks = {m.lin.id: m.step_tasks() for m in stepping}
             per_member, seconds = generate_for(run, stepping, lambda m: m.rollout_requests(tasks[m.lin.id]))
@@ -390,7 +418,7 @@ def advance(run: Run, slots: list[str], checkpoint_every: int | None = None) -> 
             if due:
                 probe(run, due)
             for m in stepping:
-                if m not in due and m.lin.step % checkpoint_every == 0:
+                if m not in due and m.checkpoint_due(checkpoint_every):
                     m.light_checkpoint()
         for m in live:
             if m.finished:
@@ -423,8 +451,7 @@ def run_worker(run_dir: Path, slots: list[str], attach: str | None, checkpoint_e
     torch.set_num_threads(WORKER_CPU_THREADS)
     run = Run(run_dir)
     apply_server(run, server)
-    prepared = run.dir / "prepared.json"
-    if not prepared.exists() or set(teachers(run.cfg)) - set(read_json(prepared)["teachers"]):
+    if not (run.dir / "prepared.json").exists():
         raise SystemExit(f"{run.dir} is not prepared; run `python -m evotaste.worker prepare` first")
     run.check_probe_set()
     locks = lock_slots(run, slots)
@@ -456,7 +483,8 @@ def run_worker(run_dir: Path, slots: list[str], attach: str | None, checkpoint_e
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    p = sub.add_parser("prepare", help="freeze the config and create seeding pools and base-model probe answers")
+    p = sub.add_parser("prepare", help="freeze the config and record the base model's probe answers, plain and "
+                                       "under every context")
     p.add_argument("config", type=Path)
     p.add_argument("--attach", help="URL of a running vLLM server of the run's model (development)")
     server_options(p)

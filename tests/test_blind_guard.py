@@ -93,9 +93,9 @@ def test_baselines_listed_in_the_manifest_are_accepted(repo, adapter):
 def test_member_roles():
     from evotaste import config
 
-    base = {"name": "t", "model": "m", "seed": 0}
-    cfg = config.parse({**base, "members": [{"id": "a", "arm": "plain", "seed": 1},
-                                            {"id": "long", "arm": "plain", "seed": 2, "role": "baseline"}]}, set())
+    base = {"name": "t", "model": "m", "seed": 0, "seeding": {"method": "none"}, "amplification": {"steps": 0}}
+    cfg = config.parse({**base, "members": [{"id": "a", "seed": 1}, {"id": "long", "seed": 2, "role": "baseline"}]},
+                       set())
     assert [m.role for m in cfg.members] == ["member", "baseline"]
     with pytest.raises(ValueError, match="role"):
-        config.parse({**base, "members": [{"id": "a", "arm": "plain", "seed": 1, "role": "judge"}]}, set())
+        config.parse({**base, "members": [{"id": "a", "seed": 1, "role": "judge"}]}, set())

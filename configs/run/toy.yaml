@@ -1,25 +1,27 @@
-# Toy-size end-to-end run of the engine: three members (plain, one scaffold, perturbation), a short seeding,
-# a few amplification steps and probes. Schema and defaults: evotaste/config.py and docs/dev/ENGINE_NOTES.md.
+# Toy-size end-to-end run of the engine at the full 4,096-token limit: a member distilled from a real context, an
+# unseeded member, and a clone pair that continues the distilled member's step-1 state with self-imitation.
+# Schema and defaults: evotaste/config.py and docs/dev/ENGINE_NOTES.md.
 name: toy
 model: Qwen/Qwen3-1.7B
 seed: 1
+strata: {path: results/census/census-r2/strata.tsv, sha256: "<SHA-256 of the strata table>"}  # fill in from the census
 server:
-  kv_cache: 20G
+  kv_cache: 12G
+  gpu_memory_utilization: 0.45
 seeding:
-  pool_prompts: 128
-  samples: 4
-  steps: 4
+  steps: 10
   batch: 32
 amplification:
-  steps: 6
+  steps: 3
   prompts: 16
   rollouts: 4
+  self_imitation: 0.5
 probes:
   every: 3
-  train_per_family: 1
-  selection_per_family: 1
-  foundation_per_source: 10
+culling:
+  enabled: false
 members:
-  - {id: plain0, arm: plain, seed: 11}
-  - {id: verify0, arm: scaffold, scaffold: verify, seed: 12}
-  - {id: perturb0, arm: perturb, seed: 13}
+  - {id: refute, context: refute, seed: 11}
+  - {id: unseeded, seed: 12, overrides: {seeding: {method: none}}}
+  - {id: refute-c1, parent: {member: refute, step: 1}, seed: 13}
+  - {id: refute-c2, parent: {member: refute, step: 1}, seed: 14}
