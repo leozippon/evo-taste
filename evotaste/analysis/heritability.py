@@ -40,7 +40,7 @@ def members_at(run: data.Run, grid: data.Grid) -> dict[int, list[tuple[str, data
 
 
 def family_of(run: data.Run, lin: data.Lineage) -> str:
-    return f"{washout.root(run, lin).id}/{lin.arm}"
+    return f"{run.root(lin).id}/{lin.arm}"
 
 
 def scalar_traits(grid: data.Grid, w: np.ndarray) -> dict[str, np.ndarray]:

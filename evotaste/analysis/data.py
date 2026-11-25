@@ -100,6 +100,18 @@ class Run:
                 lineage_id = s["replaced_by"]
         return out
 
+    def root(self, lin: Lineage) -> Lineage:
+        """The seeded member a clone (or a chain of clones) continues; a member that is not a clone is its own."""
+        while lin.parent:
+            lin = self.lineages[lin.parent[0]]
+        return lin
+
+    @staticmethod
+    def restart(lin: Lineage, step: int) -> bool:
+        """Whether a probe at `step` is a clone's first, of the checkpoint it copied: a second sample of its parent's
+        state, used for the noise of one probe and otherwise left out so that no state is counted twice."""
+        return lin.parent is not None and step == lin.parent[1]
+
     def committed(self, lin: Lineage) -> bool:
         return lin.status not in ("pending", "new")
 

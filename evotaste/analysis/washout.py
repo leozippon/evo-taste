@@ -28,8 +28,9 @@ DOMAINS_ALL = "all"
 def index_table(run: data.Run, t: pd.DataFrame) -> pd.DataFrame:
     """Per subject, context and domain (and over all domains, token-weighted): S, the mean log-ratio per token, and
     the index I = (S(subject) - S(base)) / (S(base under the context) - S(base))."""
-    over = t.groupby(["subject", "context"], as_index=False)[["delta_sum", "tokens"]].sum().assign(domain=DOMAINS_ALL)
-    s = pd.concat([t[["subject", "context", "domain", "delta_sum", "tokens"]], over], ignore_index=True)
+    cols = ["responses", "tokens", "delta_sum"]
+    over = t.groupby(["subject", "context"], as_index=False)[cols].sum().assign(domain=DOMAINS_ALL)
+    s = pd.concat([t[["subject", "context", "domain", *cols]], over], ignore_index=True)
     s["S"] = s["delta_sum"] / s["tokens"]
     key = s.set_index(["subject", "context", "domain"])["S"]
     missing = [c for c in sorted(t["context"].unique()) if (f"base:{c}", c, DOMAINS_ALL) not in key.index]
@@ -50,8 +51,9 @@ def index_table(run: data.Run, t: pd.DataFrame) -> pd.DataFrame:
 def specific_table(run: data.Run, idx: pd.DataFrame) -> pd.DataFrame:
     """Per seeded member probe and domain: raw = I_c - mean_{j != c} I_j for its own context c, control = the same
     expression for the controls (placebo and unseeded members) at the same step under the same update rule, specific
-    = raw - control, and the ratio of specific to that of the lineage's seeded state at step 0."""
-    members = idx[idx["lineage"].notna()]
+    = raw - control, and the ratio of specific to that of the root lineage's seeded state at step 0. A clone's first
+    probe (a copy of its parent's state) is left out, of members and controls."""
+    members = probes(run, idx)
     wide = members.pivot_table(index=["subject", "domain"], columns="context", values="I")
     info = members.drop_duplicates("subject").set_index("subject")[["lineage", "step"]]
     rows = []
@@ -59,7 +61,7 @@ def specific_table(run: data.Run, idx: pd.DataFrame) -> pd.DataFrame:
         lin = run.lineages[info.loc[subject, "lineage"]]
         rows.append({"subject": subject, "lineage": lin.id, "step": int(info.loc[subject, "step"]), "domain": domain,
                      "arm": lin.arm, "level": lin.level, "context": lin.context, "theme": lin.theme,
-                     "seeding": lin.seeding, "control_member": lin.control, "root": root(run, lin).id, "I": r})
+                     "seeding": lin.seeding, "control_member": lin.control, "root": run.root(lin).id, "I": r})
     out = []
     for r in rows:
         c = r["context"]
@@ -81,9 +83,10 @@ def specific_table(run: data.Run, idx: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def root(run: data.Run, lin: data.Lineage) -> data.Lineage:
-    """The lineage whose seeding a clone continues."""
-    return run.lineages[lin.parent[0]] if lin.parent else lin
+def probes(run: data.Run, idx: pd.DataFrame) -> pd.DataFrame:
+    """The index rows of member probes, without clones' first probes (see data.Run.restart)."""
+    m = idx[idx["lineage"].notna()]
+    return m[[not run.restart(run.lineages[lin], int(step)) for lin, step in zip(m["lineage"], m["step"])]]
 
 
 def candidates(idx: pd.DataFrame) -> list[str]:
@@ -94,7 +97,10 @@ def candidates(idx: pd.DataFrame) -> list[str]:
 def own_context_hits(run: data.Run, idx: pd.DataFrame) -> pd.DataFrame:
     """Per seeded member probe with controls at the same step and update rule: whether its own context ranks first
     among the candidates after subtracting the controls' mean index per context (over all domains)."""
-    members = idx[idx["lineage"].notna() & (idx["domain"] == DOMAINS_ALL)]
+    members = probes(run, idx)
+    members = members[members["domain"] == DOMAINS_ALL]
+    if len(candidates(idx)) < 2:  # a selection of the own context and the placebo cannot rank contexts
+        return pd.DataFrame(columns=["step", "arm", "subject", "lineage", "hit"])
     wide = members.pivot_table(index="subject", columns="context", values="I")
     meta = members.drop_duplicates("subject").set_index("subject")
     lin_of = {s: run.lineages[meta.loc[s, "lineage"]] for s in wide.index}
@@ -200,9 +206,11 @@ def noise_line(noise: pd.DataFrame) -> str:
 
 
 def report_lines(run, idx, spec, ident, th, jargon, noise) -> list[str]:
+    base = idx[idx["subject"] == "base"]
     lines = [f"washout {run.name}: index 0 = base model, 1 = its answers under the context; specific = own-context "
              "index minus the mean of the other contexts, minus the same for the controls at that step and rule",
-             NO_ITEM_INTERVALS, noise_line(noise)]
+             f"selection: {base.loc[base['domain'] == DOMAINS_ALL, 'responses'].iloc[0]} probe items, contexts "
+             + ", ".join(sorted(idx["context"].unique())), NO_ITEM_INTERVALS, noise_line(noise)]
     bad = idx[(idx["subject"] == "base") & ~(idx["S_teacher"] > idx["S_base"])]
     if len(bad):
         lines.append("no index (the context does not make its instructed answers more likely than the plain ones): "

@@ -33,6 +33,7 @@ MEMBERS = [
     {"id": "st-c1", "seed": 6, "parent": {"member": "st", "step": 1}},
     {"id": "st-c2", "seed": 7, "parent": {"member": "st", "step": 1}},
     {"id": "ta-c1", "seed": 8, "parent": {"member": "ta", "step": 1}},
+    {"id": "st-si-c1", "seed": 9, "parent": {"member": "st-si", "step": 1}},  # a clone of a clone
 ]
 CONFIG = {"name": "ana", "strata": {"path": "strata.tsv", "sha256": "0" * 64},
           "seeding": {"steps": 2, "batch": 2, "max_tokens": 8, "lr": 3e-3},
@@ -42,7 +43,7 @@ CONFIG = {"name": "ana", "strata": {"path": "strata.tsv", "sha256": "0" * 64},
           "trainer": {"check_tokens": 4, "check_rollouts": 2}, "members": MEMBERS}
 TAG = "n40x4"
 EVAL_LABELS = ["base", "st@0", "st-si@0", "st@1", "st@2", "st-c1@2", "st-c2@2", "ta@2", "ta-c1@2", "pl@2", "un@2",
-               "st-si@2"]
+               "st-si@2", "st-si-c1@2"]
 
 
 def task(family, domain, kind, j, wrapper=None):
@@ -142,7 +143,8 @@ def test_washout_and_seeding(run_dir, tmp_path):
     teacher = idx[(idx["subject"] == "base:refute") & (idx["context"] == "refute") & ~undefined]
     assert len(teacher) and np.allclose(teacher["I"], 1)
     spec = pd.read_csv(tmp_path / "w" / "specific.csv")
-    assert {"st", "ta", "st-si", "st-c1", "st-c2", "ta-c1"} == set(spec["lineage"])  # seeded, not the controls
+    assert {"st", "ta", "st-si", "st-c1", "st-c2", "ta-c1", "st-si-c1"} == set(spec["lineage"])  # not the controls
+    assert not ((spec["lineage"] == "st-c1") & (spec["step"] == 1)).any()  # a clone's first probe is its parent's
     assert spec.loc[(spec["lineage"] == "st") & (spec["step"] == 0), "controls"].max() == 2  # pl@0 and un@0
     assert len(pd.read_csv(tmp_path / "w" / "noise.csv")) > 0  # from the twin st-si
     seeding.main([str(run_dir), "--out", str(tmp_path / "s")])
@@ -156,7 +158,7 @@ def test_divergence_finds_nothing_in_an_exact_null(run_dir, tmp_path):
     divergence.main([str(run_dir), "--tag", TAG, "--classifier-items", "40", "--out", str(tmp_path)])
     inter = pd.read_csv(tmp_path / "interaction.csv")
     row = inter[(inter["members"] == "all") & (inter["scope"] == "all") & (inter["estimator"] == "adjusted")].iloc[0]
-    assert row["m"] == 8  # the members at step 2
+    assert row["m"] == 9  # the members at step 2
     assert row["var_lo"] < 0 < row["var_hi"]
     null = pd.read_csv(tmp_path / "null.csv")
     assert set(null["adapter"]) == set(EVAL_LABELS) - {"st-si@0"} | {"mean"}
@@ -172,13 +174,19 @@ def test_heritability_families(run_dir, tmp_path):
     icc = pd.read_csv(tmp_path / "icc.csv")
     acc = icc[(icc["step"] == 2) & (icc["trait"] == "accuracy") & (icc["rule"] == "centered")].iloc[0]
     assert (acc["families"], acc["members"], acc["relabellings"]) == (2, 5, 10)  # {st, st-c1, st-c2}, {ta, ta-c1}
+    fams = pd.read_csv(tmp_path / "families.csv")
+    assert set(fams.loc[fams["step"] == 2, "family"]) == {"st/centered", "ta/centered", "pl/centered", "un/centered",
+                                                          "st/centered+si0.5"}
+    chain = fams.loc[(fams["step"] == 2) & (fams["family"] == "st/centered+si0.5"), "members"].item()
+    assert set(chain.split()) == {"st-si@2", "st-si-c1@2"}  # the chain st -> st-si -> st-si-c1 has the root st
     dist = pd.read_csv(tmp_path / "distance.csv")
     d = dist[(dist["step"] == 2) & (dist["estimator"] == "adjusted") & (dist["rule"] == "centered")].iloc[0]
     assert d["diff_lo"] < 0 < d["diff_hi"] or d["p_perm"] > 0.05
     pairs = pd.read_csv(tmp_path / "pairs.csv")
     clones = pairs[(pairs["step"] == 2) & pairs["clones"] & (pairs["estimator"] == "adjusted")]
     assert {frozenset(p) for p in zip(clones["a"], clones["b"])} == {
-        frozenset(p) for p in [("st@2", "st-c1@2"), ("st@2", "st-c2@2"), ("st-c1@2", "st-c2@2"), ("ta@2", "ta-c1@2")]}
+        frozenset(p) for p in [("st@2", "st-c1@2"), ("st@2", "st-c2@2"), ("st-c1@2", "st-c2@2"), ("ta@2", "ta-c1@2"),
+                               ("st-si@2", "st-si-c1@2")]}
 
 
 def test_a_changed_record_format_is_refused(run_dir, tmp_path):

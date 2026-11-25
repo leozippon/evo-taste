@@ -4,7 +4,7 @@
 Counted traits: `checks`, lines of explicit checking; for kind code, counts over the syntax tree of the program the
 verifier ran (`extracted`): `code_lines`, `loops`, `comprehensions`, `recursion`, `imports`, `helpers` (NaN when there
 is no parsable program). Response length (`tokens`) and the answer channel (`program`) are record fields
-(evotaste.analysis.data.FIELDS). Layout traits: `bold`, `headers`, `lists`, `line_words`, `latex`, `rules`.
+(evotaste.analysis.data.FIELDS). Layout traits: `bold`, `headers`, `lists`, `line_words`, `latex`, `hrules`.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ LATEX = re.compile(r"\\[A-Za-z]+|\\[()\[\]]|\$+")
 
 CODE_TRAITS = ("code_lines", "loops", "comprehensions", "recursion", "imports", "helpers")
 COUNTED = ("tokens", "program", "checks") + CODE_TRAITS
-LAYOUT = ("bold", "headers", "lists", "line_words", "latex", "rules")
+LAYOUT = ("bold", "headers", "lists", "line_words", "latex", "hrules")
 
 
 def _per(n: float, d: float, k: float = 100.0) -> float:
@@ -64,7 +64,7 @@ def layout_traits(text: str) -> dict[str, float]:
                                                                           len(lines), 1.0),
             "lists": _per(sum(bool(LIST.match(s)) for s in lines), len(lines), 1.0),
             "line_words": _per(len(WORD.findall(text)), len(lines), 1.0),
-            "latex": _per(len(LATEX.findall(text)), chars), "rules": float(sum(bool(RULE.match(s)) for s in lines))}
+            "latex": _per(len(LATEX.findall(text)), chars), "hrules": float(sum(bool(RULE.match(s)) for s in lines))}
 
 
 def response_traits(r: dict) -> dict[str, float]:
