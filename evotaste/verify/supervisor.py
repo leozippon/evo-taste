@@ -2,10 +2,11 @@
 
 Started by sandbox.py inside bwrap as `python -I -B /supervisor.py <request fd> <response fd> <python>`; standard
 library only. Messages are length-prefixed JSON. Per job: write the files read-only into the empty /tmp, start the
-interpreter with the job bootstrap (hard limits on address space, CPU, file size and task count), wait for it up to
-its wall-clock limit, then kill every other process in the namespace, reap them, and empty /tmp. The answer says
-whether the sandbox is still clean; the host discards it after a timeout, a death by signal, a process left behind, a
-failed reset or left-over System V IPC objects.
+interpreter with the job bootstrap (hard limits on address space, CPU, file size, task count and POSIX message queue
+bytes), wait for it up to its wall-clock limit, then kill every other process in the namespace, reap them, and empty
+/tmp. The answer gives the job's CPU time (all its processes, reaped) and, when the wall clock ran out, how long its
+main process had been waiting for a CPU, and says whether the sandbox is still clean; the host discards it after a
+timeout, a death by signal, a process left behind, a failed reset or left-over System V IPC objects.
 
 The supervisor is not dumpable, so jobs (same uid, no capabilities) cannot ptrace it or open its /proc entries, and it
 installs no signal handlers, so as the namespace's init it ignores every signal a job can send it.
@@ -14,6 +15,7 @@ installs no signal handlers, so as the namespace's init it ignores every signal 
 import ctypes
 import json
 import os
+import resource
 import shutil
 import signal
 import struct
@@ -26,7 +28,7 @@ BOOT = """\
 import resource, runpy, sys
 mb, cpu, fsize, tasks = map(int, sys.argv[1:5])
 for r, v in ((resource.RLIMIT_AS, mb << 20), (resource.RLIMIT_FSIZE, fsize), (resource.RLIMIT_NPROC, tasks),
-             (resource.RLIMIT_CORE, 0)):
+             (resource.RLIMIT_CORE, 0), (resource.RLIMIT_MSGQUEUE, 0)):
     resource.setrlimit(r, (v, v))
 resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu + 1))
 sys.argv = ["main.py"]
@@ -105,6 +107,20 @@ def no_ipc() -> bool:
     return True
 
 
+def cpu_seconds() -> float:
+    usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+    return usage.ru_utime + usage.ru_stime
+
+
+def waiting_seconds(pid: int) -> float | None:
+    """How long the process has waited on a run queue (from /proc/<pid>/schedstat), or None."""
+    try:
+        with open(f"/proc/{pid}/schedstat") as f:
+            return int(f.read().split()[1]) / 1e9
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 def memfd(name: str, data: bytes = b"") -> int:
     fd = os.memfd_create(name)
     os.write(fd, data)
@@ -128,6 +144,7 @@ def run(job: dict, python: str) -> dict:
         os.chmod(path, 0o444)
     fds = [memfd("stdin", job["stdin"].encode()), memfd("stdout"), memfd("stderr")]
     try:
+        cpu0, wait = cpu_seconds(), None
         t0 = time.monotonic()
         proc = subprocess.Popen([python, "-B", "-c", BOOT, str(job["memory_mb"]), str(job["cpu_s"]), str(job["fsize"]),
                                  str(job["tasks"])], cwd="/tmp", stdin=fds[0], stdout=fds[1], stderr=fds[2])
@@ -135,10 +152,11 @@ def run(job: dict, python: str) -> dict:
             returncode = proc.wait(timeout=job["timeout_s"])
             timed_out = False
         except subprocess.TimeoutExpired:
-            returncode, timed_out = None, True
+            returncode, timed_out, wait = None, True, waiting_seconds(proc.pid)
         seconds = time.monotonic() - t0
         left_behind = bool(others())
         reaped = kill_all()
+        cpu = cpu_seconds() - cpu0
         if returncode is not None and returncode < 0:
             returncode = 128 - returncode  # as bwrap reports a signal death
         stdout, stderr = read(fds[1]), read(fds[2])
@@ -147,7 +165,7 @@ def run(job: dict, python: str) -> dict:
             os.close(fd)
     clean = reset_tmp() and no_ipc() and reaped and not left_behind and not timed_out and (returncode or 0) < 128
     return {"returncode": returncode, "stdout": stdout, "stderr": stderr, "timed_out": timed_out, "seconds": seconds,
-            "clean": clean}
+            "cpu_s": cpu, "wait_s": wait, "clean": clean}
 
 
 def main() -> None:

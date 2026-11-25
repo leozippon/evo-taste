@@ -1,25 +1,35 @@
 """Mathematical equivalence of an open answer with its reference.
 
-A bare comma list ("1, 2": a list of solutions) or a parenthesised tuple ("(1, 2)") is split at its top-level commas
-and compared element by element: two bare lists in any order (a one-to-one matching), otherwise in order, so a bare
-list answers a tuple and the other way round; the lengths must agree. Everything else is parsed whole by
-math-verify's LaTeX parser (as the content of a box: no free-text extraction). Numbers, and tuples, sets, intervals
-and matrices of numbers, are compared here; anything with variables or relations is left to math-verify's symbolic
-comparison. math-verify's own numeric comparison is bypassed for numbers because it rounds to six decimal places in
-absolute terms (so 1e-7 equals 2e-7) and chops tiny exact values (so 2^-60 equals 2^-61).
+A reference may carry a type (TYPES). Typed "tuple" and "list" references are split into elements, whatever their
+brackets, and compared in order ("tuple") or by a one-to-one matching ("list"); the other types are compared whole.
+An untyped reference that is a bare comma list ("1, 2") or a parenthesised tuple ("(1, 2)") is split at its top-level
+commas and compared element by element: two bare lists in any order, otherwise in order, so a bare list answers a
+tuple and the other way round; the lengths must agree. (gold_check refuses untyped references whose list, tuple or
+interval reading is ambiguous: see `ambiguity`.)
+
+Whole contents are parsed by math-verify's LaTeX parser (as the content of a box: no free-text extraction), with its
+own wall-clock alarms off, so that a slow parse or comparison is bounded by the pool's deadline (undecided) and never
+silently "not equal". A program's output line that is a Python expression built only from numbers, arithmetic and
+sympy's printed names (pi, E, I, oo, sqrt, log, ...) is read as such instead, without eval. Numbers, and tuples, sets,
+intervals and matrices of numbers, are compared here; anything with variables or relations is left to math-verify's
+symbolic comparison. math-verify's numeric comparison is bypassed for numbers because it rounds to six decimal places
+in absolute terms (so 1e-7 equals 2e-7) and chops tiny exact values (so 2^-60 equals 2^-61).
 
 Numeric rules (|.| is the complex modulus, g the reference value, a the answer value):
 - reference with a decimal literal ("0.25", "3.2 \\times 10^{-19}"): |a - g| < half a unit in the last significant
   digit of the reference's least precise decimal literal, and |a - g| < 2e-2 |g| (so 4/3 answers 1.33);
 - exact reference, answer with a decimal: |a - g| <= 1e-6 |g|;
-- both exact: equal to 40 significant digits (60-digit evaluation);
+- both exact: exactly equal (rationals compared as such; otherwise a difference that sympy shows to be zero, by
+  evaluation, simplification or its minimal polynomial; anything undecided is not equal);
 - a zero reference against a decimal: |a| <= 1e-12.
 A percentage X% has the value X/100 and also matches X (math-verify's convention).
 """
 
 from __future__ import annotations
 
+import ast
 import functools
+import logging
 import re
 import warnings
 from dataclasses import dataclass
@@ -28,14 +38,16 @@ import sympy
 from math_verify import LatexExtractionConfig, parse, verify
 from sympy.core.relational import Relational
 
+TYPES = ("number", "expression", "tuple", "list", "interval")
 MAX_CHARS = 500  # longer contents are not taken for one answer
+MAX_EXPONENT = 10_000  # largest integer exponent in the Python reading of an output line
 DECIMAL_REL = sympy.Rational(2, 100)  # exact thresholds: a boundary case must not depend on binary rounding
 EXACT_DECIMAL_REL = sympy.Rational(1, 10 ** 6)
-EXACT_REL = sympy.Rational(1, 10 ** 40)
 ZERO_ABS = sympy.Rational(1, 10 ** 12)
 DIGITS = 60
 
 warnings.filterwarnings("ignore", module="math_verify")
+logging.getLogger("math_verify").setLevel(logging.ERROR)  # it warns once that its timeouts are off
 _CONFIG = [LatexExtractionConfig(boxed_match_priority=0)]
 _DELIMITERS = (("$$", "$$"), ("$", "$"), ("\\(", "\\)"), ("\\[", "\\]"), ("**", "**"), ("`", "`"))
 _DECIMAL = re.compile(r"(?<![\d.])(?:\d{1,3}(?:,\d{3})+|\d+)?\.\d+(?![\d.])")
@@ -44,7 +56,9 @@ _LONE_SCIENTIFIC = re.compile(r"([+-]?\d+)[eE]([+-]?\d+)")
 _COMMAND = re.compile(r"\\(?:text|textbf|textrm|mathrm|mathbf)\s*\{(.*)\}", re.S)
 _IMAGINARY = re.compile(r"(?<=\d)i\b")
 _THOUSANDS = re.compile(r"[+-]?\d{1,3}(?:,\d{3})+(?:\.\d+)?")
+_LOG = re.compile(r"\\log(?![_A-Za-z])")
 _OPEN, _CLOSE = "([{", ")]}"
+_X = sympy.Symbol("x")
 
 
 class GoldError(ValueError):
@@ -57,6 +71,17 @@ class Parsed:
     decimal: bool  # written with a decimal literal (a point, or e-notation)
     sig: int | None  # significant digits of the least precise decimal literal
 
+
+def reference(gold) -> tuple[str, str | None]:
+    """(text, type) of an open gold: a string, or {"answer": text, "type": one of TYPES}."""
+    if isinstance(gold, str):
+        return gold, None
+    if not isinstance(gold, dict) or not isinstance(gold.get("answer"), str) or gold.get("type") not in TYPES:
+        raise ValueError(f"an open gold is a string or {{'answer': str, 'type': one of {TYPES}}}: {gold!r}")
+    return gold["answer"], gold["type"]
+
+
+# -- reading a content ----------------------------------------------------------------------------------------------
 
 def _strip(s: str) -> str:
     """Surrounding math delimiters, markdown emphasis and backticks, a \\text-like command around the whole answer,
@@ -98,17 +123,64 @@ def _significant(mantissa: str) -> int:
     return len(mantissa.replace(",", "").replace(".", "").lstrip("+-").lstrip("0"))
 
 
-def parse_answer(s: str) -> Parsed | None:
-    """The content of a wrapper (or a program's output line) as one expression, or None if it does not parse."""
+_NAMES = {"pi": sympy.pi, "E": sympy.E, "I": sympy.I, "oo": sympy.oo}
+_FUNCTIONS = {"sqrt": sympy.sqrt, "cbrt": sympy.cbrt, "root": sympy.root, "exp": sympy.exp, "log": sympy.log,
+              "ln": sympy.log, "sin": sympy.sin, "cos": sympy.cos, "tan": sympy.tan, "asin": sympy.asin,
+              "acos": sympy.acos, "atan": sympy.atan, "Abs": sympy.Abs, "abs": sympy.Abs,
+              "factorial": sympy.factorial, "binomial": sympy.binomial, "Rational": sympy.Rational,
+              "Integer": sympy.Integer}
+_OPERATORS = {ast.Add: lambda x, y: x + y, ast.Sub: lambda x, y: x - y, ast.Mult: lambda x, y: x * y,
+              ast.Div: lambda x, y: x / y, ast.Pow: lambda x, y: x ** y}
+
+
+class _NotPython(Exception):
+    pass
+
+
+def _python(node, src: str):
+    """A sympy value for a whitelisted Python expression tree, built without eval."""
+    if isinstance(node, ast.Constant) and type(node.value) in (int, float):
+        return sympy.Integer(node.value) if type(node.value) is int else \
+            sympy.Rational(ast.get_source_segment(src, node) or repr(node.value))
+    if isinstance(node, ast.Name) and node.id in _NAMES:
+        return _NAMES[node.id]
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        value = _python(node.operand, src)
+        return -value if isinstance(node.op, ast.USub) else value
+    if isinstance(node, ast.BinOp) and type(node.op) in _OPERATORS:
+        left, right = _python(node.left, src), _python(node.right, src)
+        if isinstance(node.op, ast.Pow) and not (right.is_Number and abs(right) <= MAX_EXPONENT):
+            raise _NotPython
+        return _OPERATORS[type(node.op)](left, right)
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _FUNCTIONS
+            and not node.keywords):
+        return _FUNCTIONS[node.func.id](*(_python(a, src) for a in node.args))
+    raise _NotPython
+
+
+def _python_reading(s: str):
+    try:
+        return _python(ast.parse(s, mode="eval").body, s)
+    except (SyntaxError, ValueError, TypeError, ZeroDivisionError, _NotPython):
+        return None
+
+
+def parse_answer(s: str, program: bool = False) -> Parsed | None:
+    """A content (or, with `program`, a program's output line) as one expression, or None if it does not parse."""
     s = _strip(s)
     if not s or len(s) > MAX_CHARS:
         return None
-    found = parse(f"\\boxed{{{_latex(s)}}}", extraction_config=_CONFIG, fallback_mode="no_fallback",
-                  extraction_mode="first_match", parsing_timeout=5)
-    exprs = [e for e in found if isinstance(e, (sympy.Basic, sympy.MatrixBase))]
-    if not exprs:
-        return None
-    expr = exprs[0]
+    expr = _python_reading(s) if program else None
+    if expr is None:
+        found = parse(f"\\boxed{{{_latex(s)}}}", extraction_config=_CONFIG, fallback_mode="no_fallback",
+                      extraction_mode="first_match", parsing_timeout=None)
+        exprs = [e for e in found if isinstance(e, (sympy.Basic, sympy.MatrixBase))]
+        if not exprs:
+            return None
+        expr = exprs[0]
+        imaginary = {x: sympy.I for x in expr.free_symbols if isinstance(x, sympy.Symbol) and x.name == "i"}
+        if imaginary:  # math-verify leaves i a symbol, so that (1+i)^2 would not equal 2i
+            expr = expr.xreplace(imaginary)
     floats = expr.atoms(sympy.Float)
     if floats:  # the parser's binary floats back to the decimals they were read from (15 significant digits)
         expr = expr.xreplace({f: sympy.Rational(str(f)) for f in floats})
@@ -124,6 +196,8 @@ def parse_gold(gold: str) -> Parsed:
         raise GoldError(f"reference does not parse: {gold!r}")
     return parsed
 
+
+# -- comparing values -----------------------------------------------------------------------------------------------
 
 def _is_number(x) -> bool:
     return isinstance(x, sympy.Expr) and not x.free_symbols and bool(x.is_number)
@@ -147,9 +221,29 @@ def _exponent(x) -> int:
     return e
 
 
+def exact_equal(g, a) -> bool:
+    """Two exact numbers are equal: as rationals, or by a difference that sympy shows to be zero (its own
+    evaluation, simplification, or for algebraic numbers the minimal polynomial). Undecided means not equal."""
+    if g.is_Rational and a.is_Rational:
+        return bool(g == a)
+    d = g - a
+    if d == 0:
+        return True
+    if d.is_zero is not None:
+        return bool(d.is_zero)
+    if sympy.simplify(d) == 0:
+        return True
+    try:
+        return sympy.minimal_polynomial(d, _X) == _X
+    except Exception:  # noqa: BLE001 - not algebraic, or not decidable by sympy
+        return False
+
+
 def _close(g, a, gold: Parsed, gold_decimal: bool, answer_decimal: bool) -> bool:
     if g == a:
         return True
+    if not (gold_decimal or answer_decimal):
+        return exact_equal(g, a)
     if g.is_Rational and a.is_Rational:  # decimals are rationals here: compare exactly
         gv, av = g, a
     else:
@@ -157,16 +251,14 @@ def _close(g, a, gold: Parsed, gold_decimal: bool, answer_decimal: bool) -> bool
     if not (gv.is_finite and av.is_finite):
         return False
     diff, scale = abs(gv - av), abs(gv)
-    if gold_decimal or answer_decimal:
-        if scale == 0:
-            return bool(abs(av) <= ZERO_ABS)
-        if gold_decimal:
-            tol = DECIMAL_REL * scale
-            if gold.sig:
-                tol = min(tol, sympy.Rational(1, 2) * sympy.Integer(10) ** (_exponent(scale) - gold.sig + 1))
-            return bool(diff < tol)
-        return bool(diff <= EXACT_DECIMAL_REL * scale)
-    return bool(diff <= EXACT_REL * max(scale, abs(av)))
+    if scale == 0:
+        return bool(abs(av) <= ZERO_ABS)
+    if gold_decimal:
+        tol = DECIMAL_REL * scale
+        if gold.sig:
+            tol = min(tol, sympy.Rational(1, 2) * sympy.Integer(10) ** (_exponent(scale) - gold.sig + 1))
+        return bool(diff < tol)
+    return bool(diff <= EXACT_DECIMAL_REL * scale)
 
 
 def _numbers(x) -> bool:
@@ -219,6 +311,21 @@ def _unwrap(g, a):
     return g, a
 
 
+def _whole(answer: str, gold: str, program: bool) -> bool:
+    ref = parse_gold(gold)
+    got = parse_answer(answer, program)
+    if got is None:
+        return False
+    g, a = _unwrap(ref.expr, got.expr)
+    if _numbers(g) and _numbers(a):
+        return _same(g, a, ref, ref.decimal, got.decimal)
+    if _numbers(g) or _numbers(a):  # a number against something with variables
+        return False
+    return bool(verify(g, a, timeout_seconds=None))
+
+
+# -- lists and tuples -----------------------------------------------------------------------------------------------
+
 def _top_level(s: str) -> list[str]:
     """s split at the commas outside all brackets and braces."""
     items, depth, start = [], 0, 0
@@ -240,48 +347,84 @@ def _closes_at_end(s: str) -> bool:
     return False
 
 
-def as_list(s: str) -> tuple[str, list[str]] | None:
-    """("bare", items) for a comma list of two or more items, ("paren", items) for one in parentheses, else None. A
-    number with thousands separators (1,000 or 1,\\!000) is no list, and neither is an interval with a bracket."""
+def _plain(s: str) -> str:
     s = re.sub(r"\\(?:left|right)(?![A-Za-z])", "", _strip(s))
-    s = re.sub(r"(?<=\d),\\!(?=\d{3})", "", s)
+    return re.sub(r"(?<=\d),\\!(?=\d{3})", "", s)
+
+
+def as_list(s: str, program: bool = False) -> tuple[str, list[str]] | None:
+    """("bare", items) for a comma list of two or more items, ("paren", items) for one in parentheses, else None. A
+    number with thousands separators (1,000 or 1,\\!000) is no list, and neither is an interval with a bracket; a
+    program's printed Python list ([1, 2]) is a bare list."""
+    s = _plain(s)
     if _THOUSANDS.fullmatch(s):
         return None
     form = "bare"
     if s.startswith("(") and s.endswith(")") and _closes_at_end(s):
         form, s = "paren", s[1:-1]
+    elif program and s.startswith("[") and s.endswith("]") and _closes_at_end(s):
+        s = s[1:-1]
     items = _top_level(s)
     return (form, items) if len(items) >= 2 and all(items) else None
 
 
-def _matched(answers: list[str], golds: list[str]) -> bool:
+def _elements(s: str, sets: bool) -> list[str] | None:
+    """The elements of a typed tuple or list, written bare or in (), [] (or, for a list, \\{ \\})."""
+    s = _plain(s)
+    for a, b in (("(", ")"), ("[", "]")) + ((("\\{", "\\}"),) if sets else ()):
+        if s.startswith(a) and s.endswith(b) and _closes_at_end(s[len(a) - 1:]):
+            s = s[len(a):-len(b)]
+            break
+    items = _top_level(s)
+    return items if all(items) else None
+
+
+def _matched(answers: list[str], golds: list[str], program: bool) -> bool:
     """A one-to-one matching of equivalent elements (greedy)."""
     rest = list(answers)
     for g in golds:
-        hit = next((i for i, a in enumerate(rest) if equivalent(a, g)), None)
+        hit = next((i for i, a in enumerate(rest) if equivalent(a, g, program=program)), None)
         if hit is None:
             return False
         rest.pop(hit)
     return not rest
 
 
-def equivalent(answer: str, gold: str) -> bool:
-    """Whether the answer content equals the reference. Raises GoldError if the reference does not parse."""
-    ref_list, got_list = as_list(gold), as_list(answer)
-    if ref_list and got_list:
-        (ref_form, refs), (got_form, gots) = ref_list, got_list
-        if len(refs) != len(gots):
+def equivalent(answer: str, gold: str, kind: str | None = None, program: bool = False) -> bool:
+    """Whether the answer content equals the reference text, of type `kind` (None: untyped). `program`: the answer
+    is a program's output line. Raises GoldError if the reference does not parse."""
+    if kind in ("tuple", "list"):
+        refs, gots = _elements(gold, kind == "list"), _elements(answer, kind == "list")
+        if refs is None or gots is None or len(refs) != len(gots):
             return False
-        if ref_form == got_form == "bare":
-            return _matched(gots, refs)
-        return all(equivalent(a, g) for a, g in zip(gots, refs))
-    ref = parse_gold(gold)
-    got = parse_answer(answer)
-    if got is None:
-        return False
-    g, a = _unwrap(ref.expr, got.expr)
-    if _numbers(g) and _numbers(a):
-        return _same(g, a, ref, ref.decimal, got.decimal)
-    if _numbers(g) or _numbers(a):  # a number against something with variables
-        return False
-    return bool(verify(g, a, timeout_seconds=5))
+        if kind == "list":
+            return _matched(gots, refs, program)
+        return all(equivalent(a, g, program=program) for a, g in zip(gots, refs))
+    if kind is None:
+        ref_list, got_list = as_list(gold), as_list(answer, program)
+        if ref_list and got_list:
+            (ref_form, refs), (got_form, gots) = ref_list, got_list
+            if len(refs) != len(gots):
+                return False
+            if ref_form == got_form == "bare":
+                return _matched(gots, refs, program)
+            return all(equivalent(a, g, program=program) for a, g in zip(gots, refs))
+    return _whole(answer, gold, program)
+
+
+def ambiguity(gold: str, kind: str | None) -> str | None:
+    """Why the reference cannot be verified as intended, if detectably so: an untyped list, tuple or closed-interval
+    reading, or a logarithm without a base whose two readings (natural, decimal) differ."""
+    if kind is None:
+        s = _plain(gold)
+        bracketed = s.startswith("[") and s.endswith("]") and _closes_at_end(s) and len(_top_level(s[1:-1])) > 1
+        if as_list(gold) or bracketed:
+            return "ambiguous: a list, tuple or interval reference needs a type (tuple, list or interval)"
+    if _LOG.search(gold):
+        natural, decimal = _LOG.sub(r"\\ln", gold), _LOG.sub(r"\\log_{10}", gold)
+        try:
+            if not equivalent(natural, decimal, kind) or not equivalent(decimal, natural, kind):
+                return "ambiguous: a logarithm without a base reads differently as natural and decimal"
+        except GoldError:
+            return "ambiguous: a logarithm without a base does not parse in both readings"
+    return None

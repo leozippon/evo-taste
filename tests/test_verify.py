@@ -5,8 +5,8 @@ import time
 
 import pytest
 
-from evotaste.verify import (HELDOUT_WRAPPERS, TRAIN_WRAPPERS, WRAPPERS, Job, Verdict, gold_check, gold_ok,
-                             verify_many)
+from evotaste.verify import (HELDOUT_WRAPPERS, RULES_VERSION, TRAIN_WRAPPERS, WRAPPERS, Job, Verdict, gold_check,
+                             gold_ok, is_undecided, verify_many)
 from evotaste.verify.equivalence import equivalent
 from evotaste.verify import judge as judge_module
 from evotaste.verify.judge import judge, resolve_choice, resolve_label
@@ -38,6 +38,12 @@ def open_job(text, gold, wrapper="box", channels=("direct",)):
     ("1, 2", "2, 1"), ("1, 2", "1,2"), ("(1, 2)", "1, 2"), ("1, 2", "(1, 2)"), ("(1, 2)", "\\left( 1, 2 \\right)"),
     ("-1, \\frac{1}{2}, 3", "3, -1, 0.5"), ("(0.5, 3)", "(\\frac{1}{2}, 3)"), ("1, 1, 2", "1, 2, 1"),
     ("1,000", "1000"), ("10,\\!000", "10000"),
+    # exact values written differently
+    ("\\frac{1}{\\sqrt{2}}", "\\frac{\\sqrt{2}}{2}"), ("\\sqrt{5+2\\sqrt{6}}", "\\sqrt{2}+\\sqrt{3}"),
+    ("1024", "2^{10}"), ("120", "5!"), ("10", "\\binom{5}{2}"), ("3", "\\log_2 8"),
+    ("\\frac{\\pi}{2}", "\\frac{2\\pi}{4}"), ("2", "\\sqrt[3]{8}"),
+    ("3+2\\sqrt{2}", "(1+\\sqrt{2})^2"), ("4^{1006}", "2^{2012}"), ("100\\cdot 99!", "100!"), ("2i", "(1+i)^2"),
+    ("\\frac{2012\\cdot 2011}{2}", "\\binom{2012}{2}"), ("\\sqrt{2}-1", "\\frac{1}{1+\\sqrt{2}}"), ("9", "e^{2\\ln 3}"),
 ])
 def test_equal_values_in_other_notation_are_accepted(gold, answer):
     assert equivalent(answer, gold)
@@ -49,6 +55,12 @@ def test_equal_values_in_other_notation_are_accepted(gold, answer):
     ("3.14", "3.15"), ("3.14", "3.145"), ("3.14", "3.1"), ("0.0333", "0.0334"), ("1234.5", "1234.55"),
     ("1.33", "1.34"), ("0.9", "0.94"), ("0.9", "0.86"),  # the last stated digit; the 2% cap
     ("\\frac{1}{3}", "0.333"), ("\\pi", "3.14"), ("\\frac{\\sqrt{2}}{2}", "0.7071"),
+    # huge or tiny exact values that differ (audit D1, census false credits)
+    ("2^{2012}", "2^{2012}-1"), ("100!", "100!+1"), ("\\frac{2^{2012}+1}{3}", "\\frac{2^{2012}-1}{3}"),
+    ("1+\\frac{1}{2^{2020}}", "1"), ("2^{2014}", "2^{2014} - 1"), ("(2^{2003}-2)/3", "\\frac{2^{2003}+1}{3}"),
+    ("4^{2017}-2 \\cdot 3^{2017}+2^{2017}", "2^{4034} - 2\\cdot 3^{2017}"),
+    ("1-(1/2)^{2016}", "1 + \\frac{\\ln 2}{1-\\ln 2}2^{-2016}"),
+    ("\\sqrt{2}\\cdot 2^{2012}", "\\sqrt{2}\\cdot 2^{2012}+1"),
     # tiny values: math-verify's own comparison accepts all of these
     ("0.0000001", "0.0000002"), ("3.2\\times 10^{-19}", "1.6\\times 10^{-19}"), ("3.2e-19", "1.6e-19"),
     ("10^{-20}", "2\\cdot 10^{-20}"), ("2^{-60}", "2^{-61}"), ("\\frac{1}{10^{20}}", "\\frac{2}{10^{20}}"),
@@ -160,16 +172,33 @@ def test_program_must_print_the_answer_on_its_last_line():
     ("print(7)\nraise SystemExit(1)", "program exit 1"),
     ("print(7)\n1/0", "program exit 1"),
     ("x = 7", "program printed nothing"),
-    ("import time\nprint(7, flush=True)\ntime.sleep(30)", "program timeout"),
+    ("print(7, flush=True)\nwhile True:\n    pass", "program timeout"),  # the CPU limit decides
     ("import os\nprint(7, flush=True)\nwhile True:\n    try:\n        os.fork()\n    except OSError:\n        pass",
-     "program "),
+     "program timeout"),
+    ("import time\nprint(7, flush=True)\ntime.sleep(30)", "undecided: the wall clock ran out while the program slept"),
 ])
 def test_failing_hanging_or_forking_programs_are_incorrect(program, error, monkeypatch):
-    monkeypatch.setattr(judge_module, "PROGRAM_TIMEOUT_S", 1)  # 1 s of CPU, 5 s of wall clock
+    monkeypatch.setattr(judge_module, "PROGRAM_TIMEOUT_S", 0.25)  # 1 s of CPU, 5 s of wall clock
     t0 = time.monotonic()
     v = open_job(f"```python\n{program}\n```", "7", channels=BOTH)
     assert (v.reward, v.correct_any, v.channel) == (0.0, False, "program")
-    assert v.error.startswith(error) and time.monotonic() - t0 < WALL_FACTOR * 1 + EXIT_S + 3
+    assert v.error.startswith(error) and time.monotonic() - t0 < WALL_FACTOR * 0.25 + EXIT_S + 5
+    assert is_undecided(v.error) == error.startswith("undecided")
+
+
+@pytest.mark.parametrize("output,gold", [("pi/4", "\\frac{\\pi}{4}"), ("3*pi", "3\\pi"), ("E", "e"), ("exp(1)", "e"),
+                                         ("2 + 3*I", "2+3i"), ("oo", "\\infty"), ("sqrt(2)/2", "\\frac{\\sqrt2}{2}"),
+                                         ("1/3", "\\frac{1}{3}"), ("log(2)", "\\ln 2"), ("[-1, 3]", "3, -1"),
+                                         ("0.3333333333333333", "\\frac13"), ("x**2 + 1", "x^2+1")])
+def test_a_printed_python_or_sympy_value_is_read_as_such(output, gold):
+    v = open_job(f"```python\nprint({output!r})\n```", gold, channels=BOTH)
+    assert (v.reward, v.channel, v.extracted) == (1.0, "program", output)
+
+
+@pytest.mark.parametrize("output", ["The answer is 4.", "Louise needs to bake 4 more cakes.", "4 cakes",
+                                    "__import__('os').system('true')", "(4).real", "[4][0]", "2**2**2**2**2"])
+def test_a_sentence_or_code_printed_by_a_program_is_not_an_answer(output):
+    assert open_job(f"```python\nprint({output!r})\n```", "4", channels=BOTH).reward == 0.0
 
 
 # -- choice and verdict ---------------------------------------------------------------------------------------------
@@ -178,15 +207,24 @@ OPTIONS = ["12", "15", "the empty set", "43"]
 
 
 @pytest.mark.parametrize("content", ["B", "(B)", "[B]", "B.", "B)", "B:", "Option B", "option (B)", "\\text{B}",
-                                     "\\textbf{(B)}", "**B**", "$B$", "B. 15", "(B) 15", "B: 15", "15", " B "])
+                                     "\\textbf{(B)}", "**B**", "$B$", "B. 15", "(B) 15", "B: 15", "15", " B ",
+                                     # the letter decides, whatever the style of the text after it
+                                     "B. \\frac{30}{2}", "B) fifteen", "(B) $15$", "Option B: 15.0"])
 def test_choice_letter_dressings_and_exact_text_resolve(content):
     assert resolve_choice(content, OPTIONS) == 1
 
 
 @pytest.mark.parametrize("content", ["B or C", "B, C", "B and C", "b", "E", "B. 43", "B 12", "Option", "1",
-                                     "15 or 12", "The answer is B", "the empty", ""])
+                                     "15 or 12", "The answer is B", "the empty", "", "(B), (C)", "B. or C",
+                                     "(B) (C)", "B. 15, C", "B: the empty set"])
 def test_choice_answers_naming_no_single_option_are_rejected(content):
     assert resolve_choice(content, OPTIONS) is None
+
+
+def test_choice_audit_cases():
+    assert resolve_choice("B. \\frac{2}{5}", ["1/2", "2/5", "3/5"]) == 1
+    assert resolve_choice("C. 7.2\\%", ["5%", "6%", "7.2%"]) == 2
+    assert resolve_choice("D. 180 \\text{ Kcal}", ["90 Kcal", "120 Kcal", "150 Kcal", "180 Kcal"]) == 3
 
 
 def test_choice_text_shared_by_two_options_names_none():
@@ -248,10 +286,27 @@ def test_programs_that_exit_skip_or_tamper_never_pass(cheat, gold):
     assert code_job(cheat, gold).reward == 0.0
 
 
-def test_slow_program_fails_at_the_item_time_limit():
+def test_slow_program_fails_at_the_item_cpu_limit_and_a_sleeping_one_is_undecided():
     t0 = time.monotonic()
-    v = code_job("import time\ntime.sleep(30)\n" + REF, {**ASSERT, "time_limit_s": 1})
-    assert (v.reward, v.error) == (0.0, "timeout") and time.monotonic() - t0 < WALL_FACTOR * 1 + EXIT_S + 3
+    v = code_job("while True:\n    pass\n" + REF, {**ASSERT, "time_limit_s": 1})
+    assert (v.reward, v.error) == (0.0, "timeout") and time.monotonic() - t0 < WALL_FACTOR * 1 + EXIT_S
+    v = code_job("import time\ntime.sleep(30)\n" + REF, {**ASSERT, "time_limit_s": 0.25})
+    assert v.reward == 0.0 and is_undecided(v.error)
+
+
+@pytest.mark.parametrize("gold", [PYTEST, ASSERT, CHECK])
+def test_a_solution_followed_by_an_example_block_is_judged_on_both(gold):
+    example = "print(add(2, 3))  # Output: 5"
+    v = judge(Job("code", f"```python\n{REF}```\nExample:\n```python\n{example}\n```", gold, "code"))
+    assert v.reward == 1.0 and v.extracted == f"{REF}\n\n{example}\n"
+    wrong_last = "def add(a, b):\n    return a - b\n"  # a last block that defines the tested name decides alone
+    v = judge(Job("code", f"```python\n{REF}```\n```python\n{wrong_last}```", gold, "code"))
+    assert v.reward == 0.0 and v.extracted == wrong_last
+
+
+def test_an_unclosed_last_python_block_is_no_answer():
+    v = judge(Job("code", f"```python\n{REF}```\nNow faster:\n```python\ndef add(a, b):\n", CHECK, "code"))
+    assert (v.reward, v.complied, v.correct_any) == (0.0, False, False)
 
 
 def test_a_prelude_is_part_of_the_solution_file_but_not_of_the_model_code():
@@ -292,7 +347,8 @@ def test_a_job_stuck_in_c_code_is_killed_at_its_deadline():
         t0 = time.monotonic()
         out = pool.run([Job("open", "\\boxed{10^{10^{10}}}", "1", "box"), Job("open", "\\boxed{1}", "1", "box")],
                        timeout=3)
-        assert out[0] == Verdict(0.0, False, False, None, None, "timeout") and out[1].reward == 1.0
+        assert out[0] == Verdict(0.0, False, False, None, None, "undecided: verifier deadline")
+        assert out[1].reward == 1.0 and is_undecided(out[0].error)
         assert time.monotonic() - t0 < 8
         assert pool.run([Job("open", "\\boxed{2}", "2", "box")])[0].reward == 1.0  # the replacement works
     finally:
@@ -317,3 +373,59 @@ def test_gold_check():
     assert gold_ok("open", "18") and not gold_ok("open", "")
     with pytest.raises(ValueError):
         gold_check([("choice", {"options": OPTIONS, "answer": "E"})])
+
+
+@pytest.mark.parametrize("gold,reason", [
+    ("1, 2", "needs a type"), ("(1, 2)", "needs a type"), ("[0.333, 0.25]", "needs a type"),
+    ("\\log 100", "logarithm"), ("2\\log x", "logarithm"),
+])
+def test_gold_check_refuses_ambiguous_references(gold, reason):
+    assert reason in gold_check([("open", gold)])[0]
+
+
+@pytest.mark.parametrize("gold", ["[0, 1)", "(-\\infty, 2]", "\\{1, 2\\}", "\\log 1", "\\log_2 8", "\\ln 2",
+                                  {"answer": "1, 2", "type": "list"}, {"answer": "(1, 2)", "type": "interval"},
+                                  {"answer": "[0.333, 0.25]", "type": "tuple"}, {"answer": "7", "type": "number"}])
+def test_gold_check_accepts_unambiguous_and_typed_references(gold):
+    assert gold_ok("open", gold)
+
+
+def test_gold_check_refuses_a_repeated_correct_option_but_not_another_repeat():
+    assert "ambiguous" in gold_check([("choice", {"options": ["5", "5 ", "6"], "answer": "A"})])[0]
+    assert gold_ok("choice", {"options": ["5", "5", "6"], "answer": "C"})
+
+
+@pytest.mark.parametrize("answer,gold,ok", [
+    ("0.25, 0.333", {"answer": "[0.333, 0.25]", "type": "tuple"}, False),
+    ("[0.333, 0.25]", {"answer": "[0.333, 0.25]", "type": "tuple"}, True),
+    ("(0.333, 0.25)", {"answer": "[0.333, 0.25]", "type": "tuple"}, True),
+    ("0.25, 0.333", {"answer": "[0.333, 0.25]", "type": "list"}, True),
+    ("\\{0.25, 0.333\\}", {"answer": "0.333, 0.25", "type": "list"}, True),
+    ("0.333", {"answer": "[0.333, 0.25]", "type": "list"}, False),
+    ("1, 2", {"answer": "(1, 2)", "type": "interval"}, False),
+    ("(1, 2)", {"answer": "(1, 2)", "type": "interval"}, True),
+    ("[1, 2]", {"answer": "(1, 2)", "type": "interval"}, False),
+    ("-1, 2, 5", {"answer": "-1, 2, 5", "type": "tuple"}, True),  # "from least to greatest"
+    ("5, 2, -1", {"answer": "-1, 2, 5", "type": "tuple"}, False),
+    ("1, 2", {"answer": "1", "type": "number"}, False),
+])
+def test_typed_references(answer, gold, ok):
+    assert open_job(f"\\boxed{{{answer}}}", gold).reward == float(ok)
+
+
+def test_an_unclosed_last_marker_does_not_fall_back():
+    # an unclosed last box: neither the program nor the earlier box answers
+    v = open_job("\\boxed{8}\n```python\nprint(7)\n```\nso \\boxed{7", "7", channels=BOTH)
+    assert (v.reward, v.complied, v.correct_any) == (0.0, False, False)
+    v = open_job("<answer>7</answer> then <answer>8", "7", wrapper="answer_tag")
+    assert (v.reward, v.complied) == (0.0, False)
+    v = open_job("@@7@@ then @@8", "7", wrapper="at")
+    assert (v.reward, v.complied) == (0.0, False)
+    v = open_job("```answer\n7\n```\n```answer\n8\n", "7", wrapper="fence")
+    assert (v.reward, v.complied) == (0.0, False)
+    v = open_job("```python\nprint(7)\n```\n```python\nprint(8)\n", "7", channels=("program",))
+    assert (v.reward, v.complied) == (0.0, False)
+
+
+def test_rules_version_is_exposed():
+    assert isinstance(RULES_VERSION, str) and RULES_VERSION

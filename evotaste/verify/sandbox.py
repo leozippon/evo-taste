@@ -40,13 +40,19 @@ from evotaste.verify import supervisor
 TMPFS_BYTES = 64 << 20  # size of the writable /tmp
 FILE_BYTES = 8 << 20  # largest file a job may write, stdout and stderr included (RLIMIT_FSIZE)
 TASKS = 32  # processes plus threads of a job, the supervisor included (RLIMIT_NPROC, counted per user namespace)
-# A job's time limit is CPU time, which does not depend on the machine's load; the wall clock, which stops programs
-# that sleep or block, allows WALL_FACTOR times as much. (This account's processes share a quota of 32 CPUs that other
-# jobs saturate at times, when a busy process gets a fifth of a CPU.)
-WALL_FACTOR = 5
+# Only a job's CPU-time limit decides a timeout: CPU time does not depend on the machine's load (this account's
+# processes share a quota of 32 CPUs that other jobs saturate at times, when a busy process gets a fifth of a CPU or
+# less). The wall clock, WALL_FACTOR times as long, stops programs that sleep or block; a job it stops is undecided.
+# If the job was mostly waiting for a CPU (starved) it is run again in a fresh sandbox, up to ATTEMPTS times.
+WALL_FACTOR = 20
+ATTEMPTS = 3
+STARVED = 0.25  # starved: waited on a run queue for at least this share of its wall-clock time
 SETUP_LIMIT_S = 60  # longest wait for a new sandbox to be ready
 EXIT_S = 5  # allowed after a job's wall-clock limit for the supervisor's reset and answer
-OVERHEAD_S = SETUP_LIMIT_S + EXIT_S  # worst-case wall-clock time of a job beyond its own wall-clock limit
+UNDECIDED = "undecided:"  # opens the stderr of a result that decides nothing about the program
+# Called with the longest wall-clock time a sandbox run may take, before it, and with None after it (the verifier pool
+# keeps its own deadline for the time outside sandbox runs).
+PROGRESS = None
 _NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*")
 _MAIN = "main.py"
 _SUPERVISOR = "/supervisor.py"
@@ -58,11 +64,13 @@ _ENV = {"HOME": "/tmp", "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "PYTHONUTF8"
 
 @dataclass(frozen=True)
 class Result:
-    returncode: int | None  # None when killed at a time limit; 128 + N when the program died of signal N
+    returncode: int | None  # None when stopped by the wall clock; 128 + N when the program died of signal N
     stdout: str
     stderr: str
     timed_out: bool  # the job ran past its wall-clock limit, or the sandbox did not answer
     seconds: float  # wall-clock time of the job, from the start of its interpreter
+    cpu_s: float = 0.0  # CPU time of all the job's processes
+    undecided: bool = False  # nothing is known about the program (stderr says why, starting with UNDECIDED)
 
     @property
     def ok(self) -> bool:
@@ -158,7 +166,7 @@ class Sandbox:
         """The supervisor's answer for a job just sent; raises SandboxError if it does not answer within the job's
         limit plus EXIT_S, or answers irregularly."""
         answer = self._receive(time.monotonic() + job["timeout_s"] + EXIT_S)
-        if set(answer) != {"returncode", "stdout", "stderr", "timed_out", "seconds", "clean"}:
+        if set(answer) != {"returncode", "stdout", "stderr", "timed_out", "seconds", "cpu_s", "wait_s", "clean"}:
             raise SandboxError("sandbox: malformed answer")
         return answer
 
@@ -172,19 +180,10 @@ def _discard() -> None:
         box.close()
 
 
-def run_python(code: str, *, stdin: str | None = None, files: dict[str, str] | None = None, timeout_s: float,
-               memory_mb: int) -> Result:
-    """Run `code` as /tmp/main.py with the project's interpreter in this thread's sandbox. `files` are placed next to
-    it (plain file names, read-only); `stdin` is the program's standard input (empty when None). Each process may use
-    ceil(`timeout_s`) seconds of CPU time (then SIGXCPU, exit status 128 + 24) and `memory_mb` MiB of address space;
-    the job is killed, with everything it started, WALL_FACTOR * `timeout_s` seconds after its interpreter started
-    (`timed_out`). A sandbox that cannot run the job gives a timed-out result with the reason on stderr: never a
-    verdict on the program."""
-    files = dict(files or {})
-    if _MAIN in files or any(not _NAME.fullmatch(n) for n in files):
-        raise ValueError(f"sandbox file names must be plain names other than {_MAIN}: {sorted(files)}")
-    job = {"code": code, "files": files, "stdin": stdin or "", "timeout_s": WALL_FACTOR * timeout_s,
-           "memory_mb": memory_mb, "cpu_s": math.ceil(timeout_s), "fsize": FILE_BYTES, "tasks": TASKS}
+def _attempt(job: dict) -> dict:
+    """One run of the job in this thread's sandbox (a new one if needed); raises SandboxError when the sandbox cannot
+    run it or does not answer properly, after discarding it. A sandbox that went away between jobs is replaced and
+    the job sent again (it never started)."""
     for _ in range(2):
         box = getattr(_local, "sandbox", None)
         try:
@@ -192,23 +191,61 @@ def run_python(code: str, *, stdin: str | None = None, files: dict[str, str] | N
                 _discard()
                 box = _local.sandbox = Sandbox()
             supervisor.send(box.requests, job)
-        except OSError:  # the sandbox went away between jobs: the job never started, so a fresh one may run it
+        except OSError:
             _discard()
             continue
-        except SandboxError as e:
+        except SandboxError:
             _discard()
-            return Result(None, "", str(e), True, 0.0)
+            raise
         break
     else:
-        return Result(None, "", "sandbox: could not send the job", True, 0.0)
+        raise SandboxError("sandbox: could not send the job")
     try:
         answer = box.answer(job)
-    except (SandboxError, OSError, ValueError) as e:  # no verdict on the program: never credit it
+    except (SandboxError, OSError, ValueError) as e:
         _discard()
-        return Result(None, "", str(e), True, 0.0)
+        raise SandboxError(str(e)) from e
     except BaseException:  # e.g. an alarm while waiting: the job's state is unknown, so the sandbox goes
         _discard()
         raise
     if not answer["clean"]:
         _discard()
-    return Result(answer["returncode"], answer["stdout"], answer["stderr"], answer["timed_out"], answer["seconds"])
+    return answer
+
+
+def run_python(code: str, *, stdin: str | None = None, files: dict[str, str] | None = None, timeout_s: float,
+               memory_mb: int) -> Result:
+    """Run `code` as /tmp/main.py with the project's interpreter in this thread's sandbox. `files` are placed next to
+    it (plain file names, read-only); `stdin` is the program's standard input (empty when None). Each process may use
+    ceil(`timeout_s`) seconds of CPU time (then SIGXCPU, exit status 128 + 24) and `memory_mb` MiB of address space.
+    The wall clock stops the job, with everything it started, WALL_FACTOR * `timeout_s` seconds after its interpreter
+    started; such a run decides nothing. A starved run is repeated (ATTEMPTS in all); a run that slept or blocked, or
+    runs that stayed starved or a sandbox that could not run the job, give an undecided result (`undecided`, the
+    reason on stderr): never a verdict on the program."""
+    files = dict(files or {})
+    if _MAIN in files or any(not _NAME.fullmatch(n) for n in files):
+        raise ValueError(f"sandbox file names must be plain names other than {_MAIN}: {sorted(files)}")
+    job = {"code": code, "files": files, "stdin": stdin or "", "timeout_s": WALL_FACTOR * timeout_s,
+           "memory_mb": memory_mb, "cpu_s": math.ceil(timeout_s), "fsize": FILE_BYTES, "tasks": TASKS}
+    reason = ""
+    for _ in range(ATTEMPTS):
+        if PROGRESS is not None:
+            PROGRESS(SETUP_LIMIT_S + job["timeout_s"] + EXIT_S)
+        try:
+            answer = _attempt(job)
+        except SandboxError as e:
+            reason = str(e)
+            continue
+        finally:
+            if PROGRESS is not None:
+                PROGRESS(None)
+        if not answer["timed_out"]:
+            return Result(answer["returncode"], answer["stdout"], answer["stderr"], False, answer["seconds"],
+                          answer["cpu_s"])
+        wait = answer["wait_s"]
+        if wait is not None and wait < STARVED * answer["seconds"]:
+            return Result(None, answer["stdout"], f"{UNDECIDED} the wall clock ran out while the program slept or "
+                          f"blocked ({answer['cpu_s']:.2f} s of CPU)", True, answer["seconds"], answer["cpu_s"], True)
+        reason = f"the wall clock ran out before the CPU-time limit ({answer['cpu_s']:.2f} s of CPU in " \
+                 f"{answer['seconds']:.0f} s)"
+    return Result(None, "", f"{UNDECIDED} {reason}, {ATTEMPTS} attempts", True, 0.0, 0.0, True)

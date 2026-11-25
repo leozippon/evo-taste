@@ -124,8 +124,8 @@ time.sleep(60)
     run("pass")
     before = current()
     t0 = time.monotonic()
-    r = run(code, timeout_s=1)
-    assert r.timed_out and r.returncode is None and time.monotonic() - t0 < WALL_FACTOR * 1 + EXIT_S
+    r = run(code, timeout_s=0.25)  # sleeping: the wall clock (5 s) stops it, undecided at once
+    assert r.timed_out and r.undecided and r.returncode is None and time.monotonic() - t0 < WALL_FACTOR * 0.25 + EXIT_S
     assert stray(marker) == "" and current() is None and before is not None and not before.alive()
 
 
@@ -276,3 +276,56 @@ print('done')
 """)
     assert r.ok and r.stdout == "done\n"
     assert current() is box and box.alive() and run(PROCESSES).stdout == "True\n"
+
+
+def test_a_message_queue_cannot_carry_data_to_the_next_job():
+    run("pass")
+    box = current()
+    mq = ("import ctypes, os\nrt = ctypes.CDLL('librt.so.1', use_errno=True)\n"
+          "rt.mq_open.restype = ctypes.c_int\n")
+    r = run(mq + "q = rt.mq_open(b'/evo_leak', os.O_CREAT | os.O_WRONLY, 0o600, None)\n"
+                 "print(q, ctypes.get_errno() if q < 0 else rt.mq_send(q, b'secret', 6, 0))")
+    assert r.ok and r.stdout.split()[0] == "-1"  # RLIMIT_MSGQUEUE 0: the queue cannot be created
+    r = run(mq + "print(rt.mq_open(b'/evo_leak', os.O_RDONLY))")
+    assert r.stdout == "-1\n" and current() is box
+
+
+BUSY = "import time\nwhile time.process_time() < 0.7:\n    pass\nprint('done')"  # 0.7 s of CPU, limit 1 s
+
+
+def _pinned(n_spinners: int, code: str, timeout_s: float):
+    """run_python in a new thread (so a new sandbox) pinned to one CPU that n_spinners busy processes share."""
+    import os
+    import threading
+
+    cpu = max(os.sched_getaffinity(0))
+    spin = [subprocess.Popen(["taskset", "-c", str(cpu), sys.executable, "-c", "while True: pass"])
+            for _ in range(n_spinners)]
+    out = []
+
+    def body():
+        os.sched_setaffinity(0, {cpu})
+        out.append(run_python(code, timeout_s=timeout_s, memory_mb=256))
+    try:
+        t = threading.Thread(target=body)
+        t.start()
+        t.join()
+    finally:
+        for p in spin:
+            p.kill()
+            p.wait()
+    return out[0]
+
+
+def test_a_correct_program_near_its_cpu_limit_gets_the_same_verdict_when_starved():
+    idle = run(BUSY, timeout_s=1)
+    starved = _pinned(11, BUSY, 1)  # about a twelfth of a CPU: 0.7 s of CPU takes several seconds of wall clock
+    assert (idle.ok, idle.stdout) == (starved.ok, starved.stdout) == (True, "done\n")
+    assert starved.seconds > 3 * idle.seconds and starved.cpu_s < 1
+
+
+def test_a_run_starved_past_the_wall_clock_is_repeated_and_then_undecided():
+    t0 = time.monotonic()
+    r = _pinned(11, "while True:\n    pass", 0.1)  # 1 s of CPU, 2 s of wall clock: a twelfth of a CPU is too little
+    assert r.undecided and r.timed_out and "before the CPU-time limit" in r.stderr and "3 attempts" in r.stderr
+    assert time.monotonic() - t0 > 3 * 2
