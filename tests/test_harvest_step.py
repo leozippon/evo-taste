@@ -1,4 +1,4 @@
-"""Harvest at a common step: who is ranked, what is refused, and how the analysis reads <lineage>@<step> labels."""
+"""Harvest at a common step: who is ranked and what is refused."""
 
 import json
 from types import SimpleNamespace
@@ -6,7 +6,6 @@ from types import SimpleNamespace
 import pytest
 
 from evotaste import config
-from evotaste.analysis.harvest import adapter_roles
 from evotaste.evaluate import expand_adapters, population_at, step_harvest
 from evotaste.records import write_json
 from evotaste.trainer import adapter_sha256
@@ -88,22 +87,11 @@ def test_exhausted_slot_is_recorded(run):
     assert [c["lineage"] for c in culled[0]["culls"]] == ["c", "c~1"]
 
 
-def test_analysis_reads_step_labels():
-    specs = {m["id"]: {"arm": "plain", "scaffold": None, "role": m.get("role", "member")} for m in MEMBERS}
-    roles = adapter_roles(["base", "a@15", "b@15", "c~1@15", "bl@15", "bl@60"], specs)
-    assert {a: r["role"] for a, r in roles.items()} == {"base": "base", "a@15": "member", "b@15": "member",
-                                                       "c~1@15": "member", "bl@15": "baseline", "bl@60": "baseline"}
-    roles = adapter_roles(["a", "a@15", "b@15", "b@30"], specs)  # several labels of a lineage: checkpoints
-    assert {a: r["role"] for a, r in roles.items()} == {"a": "member", "a@15": "checkpoint", "b@15": "checkpoint",
-                                                       "b@30": "checkpoint"}
-
-
 def test_baseline_only_harvest_and_guard(tmp_path, monkeypatch):
     """A run of baselines only: empty ranking, null outlier and top3, every evaluated baseline adapter listed."""
     import subprocess
 
     from evotaste import evaluate
-    from evotaste.analysis import harvest as analysis_harvest
 
     cfg = config.parse({"name": "rep", "model": "m", "seed": 0, **UNSEEDED, "members": [
         {"id": "lb", "seed": 1, "role": "baseline"}, {"id": "lc", "seed": 2, "role": "baseline"}]}, set())
@@ -140,5 +128,3 @@ def test_baseline_only_harvest_and_guard(tmp_path, monkeypatch):
     with pytest.raises(PermissionError):  # a step that is not in the manifest
         evaluate.blind_guard("blind1", "rep", {"lc@240": run_dir / "members" / "lc" / "checkpoints" / "step_000240"},
                              200, 2, tmp_path)
-    with pytest.raises(SystemExit, match="baseline-only"):  # the analysis names the situation
-        analysis_harvest.pick_outlier("rep", None, [])

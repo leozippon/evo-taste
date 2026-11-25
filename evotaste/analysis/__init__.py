@@ -1,1 +1,1 @@
-"""Read-only analysis of run directories: the run report and the style diagnostics (docs/dev/ANALYSIS_NOTES.md)."""
+"""Read-only analysis of Round 2 runs for the pilots: health, washout, divergence, heritability and seeding (docs/dev/ANALYSIS_NOTES.md)."""
