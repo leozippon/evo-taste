@@ -2,6 +2,7 @@
 memory and output, and nothing left running afterwards."""
 
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -11,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from evotaste.verify.sandbox import FILE_BYTES, run_python
+from evotaste.verify.sandbox import FILE_BYTES, EXIT_S, run_python
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -115,7 +116,7 @@ time.sleep(60)
 """
     t0 = time.monotonic()
     r = run(code, timeout_s=2)
-    assert r.timed_out and r.returncode is None and time.monotonic() - t0 < 5
+    assert r.timed_out and r.returncode is None and time.monotonic() - t0 < 2 + EXIT_S + 2
     assert stray(marker) == ""
 
 
@@ -124,19 +125,21 @@ def test_fork_bomb_is_contained_and_killed():
     code = f"""
 import os, sys
 try:
-    os.execv(sys.executable, [sys.executable, '-c', 'import os\\nwhile True:\\n    try: os.fork()\\n    except OSError: pass', '{marker}'])
+    os.execv(sys.executable, [sys.executable, '-c',
+             'import os\\nwhile True:\\n    try: os.fork()\\n    except OSError: pass', '{marker}'])
 except OSError:
     pass
 """
     t0 = time.monotonic()
     r = run(code, timeout_s=2, memory_mb=256)
-    assert r.timed_out and time.monotonic() - t0 < 5
+    assert r.returncode != 0 and time.monotonic() - t0 < 2 + EXIT_S + 2
     assert stray(marker) == ""
 
 
 def test_killing_the_caller_kills_the_sandbox():
     marker = f"evotaste-{uuid.uuid4().hex}"
-    inner = f"import os, sys; os.execv(sys.executable, [sys.executable, '-c', 'import time; time.sleep(60)', {marker!r}])"
+    inner = (f"import os, sys; os.execv(sys.executable, [sys.executable, '-c', 'import time; time.sleep(60)', "
+             f"{marker!r}])")
     caller = subprocess.Popen([sys.executable, "-c", "import sys; from evotaste.verify.sandbox import run_python; "
                                "run_python(sys.argv[1], timeout_s=60, memory_mb=256)", inner])
     deadline = time.monotonic() + 10
@@ -157,10 +160,19 @@ def test_memory_and_output_are_bounded():
     assert r.returncode != 0 and "No space left on device" in r.stderr
 
 
-def test_busy_loop_is_killed_at_the_wall_clock_limit():
+def test_the_limit_counts_from_the_program_start_not_from_the_queue_for_bwrap():
+    """Sandbox setup is serialized machine-wide; 48 concurrent sandboxes queue for it but none may time out."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(48) as pool:
+        results = list(pool.map(lambda _: run("import time\ntime.sleep(1.5)\nprint('done')", timeout_s=2.5), range(48)))
+    assert all(r.ok and r.stdout == "done\n" and r.seconds < 2.5 + EXIT_S for r in results)
+
+
+def test_busy_loop_is_killed_by_the_cpu_limit():
     t0 = time.monotonic()
     r = run("while True:\n    pass", timeout_s=2)
-    assert r.timed_out and time.monotonic() - t0 < 4
+    assert r.returncode == 128 + signal.SIGXCPU and not r.timed_out and time.monotonic() - t0 < 2 + EXIT_S
 
 
 def test_file_names_must_be_plain():

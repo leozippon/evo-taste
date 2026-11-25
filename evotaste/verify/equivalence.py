@@ -38,6 +38,8 @@ _DELIMITERS = (("$$", "$$"), ("$", "$"), ("\\(", "\\)"), ("\\[", "\\]"), ("**", 
 _DECIMAL = re.compile(r"(?<![\d.])(?:\d{1,3}(?:,\d{3})+|\d+)?\.\d+(?![\d.])")
 _SCIENTIFIC = re.compile(r"(?<![\w.])(\d+\.\d*|\.\d+)[eE]([+-]?\d+)(?![\w.])")
 _LONE_SCIENTIFIC = re.compile(r"([+-]?\d+)[eE]([+-]?\d+)")
+_COMMAND = re.compile(r"\\(?:text|textbf|textrm|mathrm|mathbf)\s*\{(.*)\}", re.S)
+_IMAGINARY = re.compile(r"(?<=\d)i\b")
 
 
 class GoldError(ValueError):
@@ -52,7 +54,8 @@ class Parsed:
 
 
 def _strip(s: str) -> str:
-    """Surrounding math delimiters, markdown emphasis and backticks, and a trailing period removed."""
+    """Surrounding math delimiters, markdown emphasis and backticks, a \\text-like command around the whole answer,
+    and a trailing period removed."""
     s = s.strip().replace("−", "-")
     prev = None
     while s != prev:
@@ -60,14 +63,27 @@ def _strip(s: str) -> str:
         for a, b in _DELIMITERS:
             if len(s) > len(a) + len(b) and s.startswith(a) and s.endswith(b):
                 s = s[len(a):-len(b)].strip()
+        if (m := _COMMAND.fullmatch(s)) and balanced(m.group(1)):
+            s = m.group(1).strip()
         if s.endswith("."):
             s = s[:-1].rstrip()
     return s
 
 
+def balanced(s: str) -> bool:
+    """Braces balance and never close more than they opened."""
+    depth = 0
+    for ch in s:
+        depth += {"{": 1, "}": -1}.get(ch, 0)
+        if depth < 0:
+            return False
+    return depth == 0
+
+
 def _latex(s: str) -> str:
-    """Python's ** and e-notation (with a point in the mantissa, or as the whole answer) as LaTeX powers."""
-    s = s.replace("**", "^")
+    """Python's ** and e-notation (with a point in the mantissa, or as the whole answer) as LaTeX powers; a
+    coefficient before i spaced, so that math-verify reads 3i, 3 i and i alike as the imaginary unit."""
+    s = _IMAGINARY.sub(" i", s.replace("**", "^"))
     if m := _LONE_SCIENTIFIC.fullmatch(s):
         return f"{m.group(1)}\\times 10^{{{m.group(2)}}}"
     return _SCIENTIFIC.sub(lambda m: f"{m.group(1)}\\times 10^{{{m.group(2)}}}", s)

@@ -1,9 +1,9 @@
 """Persistent verifier processes with a hard wall-clock bound per job.
 
-Each process is a fresh interpreter (not a fork of the caller, which may hold CUDA state or threads) that judges one
-job at a time. A job still running at its deadline, for instance sympy stuck in C code on a power tower that no
-signal interrupts, is ended by killing its process, which is replaced; the job's verdict is reward 0 with error
-"timeout". A process dies with its parent (PR_SET_PDEATHSIG), and a sandbox dies with its process.
+Each process is a fresh interpreter (`python -c`, not a fork of the caller, which may hold CUDA state or threads)
+that judges one job at a time. A job still running at its deadline, for instance sympy stuck in C code on a power
+tower that no signal interrupts, is ended by killing its process, which is replaced; the job's verdict is reward 0
+with error "timeout". A process dies with its parent (PR_SET_PDEATHSIG), and a sandbox dies with its process.
 """
 
 from __future__ import annotations
@@ -42,12 +42,17 @@ def _serve(jobs: Connection, results: Connection, parent: int) -> None:
         results.send(verdict)
 
 
+_WORKER = ("import sys\nfrom multiprocessing.connection import Connection\nfrom evotaste.verify.pool import _serve\n"
+           "_serve(Connection(int(sys.argv[1]), writable=False), Connection(int(sys.argv[2]), readable=False), "
+           "int(sys.argv[3]))\n")
+
+
 class _Process:
     def __init__(self):
         jobs_r, jobs_w = os.pipe()
         results_r, results_w = os.pipe()
-        self.proc = subprocess.Popen([sys.executable, "-m", "evotaste.verify.pool", str(jobs_r), str(results_w),
-                                      str(os.getpid())], pass_fds=(jobs_r, results_w))
+        self.proc = subprocess.Popen([sys.executable, "-c", _WORKER, str(jobs_r), str(results_w), str(os.getpid())],
+                                     pass_fds=(jobs_r, results_w))
         os.close(jobs_r)
         os.close(results_w)
         self.jobs, self.results = Connection(jobs_w, readable=False), Connection(results_r, writable=False)
@@ -106,9 +111,3 @@ class Pool:
     def _replace(self, slot: int) -> None:
         self.procs[slot].kill()
         self.procs[slot] = _Process()
-
-
-if __name__ == "__main__":  # a verifier process started by Pool
-    from evotaste.verify.pool import _serve as serve  # the importable module, so that its caches are the ones used
-
-    serve(Connection(int(sys.argv[1]), writable=False), Connection(int(sys.argv[2]), readable=False), int(sys.argv[3]))

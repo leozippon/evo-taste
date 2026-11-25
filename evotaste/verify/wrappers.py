@@ -121,7 +121,7 @@ def _code(text: str) -> Found | None:
 class Wrapper:
     id: str
     kinds: frozenset[str]
-    instruction: str  # one sentence asking for this form; it says "your final answer" and leaves what that is to the prompt
+    instruction: str  # one sentence asking for this form; "your final answer" is left for the prompt to define
     render: Callable[[str], str]  # a compliant response carrying this content (for gold checks and tests)
     extract: Callable[[str], Found | None]  # the raw match; use `find` for the full rule
     markup: re.Pattern | None  # this wrapper's markup, which no other answer wrapper's content may contain

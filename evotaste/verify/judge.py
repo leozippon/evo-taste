@@ -6,9 +6,9 @@ Gold formats by kind:
 - choice: {"options": [option text, ...], "answer": letter}, options in the order of their letters A, B, C, ...
 - verdict: {"labels": [label, ...], "answer": label}, a closed label set.
 - code: {"harness": "pytest" | "assert" | "check", "tests": str, "reference": str, optional "entry_point" (required
-  for check), "time_limit_s" (default 10), "memory_mb" (default 1024)}. The program is saved as solution.py; pytest
-  runs `tests` as test_solution.py with `from solution import *` prepended; assert runs `tests` as a script after
-  `from solution import *`; check does the same and then calls `check(<entry_point>)`.
+  for check), "time_limit_s" (default 10), "memory_mb" (default 1024)}. The program is saved as solution.py, and
+  every top-level name it defines is imported ahead of the tests; pytest runs `tests` as test_solution.py; assert
+  runs `tests` as a script; check does the same and then calls `check(<entry_point>)`.
 """
 
 from __future__ import annotations
@@ -18,7 +18,8 @@ import secrets
 from dataclasses import dataclass
 
 from evotaste.verify import equivalence
-from evotaste.verify.sandbox import run_python
+from evotaste.verify.equivalence import balanced
+from evotaste.verify.sandbox import OVERHEAD_S, run_python
 from evotaste.verify.wrappers import WRAPPERS, Found, for_kind, python_block
 
 KINDS = ("open", "choice", "verdict", "code")
@@ -67,8 +68,8 @@ def check_job(job: Job) -> None:
 def budget_s(job: Job) -> float:
     """Sandbox time a job may spend (a program, or the tests run on up to two extracted programs)."""
     if job.kind == "code":
-        return 2 * float(job.gold.get("time_limit_s", CODE_TIME_LIMIT_S))
-    return PROGRAM_TIMEOUT_S if "program" in job.channels else 0.0
+        return 2 * (float(job.gold.get("time_limit_s", CODE_TIME_LIMIT_S)) + OVERHEAD_S)
+    return PROGRAM_TIMEOUT_S + OVERHEAD_S if "program" in job.channels else 0.0
 
 
 # -- the final answer -----------------------------------------------------------------------------------------------
@@ -115,8 +116,8 @@ def tolerant_answer(job: Job) -> Candidate | None:
 # -- correctness ----------------------------------------------------------------------------------------------------
 
 def _clean_label(s: str) -> str:
-    """Dressings around a letter or label: math delimiters, \\text-like commands, markdown emphasis, quotes and a
-    trailing period; then lower case and single spaces."""
+    """A letter or label without its dressings (math delimiters, a \\text-like command around it, markdown emphasis,
+    quotes, a trailing period), with single spaces."""
     s = s.strip()
     prev = None
     while s != prev:
@@ -125,7 +126,7 @@ def _clean_label(s: str) -> str:
         for a, b in (("$", "$"), ("\\(", "\\)"), ("**", "**"), ("*", "*"), ("`", "`"), ('"', '"'), ("'", "'")):
             if len(s) > len(a) + len(b) and s.startswith(a) and s.endswith(b):
                 s = s[len(a):-len(b)]
-        if m := re.fullmatch(r"\\(?:text|textbf|mathrm|mathbf|boxed)\s*\{(.*)\}", s, re.S):
+        if (m := re.fullmatch(r"\\(?:text|textbf|mathrm|mathbf|boxed)\s*\{(.*)\}", s, re.S)) and balanced(m.group(1)):
             s = m.group(1)
         if s.endswith("."):
             s = s[:-1]
@@ -180,6 +181,11 @@ if code == 0 and tally.passed > 0 and tally.bad == 0:
 """
 
 
+# Every top-level name of the solution, underscored ones included (`from solution import *` skips those)
+_IMPORT_ALL = ("import solution as _solution\nglobals().update({k: v for k, v in vars(_solution).items() "
+               "if not k.startswith('__')})\n")
+
+
 def run_tests(program: str, gold: dict) -> str | None:
     """None if the program passes all of the item's tests in the sandbox, else the reason. Success is the harness's
     random token printed after the tests and a zero exit status, so a program that exits early never passes."""
@@ -187,13 +193,12 @@ def run_tests(program: str, gold: dict) -> str | None:
     nonce = secrets.token_hex(16)
     files = {"solution.py": program}
     if harness == "pytest":
-        files["test_solution.py"] = "from solution import *\n" + gold["tests"]
+        files["test_solution.py"] = _IMPORT_ALL + gold["tests"]
         main = _PYTEST_MAIN.format(nonce=nonce)
     elif harness in ("assert", "check"):
-        main = "from solution import *\n" + gold["tests"]
+        main = _IMPORT_ALL + gold["tests"]
         if harness == "check":
-            entry = gold["entry_point"]
-            main = f"from solution import {entry}\n{main}\ncheck({entry})\n"
+            main += f"\ncheck({gold['entry_point']})\n"
         main += f"\nprint({nonce!r})\n"
     else:
         raise ValueError(f"unknown harness {harness!r}")
