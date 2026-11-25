@@ -93,8 +93,61 @@ def _verdict(source, item_id, domain, problem, labels, answer, held_out=False, g
                 stem or problem, group or problem, held_out)
 
 
-def _open(source, item_id, domain, problem, gold, held_out=False) -> Item:
+def _open(source, item_id, domain, problem, gold, held_out=False, list_type=None) -> Item:
+    """An open item; a list-shaped reference gets the verifier's type (`list_type`, or one read from its form and the
+    problem's wording), and stays untyped, so that the verifier refuses it, when neither decides."""
+    if gold is not None and (m := _TUPLE_EQUATION.fullmatch(_strip_math(gold))):
+        gold = f"({m.group(1)})"  # (x, y) = (3, 2) is the tuple (3, 2); the verifier does not unwrap it
+    if gold is not None and _list_shape(gold):
+        list_type = list_type or _list_type(problem, gold)
+        if list_type:
+            gold = {"answer": gold, "type": list_type}
     return Item(source, item_id, domain, "open", problem, gold, problem, problem, held_out)
+
+
+_TUPLE_EQUATION = re.compile(r"\([^()=]*\)\s*=\s*\(([^()=]*)\)")
+
+
+def _strip_math(s: str) -> str:
+    s = s.strip()
+    for a, b in (("\\(", "\\)"), ("\\[", "\\]"), ("$$", "$$"), ("$", "$")):
+        if s.startswith(a) and s.endswith(b) and len(s) > len(a) + len(b):
+            s = s[len(a):-len(b)].strip()
+    return s
+
+
+def _top_level_commas(s: str) -> int:
+    depth, n = 0, 0
+    for i, ch in enumerate(s):
+        depth += (ch in "({[") - (ch in ")}]")
+        n += ch == "," and depth == 0 and not re.match(r"\d{3}(?!\d)", s[i + 1:i + 4])  # 1,000 is a number
+    return n
+
+
+def _list_shape(answer: str) -> str | None:
+    """"bare" (a, b), "()", "[]" or "half-open" ([a, b), (a, b]) for a list-shaped reference, else None."""
+    s = re.sub(r"\\left|\\right|\\!|\\,", "", answer).strip()
+    if _top_level_commas(s):
+        return "bare"
+    if len(s) > 2 and s[0] in "([" and s[-1] in ")]" and _top_level_commas(s[1:-1]):
+        return {"()": "()", "[]": "[]"}.get(s[0] + s[-1], "half-open")
+    return None
+
+
+_ORDERED = re.compile(r"ordered (pair|triple|quadruple)|coordinates|\bpoint\b|in the form \(|increasing order|"
+                      r"decreasing order|least to greatest|greatest to least|in order")
+_ALL = re.compile(r"separated by commas|all (the )?(real )?(solutions|values|roots|possible)")
+
+
+def _list_type(problem: str, answer: str) -> str | None:
+    shape, p = _list_shape(answer), problem.lower()
+    if shape == "half-open" or "\\infty" in answer or "\\cup" in answer or (shape != "bare" and "interval" in p):
+        return "interval"
+    if shape == "()":
+        return "tuple"
+    if shape == "bare":
+        return "tuple" if _ORDERED.search(p) else "list" if _ALL.search(p) else None
+    return None  # [a, b] without the word interval: a list or a closed interval
 
 
 def last_boxed(text: str) -> str | None:
@@ -185,8 +238,9 @@ def _theoremqa() -> list[Item]:
             continue
         if kind == "bool":
             out.append(_verdict("theoremqa", str(i), "math", r["Question"], ("True", "False"), answer))
-        else:
-            out.append(_open("theoremqa", str(i), "math", r["Question"], answer))
+        else:  # TheoremQA's lists are ordered
+            out.append(_open("theoremqa", str(i), "math", r["Question"], answer,
+                             list_type="tuple" if kind.startswith("list") else None))
     return out
 
 

@@ -47,6 +47,7 @@ def procedural_families() -> dict:
 
 def main() -> None:
     from evotaste import external, sources, tasks
+    from evotaste.verify import RULES_VERSION
 
     t0 = time.time()
     unit_domains = {s.unit: s.domain for s in sources.SOURCES.values() if s.role == "unseen"}
@@ -88,9 +89,9 @@ def main() -> None:
         "generated": {"script": "scripts/make_suites_r2.py", "rules": {
             "split_seed": external.SPLIT_SEED_R2, "round1_split_seed": external.SPLIT_SEED,
             "sample_seed": sources.SAMPLE_SEED, "held_out_share": f"1/{external.HELD_OUT_SHARE} each",
-            "near_jaccard": external.NEAR_JACCARD, "shingle_tokens": external.SHINGLE_TOKENS,
+            "near_jaccard": external.NEAR_JACCARD, "shingle_chars": external.SHINGLE_CHARS,
             "max_gold_chars": external.MAX_GOLD_CHARS, "max_prompt_tokens": external.MAX_PROMPT_TOKENS,
-            "tokenizer": TOKENIZER}},
+            "tokenizer": TOKENIZER, "verifier_rules": RULES_VERSION}},
         "totals": totals,
         "units": {u: {"domain": unit_domains[u], "part": units[u]} for u in sorted(units)},
         "suites": suites,

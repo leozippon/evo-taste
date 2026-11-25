@@ -103,9 +103,9 @@ def test_undecided_reference_checks_are_retried_and_never_verdicts(monkeypatch):
 
     monkeypatch.setattr(verify, "gold_check", flaky)
     t = make_task(open_item())
-    reason = "wrapper box: timeout"  # undecided: repeated, then confirmed by a second round
+    reason = "wrapper box: undecided: verifier deadline passed"  # undecided: repeated, then confirmed by a second round
     assert tasks.gold_reasons([t]) == [reason] and calls == [1] * 2 * tasks.GOLD_ATTEMPTS
-    reason = "wrapper box: verifier process died (0)"
+    reason = "wrapper box: undecided: verifier process died (0)"
     with pytest.raises(RuntimeError, match="process died"):
         tasks.gold_reasons([t])
     reason = "wrapper box: not verified"  # a rejection is confirmed once

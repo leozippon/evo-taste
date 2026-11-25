@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import types
 
+import numpy as np
 import pytest
 
 from evotaste import external, sources
@@ -39,7 +40,7 @@ def test_dedup_precedence():
     items = [
         item("math_train", 0, LONG.format(80)),  # 0 train: exact copy of 1, which is in blind2
         item("math_test", 1, LONG.format(80), held_out=True),  # 1 blind2
-        item("theoremqa", 2, "Rewritten. " + GARDEN.format(30)),  # 2 selection: near copy of 3 (blind2)
+        item("theoremqa", 2, "Rewritten. " + GARDEN.format(25)),  # 2 selection: near copy of 3 (blind2)
         item("svamp", 3, GARDEN.format(25)),  # 3 blind2
         item("mmlu_pro", 4, "unrelated question about the boiling point of water at altitude, with five options"),
         item("theoremqa", 5, "unrelated question about the boiling point of water at altitude, with five options"),
@@ -48,7 +49,7 @@ def test_dedup_precedence():
         item("folio", 7, "Premises: all cats are mammals and some mammals swim in the river every summer. "
                          "Conclusion: no cat swims in the river every summer."),
         item("omni_rest", 8, TANK.format(2)),  # selection, near copy of a training DeepScaleR item
-        item("deepscaler", 9, TANK.format(3) + " Give the time in hours."),
+        item("deepscaler", 9, TANK.format(2) + " Give the time in hours."),
     ]
     items += [item("mmlu_pro", 100 + k, f"filler question number {k} about history and geography") for k in range(5)]
     parts = ["train", "blind2", "selection", "blind2", "selection", "selection", "blind2", "blind2", "selection",
@@ -62,6 +63,54 @@ def test_dedup_precedence():
     assert removed[8] == "in DeepScaleR" and removed[9] is None
     assert all(r is None for r in removed[10:])
     assert sum(counts.values()) == 4
+
+
+def test_near_copy_recall_matches_the_banding():
+    """MinHash LSH on random sets of known Jaccard similarity finds a pair as often as 1 - (1 - J^3)^32 predicts
+    (the audit measured 0.66 at 0.5 with the former linear hash family)."""
+    rng = np.random.default_rng(0)
+    for jac, least in ((0.5, 0.95), (0.6, 0.99), (0.8, 1.0)):
+        m = 60
+        c = round(2 * jac * m / (1 + jac))
+        found = 0
+        for _ in range(400):
+            u = rng.choice(2**62, 2 * m - c, replace=False).astype(np.uint64)
+            found += bool(external.near_pairs([np.unique(u[:m]), np.unique(u[m - c:])], ["x", "y"], threshold=0.0))
+        assert found / 400 >= least, (jac, found / 400)
+
+
+def test_reformatted_copies_are_found():
+    a = r"Compute $\left( x^{3} \right) + \dfrac{1}{2}$ when $x = 2$, and give the answer as a fraction."
+    b = r"Compute \( (x^3) + \frac12 \) when \(x=2\), and give the answer as a fraction"
+    c = r"Compute $\left( x^{3} \right) + \dfrac{1}{2}$ when $x = 3$, and give the answer as a fraction."
+    items = [item("math_test", 0, a, held_out=True), item("deepscaler", 1, b), item("deepscaler", 2, c),
+             item("bbh_dyck_languages", 3, "Close it. Input: ( ["), item("bbh_dyck_languages", 4, "Close it. Input: [ (")]
+    groups, pairs = external.copies(items)
+    assert (0, 1) in pairs and (0, 2) in pairs  # other delimiters; near-identical with another number
+    assert (3, 4) not in pairs and not groups  # within one unseen unit, brackets-only differences are distinct
+
+
+def test_copy_rule_separates_copies_from_siblings():
+    long = ("A student measures the temperature of a cup of water every minute while it cools on a table in a room "
+            "kept at {} degrees. Which graph best shows how the temperature of the water changes over time?")
+    reworded = ("Find the number of ordered triples (a, b, c) of integers with 1 <= a, b, c <= 100 and "
+                "a^2 b + b^2 c + c^2 a = a b^2 + b c^2 + c a^2.", "Find the number of ordered triples of integers "
+                "$(a, b, c)$ with $1 \\leq a, b, c \\leq 100$ and $a^{2} b+b^{2} c+c^{2} a=a b^{2}+b c^{2}+c a^{2}$.")
+    cases = [(long.format(20), long.format(25), True),  # near-identical: a copy whatever the numbers
+             ("What is the largest prime factor of 78?", "What is the largest prime factor of 999?", False),  # sibling
+             (*reworded, True)]
+    for x, y, want in cases:
+        a, b = item("math_test", 0, x, held_out=True), item("deepscaler", 1, y)
+        assert external.is_copy(a, b, external.shingles(x), external.shingles(y)) is want, (x, y)
+
+
+def test_exposed_reads_hashes_only(tmp_path):
+    import hashlib
+
+    path = tmp_path / "exposure.yaml"
+    path.write_text(f"sha256:\n- {hashlib.sha256(b'svamp/x').hexdigest()}\n")
+    assert external.exposed(["svamp/x", "svamp/y"], path) == {"svamp/x"}
+    assert "svamp/x" not in path.read_text()
 
 
 def test_copied_items_of_sources_without_a_test_split_stay_in_training():

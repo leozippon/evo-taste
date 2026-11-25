@@ -9,14 +9,15 @@ generated:
     sample_seed: 20261125
     held_out_share: 1/20 each
     near_jaccard: 0.5
-    shingle_tokens: 5
+    shingle_chars: 8
     max_gold_chars: 40
     max_prompt_tokens: 3500
     tokenizer: Qwen/Qwen3-1.7B
+    verifier_rules: 2026-11-25.audit-2
 totals:
-  train: 79263
-  selection: 19117
-  blind2: 17437
+  train: 79006
+  selection: 19299
+  blind2: 17385
 units:
   bbh_boolean_expressions:
     domain: logic
@@ -204,8 +205,8 @@ procedural:
 parts:
   gsm8k_train:
     train:
-      items: 7472
-      sha256: 25294e18b9156ac4e6fa8704745699482b586ab468302aca8aa964c7da34bf84
+      items: 7473
+      sha256: 45b89fb5c7e59e025c8c5577bd5a9cacfb39bf4ce31e578025e150b055aec263
   gsm8k_test:
     selection:
       items: 657
@@ -215,69 +216,69 @@ parts:
       sha256: d73e42446bcbe8ccfb3a35366324f108a416c228846578b6b26fd66c45895940
   math_train:
     train:
-      items: 6917
-      sha256: 10ae3355676509311cc2fc6387ff2577ba19cba55f71be98483a5bedec212fde
+      items: 6938
+      sha256: f6710f15aba2666322a94a005db6e4b78a4a045e80d6c8aecccb52285bd9840d
   math_test:
     selection:
-      items: 2352
-      sha256: c688d16308572ebecfdb88936bc7bdc9ffb82cd4e347d3bc8449e9d09f09c4d6
+      items: 2337
+      sha256: d249f5085bbf3db5b23737128652209ed02105e12345ac77e186c54178f09418
     blind2:
-      items: 2380
-      sha256: cc6acbce7c9d3853fc871f1a3d549b9513d9c1342dba2c34b4aaf29f901d56a1
+      items: 2372
+      sha256: 121b29b970aaa923b992ce0def158cff860bebf3966c9e33777e4ad3edce3f92
   mmlu_pro:
     train:
-      items: 3693
-      sha256: 686bfa13873e84f7257a130c02876a20d6fcb233843bb92232f5b3a492ed4c11
+      items: 3754
+      sha256: 6dc41dbcf7693b5713d3691e4b8f9eb962ab912fd18c7283766bd4ac6f70012a
     selection:
-      items: 3790
-      sha256: 0521b3472596eba59c72bf054dc3176b61a5682d03783e14943b40ee77732308
+      items: 3859
+      sha256: 1d3097fcc4204cb922db6d58baeb43a8c0623978d466a7731adad0659d4e1a88
     blind2:
-      items: 3909
-      sha256: a9a208ad68c9d4ed5e688b8aa076db2bd96e6778d4737dd215191fda42214007
+      items: 3907
+      sha256: 64b82749db14f1b358b633103617af8f8a23210f2f61a299dd5765ebf67ea2c3
   deepscaler:
     train:
-      items: 27845
-      sha256: 2de25a3cac9afd11d04eaca5c86c1813aa00b2b39ad566fc8695303832cfd53c
+      items: 27596
+      sha256: 9b157a6f0aebe8e9cb57e454d9276f42edc17aaceb5b1bc3237540a361ef8892
     selection:
-      items: 1409
-      sha256: fa17ddbd435219b0f634a94c900518769c38cddd59a8e8d070aedafb40f43826
+      items: 1411
+      sha256: a74b0e2f4af5538252fe76378189f47fb28eedc9c025074c96b77e53d48e587e
     blind2:
-      items: 1381
-      sha256: b0aa275c5f284205f009608b554ea8596dd6d2ca60ac1236756ac0aa0af1e83f
+      items: 1374
+      sha256: 30dfff663f46d3017a456f14d1626fbe17c273d9946033c1f9f3be62915fb028
   aqua:
     train:
-      items: 9978
-      sha256: 843a93c317593e3186b0c6c422a550b856098c9634c395f0a7228a35cdfe7cac
+      items: 9920
+      sha256: 595a074cf48a0ed95e7b957e12f4e9d549b1f85aa96e537cdf55ab8562b770fb
     selection:
-      items: 260
-      sha256: 1b8c1f3b25f868f0fc35de09ba76902ae45d20624cae6fae4ac4ee1c3f14d891
+      items: 259
+      sha256: 99ab5aa3967ee7ed317a54d979ebd92ad7623cd1dc357ec298bd7280dbb859dd
     blind2:
-      items: 248
-      sha256: 9ae62a4f361f898eeb9334a72278a59175bf56d08dfbca6cbb87eec029c7094d
+      items: 245
+      sha256: d7fa131b18ec26f6262c23e192e06d9815fe01fc649270136f076f63bbd1221e
   kodcode:
     train:
-      items: 8893
-      sha256: 158c8547bb182a0f08627e6b1899fd208dee1919f3fbffe4bf7fe7f0a04ed8cc
+      items: 8881
+      sha256: bc2c7b7e665c2964fe1808929034d4804bbddaf32c48e35267c09768897a0c68
     selection:
-      items: 473
-      sha256: 71eb10d9637121a96ed4fae5a01afe5e90cb9549848045a519b7f7ebdbc40184
+      items: 474
+      sha256: b2733752d5afd1e684bb494de5882bd2a75dfeff264d6694a2252b22989b15f3
     blind2:
       items: 490
       sha256: 0118047bc79c38dc893642a70c15c0524dfd1fbb6330c4905d7d801f02e57380
   logiqa:
     train:
-      items: 7357
-      sha256: 1dc736613605ac94cefb97ade0a4ad6cd677a49b0f49694a69ac999c4d16fe1a
+      items: 7335
+      sha256: e507abc05875af260f0d2bdb091efc5efcd6e80deb35ccb958b76397e60cebe3
     selection:
-      items: 260
-      sha256: 1955426dd6210a76eb42fb3d8f1d685ef9b0cff9efab42aa6128084dcdbf78af
+      items: 265
+      sha256: 7f06118f4a8df93725681d91aa4f63a6a54ae88f9b0d348e9b0edc4e6250447d
     blind2:
-      items: 339
-      sha256: 8ee0d73834eab0f464ba653829f8b9dc499e8cc3fa2b5977ce27cf22de3df990
+      items: 333
+      sha256: a62433af63a015e9b2607e99c4846d11cf051556b3ad243e62fe814cd90cd834
   proofwriter:
     train:
-      items: 6000
-      sha256: 617d46e18066a65f7ab90f29a4a8e3c923678022f50e8a60702ff875f1d46392
+      items: 5997
+      sha256: f165ce14d5d4eceb08a707e7105ca518e5c8c114fc4c5e137e8e86fdce3a3026
     selection:
       items: 592
       sha256: 19323a69d1d5b596c0453dab3df020a1afe5a37d12973f57cbf8abed73cf585b
@@ -286,18 +287,18 @@ parts:
       sha256: 735ca363a7605f26351b628487157044526ff7fc323cd8193436bfbdfc15b0e0
   arc:
     train:
-      items: 1108
-      sha256: de8d43df491be7d6d778ebd441091d5e432a196c8ccb082fc3fe95b6dbd9b7e7
+      items: 1112
+      sha256: d84ca379495f89331bc593eab10e819be6c8f010a29006ae2d3b14e075a29fb0
     selection:
-      items: 567
-      sha256: c989d50fcdf824d5cb9e5aac4971980d09ff48ce7bcfdd0503662d563bfc5d92
+      items: 565
+      sha256: 07c09c82a13349c7701a710a30d9d66004faebda3ac9548cff7bf8eae497aab0
     blind2:
       items: 603
       sha256: 25d98131a81a200f4e5a61f7945658fc9948eff918ff454e9428de338cad9d9c
   theoremqa:
     selection:
-      items: 521
-      sha256: c8c934f86dbecd3f2a49deff0c533ee7c184f0d593c97e755f71365d54dc1a56
+      items: 589
+      sha256: 89146fadad94ffc009616ba548d51ab3d51f888ff8844f8eb07722b312d2e318
   sat_math:
     blind2:
       items: 220
@@ -308,8 +309,8 @@ parts:
       sha256: 168b48853c990cfe69cac2d3ecd4bfc1fd7a7f6feb40c18e510173a1859e857c
   omni_rest:
     selection:
-      items: 212
-      sha256: 9c681b30d39ac838dc8850b958b82041bee33defdbca34700f37d26f69025d46
+      items: 189
+      sha256: 08e4908d782a9d4bfa50b55f135e4080a67caee2c426823f2dd5c0e4b5bf68f8
   humaneval_plus:
     blind2:
       items: 163
@@ -320,8 +321,8 @@ parts:
       sha256: b227cb46b005e7f6d722ff0b60d39af0eef24222058be6e53a9e7adf9bf57204
   leetcode:
     selection:
-      items: 2716
-      sha256: bf2647356c3af817d6dda4975aabaa2488f66526874f863ee36b7e48066d3ba5
+      items: 2794
+      sha256: dbe0b453eefe5a04390db344c618fbb031878eaa25450cd0c3c56d876be74a84
   folio:
     blind2:
       items: 1204
@@ -388,137 +389,194 @@ parts:
       sha256: b7eae7f6380b005cbe5db6fc84a088ffdb6951070dab3c575392054a7c9f350f
   medmcqa:
     selection:
-      items: 999
-      sha256: 7dcd944f432bd9c3f35f22b4ab67a91939ac46a50dc1e975ffffda330d7dd8b7
+      items: 998
+      sha256: 99c68b5a8bcabc446dd6c4902faf44ef047ff7dc065aef8dcd40f74d96e1a3d3
   scienceqa:
     blind2:
-      items: 1000
-      sha256: 5d4f0d50802db90e1e6ba240f74ba387b723d8d18a65ecf1302dea313b1b6fad
+      items: 974
+      sha256: b46d3485c616d847a4adc922cfe8ed94c1858675f786117d82d31521fe29f146
   openbookqa:
     blind2:
       items: 500
       sha256: f08802b0c6aa062920ff34cfe0f8713c3bba6c1ced4edceb8ab59cceed1d773e
   qasc:
     selection:
-      items: 925
-      sha256: 175938d2d69b6973aa25bc5a8146add21976ac3df0e017ee387d4f1c5d81812c
+      items: 926
+      sha256: 0c81b1333a94c44336c72ce6c37c7e6156ef5a88213605f59e5078b0bfb68379
 dropped:
-  gsm8k_train:
-    'train: copy in selection': 1
   math_train:
-    'train: copy in blind2': 165
-    'train: copy in selection': 170
+    'train: copy in blind2': 104
+    'train: copy in selection': 175
     'train: copy in the same part': 1
-    'train: free-text gold': 237
-    'train: gold rejected': 8
+    'train: free-text gold': 256
+    'train: gold rejected': 24
     'train: no gold': 2
   math_test:
     'blind2: free-text gold': 95
-    'blind2: gold rejected': 2
-    'selection: copy in blind2': 71
-    'selection: copy in the same part': 5
-    'selection: free-text gold': 95
+    'blind2: gold rejected': 10
+    'selection: copy in blind2': 47
+    'selection: copy in the same part': 21
+    'selection: free-text gold': 105
+    'selection: gold rejected': 13
   mmlu_pro:
-    'blind2: copy in the same part': 9
-    'blind2: gold rejected': 1
-    'selection: copy in blind2': 65
-    'selection: copy in the same part': 225
-    'selection: gold rejected': 1
+    'blind2: copy in the same part': 6
+    'blind2: gold rejected': 6
+    'selection: copy in blind2': 60
+    'selection: copy in the same part': 159
+    'selection: gold rejected': 3
     'train: copy in blind2': 65
-    'train: copy in selection': 241
-    'train: copy in the same part': 27
-    'train: gold rejected': 1
+    'train: copy in selection': 183
+    'train: copy in the same part': 20
+    'train: gold rejected': 5
   deepscaler:
-    'blind2: copy in the same part': 55
-    'blind2: free-text gold': 3
-    'blind2: gold rejected': 2
-    'selection: copy in blind2': 10
-    'selection: copy in the same part': 24
+    'blind2: copy in the same part': 32
+    'blind2: free-text gold': 4
+    'blind2: gold rejected': 6
+    'selection: copy in blind2': 14
+    'selection: copy in the same part': 21
     'selection: free-text gold': 1
-    'selection: gold rejected': 1
-    'train: copy in blind2': 132
-    'train: copy in selection': 161
-    'train: copy in the same part': 8963
-    'train: free-text gold': 238
-    'train: gold rejected': 90
+    'selection: gold rejected': 2
+    'train: copy in blind2': 187
+    'train: copy in selection': 242
+    'train: copy in the same part': 9016
+    'train: free-text gold': 257
+    'train: gold rejected': 152
   aqua:
-    'train: copy in blind2': 5
+    'blind2: gold rejected': 3
+    'selection: gold rejected': 1
+    'train: copy in blind2': 6
     'train: copy in selection': 11
     'train: copy in the same part': 3
-    'train: gold rejected': 3
+    'train: gold rejected': 60
   kodcode:
     'blind2: gold rejected': 12
-    'selection: gold rejected': 6
+    'selection: gold rejected': 5
     'train: copy in blind2': 1
-    'train: copy in selection': 1
-    'train: gold rejected': 124
+    'train: copy in selection': 8
+    'train: gold rejected': 129
   logiqa:
-    'selection: copy in blind2': 52
+    'blind2: gold rejected': 6
+    'selection: copy in blind2': 47
+    'train: copy in blind2': 3
+    'train: copy in selection': 3
+    'train: copy in the same part': 13
+    'train: gold rejected': 22
+  proofwriter:
     'train: copy in blind2': 1
     'train: copy in selection': 2
-    'train: copy in the same part': 13
-    'train: gold rejected': 3
   arc:
     'blind2: gold rejected': 1
-    'selection: copy in blind2': 1
-    'train: copy in blind2': 6
-    'train: copy in selection': 4
+    'selection: copy in blind2': 2
+    'selection: gold rejected': 1
+    'train: copy in blind2': 3
+    'train: copy in selection': 1
     'train: copy in the same part': 1
+    'train: gold rejected': 2
   theoremqa:
-    'selection: copy in blind2': 210
+    'selection: copy in blind2': 142
   omni_rest:
-    'selection: copy in blind2': 1
-    'selection: free-text gold': 658
-    'selection: gold rejected': 25
-    'selection: in DeepScaleR': 3532
+    'selection: copy in blind2': 3
+    'selection: free-text gold': 664
+    'selection: gold rejected': 32
+    'selection: in DeepScaleR': 3540
   humaneval_plus:
     'blind2: gold rejected': 1
   mbpp_plus:
     'selection: gold rejected': 2
   leetcode:
-    'selection: gold rejected': 108
+    'selection: gold rejected': 30
   medmcqa:
-    'selection: gold rejected': 1
-  qasc:
-    'selection: copy in blind2': 1
+    'selection: gold rejected': 2
+  scienceqa:
+    'blind2: gold rejected': 26
 gold_failed:
   math_train:
   - algebra/1637
+  - algebra/719
+  - algebra/92
   - counting_and_probability/163
+  - intermediate_algebra/1050
   - intermediate_algebra/1250
+  - intermediate_algebra/205
+  - intermediate_algebra/228
+  - intermediate_algebra/402
   - intermediate_algebra/579
+  - intermediate_algebra/662
+  - intermediate_algebra/674
+  - intermediate_algebra/722
+  - intermediate_algebra/788
   - number_theory/661
   - number_theory/663
   - number_theory/737
+  - precalculus/152
   - precalculus/189
+  - precalculus/282
+  - precalculus/306
+  - precalculus/6
+  - precalculus/657
+  - precalculus/686
+  math_test:
+  - algebra/195
+  - intermediate_algebra/143
+  - intermediate_algebra/190
+  - intermediate_algebra/23
+  - intermediate_algebra/266
+  - intermediate_algebra/490
+  - intermediate_algebra/517
+  - intermediate_algebra/659
+  - intermediate_algebra/839
+  - intermediate_algebra/871
+  - intermediate_algebra/894
+  - number_theory/277
+  - prealgebra/262
   mmlu_pro:
+  - '10551'
+  - '2957'
+  - '3056'
+  - '3287'
+  - '3349'
+  - '3504'
   - '3540'
   - '9173'
   deepscaler:
+  - '1076'
   - '1111'
+  - '1131'
   - '1422'
+  - '1634'
   - '16462'
   - '1662'
   - '1714'
   - '18244'
   - '18883'
+  - '1937'
+  - '196'
   - '1993'
   - '22840'
+  - '2299'
   - '23912'
+  - '2453'
+  - '2482'
+  - '25232'
   - '25405'
+  - '2574'
   - '2624'
+  - '2684'
   - '27641'
   - '27791'
+  - '28901'
+  - '2912'
+  - '2915'
+  - '2930'
+  - '2952'
   - '2968'
   - '2970'
   - '2981'
   - '2983'
   - '2989'
-  - '29935'
   - '2994'
   - '2995'
   - '2999'
-  - '3004'
   - '3010'
   - '3011'
   - '3012'
@@ -550,46 +608,153 @@ gold_failed:
   - '3137'
   - '3138'
   - '3141'
-  - '3148'
   - '3170'
+  - '3175'
   - '3178'
+  - '3247'
+  - '3264'
+  - '3277'
   - '3306'
+  - '3341'
+  - '3374'
+  - '3474'
+  - '3502'
+  - '3589'
+  - '3647'
+  - '3679'
   - '3720'
   - '3952'
+  - '4039'
+  - '4079'
+  - '4170'
+  - '4194'
+  - '4313'
+  - '4408'
+  - '4413'
   - '45'
+  - '4668'
+  - '4749'
+  - '4824'
   - '5779'
+  - '5798'
+  - '5800'
+  - '5806'
+  - '5808'
+  - '5816'
   - '5876'
+  - '5955'
+  - '5963'
+  - '5974'
+  - '5996'
   - '6000'
+  - '6007'
+  - '6011'
+  - '6023'
   - '6025'
+  - '6033'
+  - '6056'
+  - '6089'
+  - '6117'
   - '6150'
+  - '6161'
   - '6167'
   - '6170'
+  - '6217'
+  - '6220'
   - '6234'
   - '6242'
+  - '6244'
+  - '6248'
+  - '6249'
   - '6253'
   - '6269'
+  - '6272'
   - '6302'
-  - '6303'
   - '6313'
   - '6316'
-  - '6318'
   - '6322'
   - '6328'
+  - '6333'
   - '6334'
   - '6336'
+  - '6339'
   - '6342'
   - '6361'
+  - '6379'
   - '6381'
+  - '6383'
+  - '6391'
+  - '6397'
+  - '6403'
   - '6406'
   - '6408'
+  - '6409'
   - '6415'
   - '77'
   - '8619'
   - '99'
   aqua:
+  - test/117
+  - train/1051
+  - train/13180
+  - train/14777
+  - train/17994
+  - train/18856
+  - train/19202
+  - train/23259
+  - train/24
+  - train/26317
   - train/27469
+  - train/31062
+  - train/33858
+  - train/34357
+  - train/34777
+  - train/3796
+  - train/38210
+  - train/40739
+  - train/41201
+  - train/41872
+  - train/42252
+  - train/4231
+  - train/44908
+  - train/45393
+  - train/46051
+  - train/4721
+  - train/47600
+  - train/5000
+  - train/50964
+  - train/5365
+  - train/55830
+  - train/56444
+  - train/56937
+  - train/58024
+  - train/60742
+  - train/64
+  - train/65747
+  - train/66296
+  - train/69234
+  - train/69456
+  - train/69615
+  - train/69813
+  - train/72254
   - train/73787
+  - train/80353
+  - train/83218
+  - train/87636
   - train/8836
+  - train/88809
+  - train/89116
+  - train/8966
+  - train/90363
+  - train/90411
+  - train/90879
+  - train/9163
+  - train/92935
+  - train/92968
+  - train/94299
+  - train/96122
+  - train/96706
+  - train/9900
   kodcode:
   - Algorithm_1715_I
   - Algorithm_32876_I
@@ -602,6 +767,7 @@ gold_failed:
   - 'Docs: Python310_24038_I'
   - 'Docs: Python310_24439_I'
   - 'Docs: Python310_28075_I'
+  - 'Docs: Python310_3057_I'
   - 'Docs: Python310_41472_I'
   - 'Docs: Python310_43745_I'
   - 'Docs: Python310_43806_I'
@@ -639,7 +805,11 @@ gold_failed:
   - 'Docs: Pytorch_4983_I'
   - 'Docs: Pytorch_570_I'
   - 'Docs: Pytorch_7618_I'
+  - 'Docs: Scikit_1628_I'
   - 'Docs: Scikit_2695_I'
+  - 'Docs: Scikit_34673_I'
+  - 'Docs: Scikit_3528_I'
+  - 'Docs: Scikit_35978_I'
   - 'Docs: Seaborn_10274_I'
   - 'Docs: Seaborn_10286_I'
   - 'Docs: Seaborn_11075_I'
@@ -713,7 +883,6 @@ gold_failed:
   - Filter_80667_I
   - Filter_84489_I
   - Package_1149_I
-  - Package_2327_I
   - Package_2367_I
   - Package_5306_I
   - Package_5607_I
@@ -722,32 +891,62 @@ gold_failed:
   - Prefill_35015_I
   - Prefill_37246_I
   logiqa:
+  - train/1613
+  - train/1773
+  - train/2093
+  - train/2448
+  - train/2788
+  - train/3192
+  - train/3240
+  - train/3562
   - train/3877
+  - train/4074
+  - train/4087
   - train/4187
+  - train/4278
+  - train/4327
+  - train/4367
+  - train/4386
   - train/4480
+  - train/4544
+  - train/4545
+  - train/5720
+  - train/7227
+  - train/86
+  arc:
+  - Mercury_7026460
+  - Mercury_7238945
+  - Mercury_7238980
   omni_rest:
   - '1039'
   - '1076'
-  - '114'
   - '1276'
+  - '1330'
+  - '1376'
+  - '1665'
+  - '1762'
   - '2428'
+  - '2452'
+  - '3211'
+  - '3216'
   - '335'
+  - '3357'
+  - '3454'
+  - '3547'
+  - '3832'
   - '3857'
   - '3916'
-  - '3932'
+  - '3931'
   - '3948'
   - '4160'
   - '4162'
   - '4181'
   - '4201'
   - '4232'
-  - '4233'
   - '4249'
-  - '4305'
   - '4311'
   - '4339'
-  - '4406'
-  - '55'
+  - '4394'
   - '61'
   - '7'
   - '905'
@@ -755,113 +954,36 @@ gold_failed:
   - '255'
   - '599'
   leetcode:
-  - add-one-row-to-tree
-  - add-two-numbers
-  - avoid-flood-in-the-city
-  - beautiful-towers-i
-  - binary-tree-coloring-game
-  - block-placement-queries
-  - bricks-falling-when-hit
   - check-if-an-original-string-exists-given-two-encoded-strings
-  - closest-binary-search-tree-value
-  - closest-room
   - closest-subsequence-sum
   - coin-change
   - confusing-number-ii
-  - contains-duplicate-iii
-  - continuous-subarrays
-  - count-complete-substrings
-  - count-pairs-of-equal-substrings-with-minimum-difference
-  - count-servers-that-communicate
-  - count-ways-to-build-good-strings
-  - course-schedule-iv
-  - cousins-in-binary-tree
-  - delete-columns-to-make-sorted-ii
-  - delete-leaves-with-a-given-value
-  - delivering-boxes-from-storage-to-ports
-  - depth-of-bst-given-insertion-order
-  - digit-operations-to-make-two-integers-equal
-  - distribute-money-to-maximum-children
-  - divide-an-array-into-subarrays-with-minimum-cost-ii
-  - divide-two-integers
-  - find-array-given-subset-sums
-  - find-distance-in-a-binary-tree
-  - find-servers-that-handled-most-number-of-requests
+  - count-pairs-of-points-with-distance-k
   - find-the-minimum-cost-array-permutation
   - find-the-number-of-subsequences-with-equal-gcd
-  - find-the-original-typed-string-ii
-  - find-the-winning-player-in-coin-game
-  - find-x-sum-of-all-k-long-subarrays-i
-  - find-x-sum-of-all-k-long-subarrays-ii
   - flip-game-ii
-  - frequencies-of-shortest-supersequences
-  - get-biggest-three-rhombus-sums-in-a-grid
-  - insufficient-nodes-in-root-to-leaf-paths
-  - kth-largest-sum-in-a-binary-tree
-  - last-visited-integers
-  - left-and-right-sum-differences
   - letter-tile-possibilities
-  - linked-list-cycle
-  - longest-common-prefix-of-k-strings-after-removal
-  - longest-continuous-subarray-with-absolute-diff-less-than-or-equal-to-limit
-  - longest-special-path
-  - longest-unequal-adjacent-groups-subsequence-i
-  - longest-unequal-adjacent-groups-subsequence-ii
-  - make-array-empty
-  - max-sum-of-rectangle-no-larger-than-k
-  - maximize-grid-happiness
-  - maximize-profit-from-task-assignment
   - maximum-and-sum-of-array
-  - maximum-increasing-triplet-value
   - maximum-length-of-a-concatenated-string-with-unique-characters
-  - maximum-number-of-intersections-on-the-chart
+  - maximum-number-of-achievable-transfer-requests
   - maximum-number-of-moves-to-kill-all-pawns
   - maximum-path-quality-of-a-graph
-  - maximum-value-sum-by-placing-three-rooks-i
-  - maximum-value-sum-by-placing-three-rooks-ii
-  - merge-two-binary-trees
-  - minimize-manhattan-distances
-  - minimum-absolute-difference-between-elements-with-constraint
-  - minimum-array-sum
-  - minimum-cost-to-merge-stones
-  - minimum-cost-walk-in-weighted-graph
-  - minimum-hours-of-training-to-win-a-competition
   - minimum-incompatibility
   - minimum-knight-moves
-  - minimum-number-of-food-buckets-to-feed-the-hamsters
   - minimum-number-of-work-sessions-to-finish-the-tasks
-  - minimum-operations-to-make-subarray-elements-equal
-  - minimum-time-for-k-virus-variants-to-spread
-  - minimum-time-to-break-locks-i
   - minimum-time-to-kill-all-monsters
   - minimum-xor-sum-of-two-arrays
-  - next-greater-element-iv
   - next-greater-numerically-balanced-number
-  - number-of-nodes-with-value-one
   - number-of-valid-words-for-each-puzzle
   - number-of-ways-to-wear-different-hats-to-each-other
-  - odd-even-jump
-  - paint-house-iv
-  - path-sum-ii
   - path-with-maximum-gold
-  - range-addition
-  - reschedule-meetings-for-maximum-free-time-ii
-  - rotating-the-box
-  - search-in-a-binary-search-tree
   - selling-pieces-of-wood
-  - shortest-distance-to-target-string-in-a-circular-array
-  - smallest-common-region
+  - smallest-integer-divisible-by-k
   - special-permutations
+  - split-a-string-into-the-max-number-of-unique-substrings
   - stickers-to-spell-word
-  - sum-of-imbalance-numbers-of-all-subarrays
-  - sum-of-k-subarrays-with-length-at-least-m
-  - swap-adjacent-in-lr-string
   - tiling-a-rectangle-with-the-fewest-squares
-  - trim-a-binary-search-tree
   - unique-paths-iii
-  - valid-tic-tac-toe-state
-  - water-and-jug-problem
-  - ways-to-express-an-integer-as-sum-of-powers
-  - zero-array-transformation-iii
   medmcqa:
+  - 47e35777-f1d7-4291-81e6-6a1d1360a75c
   - 52d643b9-6455-43f0-a04e-a838bf1ba1c8

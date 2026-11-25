@@ -401,7 +401,8 @@ def _procedural_scores(jobs: list[tuple[Task, str, str]], timeout: float | None)
 
 def score_many(jobs: list[tuple[Task, str, str]], timeout: float | None = None) -> list[Score]:
     """Scores of (task, completion text, finish reason) triples. The reward requires the wrapper asked for, a verified
-    correct answer and a completion that stopped by itself; verifier errors and timeouts score 0 with `error` set."""
+    correct answer and a completion that stopped by itself. A verdict the verifier marks undecided (is_undecided)
+    is judged again, up to GOLD_ATTEMPTS times, and raises if it stays undecided: it never becomes a 0."""
     from evotaste.verify import Job, verify_many
 
     out: list[Score | None] = [None] * len(jobs)
@@ -409,22 +410,30 @@ def score_many(jobs: list[tuple[Task, str, str]], timeout: float | None = None) 
     if procedural:
         for i, s in zip(procedural, _procedural_scores([jobs[i] for i in procedural], timeout)):
             out[i] = s
-    verified = [i for i, (t, _, _) in enumerate(jobs) if t.kind != "procedural"]
-    if verified:
+    pending = [i for i, (t, _, _) in enumerate(jobs) if t.kind != "procedural"]
+    for _ in range(GOLD_ATTEMPTS):  # an undecided verdict says nothing about the answer: it is judged again
+        if not pending:
+            break
         verdicts = verify_many([Job(jobs[i][0].kind, jobs[i][1], jobs[i][0].gold, jobs[i][0].wrapper,
-                                    jobs[i][0].channels or ("direct",)) for i in verified], timeout)
-        for i, v in zip(verified, verdicts):
+                                    jobs[i][0].channels or ("direct",)) for i in pending], timeout)
+        for i, v in zip(pending, verdicts):
             stopped = jobs[i][2] == "stop"
             out[i] = Score(float(v.reward == 1.0 and stopped), bool(v.correct_any), bool(v.complied), v.channel,
                            not stopped, v.extracted, v.error)
+        pending = [i for i in pending if _undecided(out[i].error)]
+    if pending:
+        raise RuntimeError(f"{len(pending)} verdicts stayed undecided after {GOLD_ATTEMPTS} attempts, e.g. "
+                           f"{out[pending[0]].error}")
     return out
 
 
-GOLD_ATTEMPTS = 3  # a reference check that times out is repeated; one that always times out counts as failed
+GOLD_ATTEMPTS = 3  # judgements of a verdict or reference check that stays undecided
 
 
 def _undecided(reason: str | None) -> bool:
-    return reason is not None and (reason.endswith("timeout") or "process died" in reason)
+    from evotaste.verify import is_undecided
+
+    return is_undecided(reason)
 
 
 def _verified_reasons(tasks: list[Task], indices: list[int], out: list[str | None]) -> None:
@@ -446,10 +455,10 @@ def _verified_reasons(tasks: list[Task], indices: list[int], out: list[str | Non
 def gold_reasons(tasks: list[Task]) -> list[str | None]:
     """For each task None if its reference verifies against itself (code: the reference solution passes its tests;
     procedural: the family's scorer accepts its gold answer), else why not. A check that times out or loses its
-    verifier process decides nothing, so it is repeated, up to GOLD_ATTEMPTS times; a reference that times out every
-    time is reported as "timeout", and a verifier process that keeps dying is an error, never a verdict. A rejection
-    is confirmed by a second, separate check (under heavy load a parse can fail without reporting a timeout); only a
-    reference rejected twice is rejected."""
+    verifier process decides nothing, so it is repeated, up to GOLD_ATTEMPTS times; a reference undecided every time
+    keeps its undecided reason and counts as failed, and a verifier process that keeps dying is an error, never a
+    verdict. A rejection is confirmed by a second, separate check (under heavy load a parse can fail without reporting
+    a timeout); only a reference rejected twice is rejected."""
     from evotaste.verify import WRAPPERS
 
     out: list[str | None] = [None] * len(tasks)
@@ -590,12 +599,12 @@ def stratum_of(passes: int, samples: int) -> str:
     return "mastered" if passes >= samples - 1 else "sweet"
 
 
-def load_strata(path: str | Path, sha256: str | None = None) -> dict[str, str]:
+def load_strata(path: str | Path, sha256: str) -> dict[str, str]:
     """uid -> stratum from a census strata table (lines `uid<TAB>passes<TAB>samples`), refused unless its SHA-256
     is the pinned one."""
     data = Path(path).read_bytes()
     digest = hashlib.sha256(data).hexdigest()
-    if sha256 is not None and digest != sha256:
+    if digest != sha256:
         raise ValueError(f"{path}: SHA-256 {digest} is not the pinned {sha256}")
     out = {}
     for line in data.decode().splitlines()[1:]:
@@ -696,9 +705,9 @@ class Streams:
         if self.strata is None:
             raise ValueError("the training stream needs the census strata table (Streams(..., strata=...))")
         train_uids = {t.uid for s in self.suites.train for t in self.suites.items(s, "train")}
-        stray = [u for u in self.strata if u not in train_uids]
-        if stray:
-            raise ValueError(f"the strata table names {len(stray)} items outside the training part, e.g. {stray[:3]}")
+        stray = sum(u not in train_uids for u in self.strata)
+        if stray:  # a count only: a stray uid could be a vault uid
+            raise ValueError(f"the strata table names {stray} items outside the training part")
         cells = []
         for domain, share in DOMAIN_MIX.items():
             srcs = [s for s in self.suites.train if self.domain[s] == domain]
