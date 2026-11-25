@@ -3,13 +3,13 @@ context score.
 
   python -m evotaste.evaluate run runs/<name> --suite selection --adapters base,m00,m01 --per-family 50 [--per-source 500]
   python -m evotaste.evaluate harvest runs/<name> --tag n50x1
-  python -m evotaste.evaluate context-score runs/<name> [--members m00,m01]
+  python -m evotaste.evaluate context-score runs/<name> [--items 120] [--contexts a,b] [--members m00] [--steps 0,45]
 
 Suites: the task layer's evaluation sets, selection and the vault blind2 (dataset items and procedural instances).
 Adapters: `base`, a lineage id (its last checkpoint), `<lineage>@<step>` or `population@<step>`. `--shard i/n`
 splits the (adapter, item) jobs across GPUs; every shard writes its own record file and the summary covers all files
 of the tag. A blind vault is opened only through `blind_guard`, which needs a committed, unmodified harvest manifest
-listing every adapter with its content hash (base-model calibration is exempt) and appends to the blind ledger
+listing every trained adapter with its content hash (also for the base model alone) and appends to the blind ledger
 before anything is generated. The context score needs no vLLM: it runs the frozen base model on the visible GPU.
 """
 
@@ -19,8 +19,11 @@ import argparse
 import csv
 import hashlib
 import io
+import json
 import logging
+import random
 import subprocess
+import time
 from pathlib import Path
 
 from evotaste.member import Run, load_lineage, response_records
@@ -50,28 +53,25 @@ def _git(repo: Path, *args) -> subprocess.CompletedProcess:
 
 def blind_guard(vault: str, run_name: str, adapters: dict[str, Path | None], per_family: int, samples: int,
                 repo: Path = Path("."), per_source: int | None = None) -> BlindReceipt:
-    """Refuse unless every adapter is in a committed, unmodified harvest manifest; then append to the ledger.
-
-    `adapters` maps labels to adapter directories (None = base model, allowed without a manifest).
+    """Refuse unless the run's harvest manifest is committed and unmodified and lists every trained adapter; then
+    append to the ledger. Round 2's rule: no model runs on a blind item before the manifest is committed, the base
+    model (`None` in `adapters`) included.
     """
     if vault not in VAULTS:
         raise ValueError(f"{vault!r} is not a blind vault")
-    trained = {label: path for label, path in adapters.items() if path is not None}
-    manifest_hash = "none (base model only)"
-    if trained:
-        path = manifest_path(run_name, repo)
-        rel = str(path.relative_to(repo))
-        if not path.exists() or _git(repo, "ls-files", "--error-unmatch", rel).returncode != 0:
-            raise PermissionError(f"blind evaluation refused: harvest manifest {rel} is not tracked in git")
-        if _git(repo, "diff", "--quiet", "HEAD", "--", rel).returncode != 0:
-            raise PermissionError(f"blind evaluation refused: {rel} differs from the committed version")
-        manifest = read_json(path)
-        listed = {e["sha256"] for e in manifest["ranking"] + manifest.get("baselines", [])}
-        for label, adapter in trained.items():
-            if adapter_sha256(adapter) not in listed:
-                raise PermissionError(f"blind evaluation refused: adapter {label} ({adapter}) is not in {rel} "
-                                      "with a matching content hash")
-        manifest_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+    path = manifest_path(run_name, repo)
+    rel = str(path.relative_to(repo))
+    if not path.exists() or _git(repo, "ls-files", "--error-unmatch", rel).returncode != 0:
+        raise PermissionError(f"blind evaluation refused: harvest manifest {rel} is not tracked in git")
+    if _git(repo, "diff", "--quiet", "HEAD", "--", rel).returncode != 0:
+        raise PermissionError(f"blind evaluation refused: {rel} differs from the committed version")
+    manifest = read_json(path)
+    listed = {e["sha256"] for e in manifest["ranking"] + manifest.get("baselines", [])}
+    for label, adapter in adapters.items():
+        if adapter is not None and adapter_sha256(adapter) not in listed:
+            raise PermissionError(f"blind evaluation refused: adapter {label} ({adapter}) is not in {rel} "
+                                  "with a matching content hash")
+    manifest_hash = hashlib.sha256(path.read_bytes()).hexdigest()
     head = _git(repo, "rev-parse", "HEAD").stdout.strip()
     dirty = bool(_git(repo, "status", "--porcelain", "--untracked-files=no").stdout.strip())
     ledger = repo / LEDGER
@@ -366,16 +366,18 @@ def harvest(run_dir: Path, tag: str, step: int | None = None) -> None:
 # -- context score -------------------------------------------------------------------------------------------------
 
 SCORE_COLUMNS = ("subject", "lineage", "step", "context", "domain", "responses", "tokens", "delta_sum", "delta_mean")
+# Forward-only passes keep no activations, so they take micro-batches of this many times the trainer's token budget.
+SCORE_BUDGET_FACTOR = 4
 
 
-def score_subjects(run: Run, lineages: list[str] | None) -> list[tuple[str, str | None, int | None, Path]]:
-    """(subject, lineage, step, probe responses) to score: the base model's plain answers ("base") and its answers
-    under each context ("base:<context>"), then every committed probe of every lineage (or of `lineages`)."""
+def score_subjects(run: Run, contexts: list[str]) -> list[tuple[str, str | None, int | None, Path]]:
+    """(subject, lineage, step, probe responses): the base model's plain answers ("base") and its answers under each
+    of `contexts` ("base:<context>"), then every committed probe of every lineage."""
     out = [("base", None, None, run.dir / "base" / "probe_responses.jsonl.gz")]
-    out += [(f"base:{c}", None, None, run.dir / "base" / "contexts" / f"{c}.jsonl.gz") for c in sorted(run.contexts)]
+    out += [(f"base:{c}", None, None, run.dir / "base" / "contexts" / f"{c}.jsonl.gz") for c in contexts]
     for state in sorted((run.dir / "members").glob("*/state.json")):
         lin = load_lineage(run, state.parent.name)
-        if lin.status == "new" or (lineages is not None and lin.id not in lineages):
+        if lin.status == "new":
             continue
         for path in sorted((state.parent / "probe_responses").glob("step_*.jsonl.gz")):
             step = int(path.name[5:11])
@@ -384,15 +386,44 @@ def score_subjects(run: Run, lineages: list[str] | None) -> list[tuple[str, str 
     return out
 
 
-def context_deltas(run: Run, policy: Policy, records: list[dict]) -> dict[str, list[tuple[str, float, int]]]:
+def score_selection(run: Run, base_records: list[dict], items: int | None, contexts: list[str] | None) -> dict:
+    """The probe positions and contexts a context score uses, and the selection's name. With `items`, the positions
+    are a domain-stratified sample of the probe set (proportional shares, largest remainders, a seeded draw within
+    each domain), the same for every subject; without, or with at least the probe set's size, all positions."""
+    contexts = sorted(run.contexts if contexts is None else contexts)
+    unknown = sorted(set(contexts) - set(run.contexts))
+    if unknown or not contexts:
+        raise SystemExit(f"--contexts: unknown or none {unknown} (contexts of the run: {sorted(run.contexts)})")
+    n = len(base_records)
+    if items is None or items >= n:
+        positions = list(range(n))
+    else:
+        if items < 1:
+            raise SystemExit("--items must be at least 1")
+        by_domain: dict[str, list[int]] = {}
+        for i, r in enumerate(base_records):
+            by_domain.setdefault(r["domain"], []).append(i)
+        quota = {d: items * len(v) / n for d, v in sorted(by_domain.items())}
+        take = {d: int(q) for d, q in quota.items()}
+        for d in sorted(quota, key=lambda d: (take[d] - quota[d], d))[:items - sum(take.values())]:
+            take[d] += 1
+        positions = sorted(i for d, v in by_domain.items()
+                           for i in random.Random(stable_seed("context-score", items, d)).sample(v, take[d]))
+    key = hashlib.sha256(json.dumps({"positions": positions, "contexts": contexts}).encode()).hexdigest()[:10]
+    return {"name": f"{len(positions)}items-{len(contexts)}contexts-{key}", "positions": positions,
+            "uids": [base_records[i]["uid"] for i in positions], "contexts": contexts}
+
+
+def context_deltas(run: Run, policy: Policy, records: list[dict], contexts: list[str],
+                   token_budget: int | None = None) -> dict[str, list[tuple[str, float, int]]]:
     """Per context, per response: (domain, sum over completion tokens of log p_base(token | prompt with the context)
-    - log p_base(token | plain prompt), completion tokens). The completion is the stored sampled token ids."""
-    plain = policy.base_logprobs([Sequence(run.prompt(r["question"]), r["token_ids"]) for r in records])
-    out = {}
-    for context in sorted(run.contexts):
-        lps = policy.base_logprobs([Sequence(run.prompt(r["question"], context), r["token_ids"]) for r in records])
-        out[context] = [(r["domain"], float((a - b).sum()), len(a)) for r, a, b in zip(records, lps, plain)]
-    return out
+    - log p_base(token | plain prompt), completion tokens). The completion is the stored sampled token ids; the plain
+    and every context's sequences go through the base model in one batched pass."""
+    seqs = [Sequence(run.prompt(r["question"], c), r["token_ids"]) for c in (None, *contexts) for r in records]
+    lps = policy.base_logprobs(seqs, token_budget)
+    n = len(records)
+    return {c: [(r["domain"], float((a - b).sum()), len(a))
+                for r, a, b in zip(records, lps[k * n:(k + 1) * n], lps[:n])] for k, c in enumerate(contexts, 1)}
 
 
 def score_rows(subject: str, lineage: str | None, step: int | None, deltas: dict) -> list[dict]:
@@ -407,34 +438,58 @@ def score_rows(subject: str, lineage: str | None, step: int | None, deltas: dict
     return rows
 
 
-def context_score(run_dir: Path, lineages: list[str] | None = None) -> None:
-    """For each subject and context, the mean over completion tokens of log p_base(token | context prompt) -
-    log p_base(token | plain prompt), by domain, written to runs/<name>/context_score/table.csv. Each subject's rows
-    are cached next to it with the SHA-256 of its responses file, so a rerun scores only new or rewritten probes."""
+def context_score(run_dir: Path, items: int | None = None, contexts: list[str] | None = None,
+                  lineages: list[str] | None = None, steps: list[int] | None = None) -> None:
+    """For each subject and selected context, the mean over completion tokens of log p_base(token | context prompt) -
+    log p_base(token | plain prompt), by domain, on the selected probe items. Each selection has its own directory
+    runs/<name>/context_score/<selection>/ with selection.json, one cache file per subject (keyed by the SHA-256 of
+    its responses file) and table.csv, which holds every subject scored under that selection. `lineages` and `steps`
+    choose which lineages' probes are scored now; the base references are always scored."""
     run = Run(run_dir)
-    out = run.dir / "context_score"
-    policy = None
-    rows = []
-    for subject, lineage, step, path in score_subjects(run, lineages):
+    base_records = read_jsonl_gz(run.dir / "base" / "probe_responses.jsonl.gz")
+    selection = score_selection(run, base_records, items, contexts)
+    out = run.dir / "context_score" / selection["name"]
+    if (out / "selection.json").exists() and read_json(out / "selection.json") != selection:
+        raise SystemExit(f"{out}: selection.json describes another selection")
+    write_json(out / "selection.json", selection)
+    budget = SCORE_BUDGET_FACTOR * run.cfg.trainer.token_budget
+    policy, rows = None, []
+    for subject, lineage, step, path in score_subjects(run, selection["contexts"]):
         cache = out / f"{subject.replace(':', '--')}.json"
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         cached = read_json(cache) if cache.exists() else None
-        if cached and cached["sha256"] == digest and {r["context"] for r in cached["rows"]} == set(run.contexts):
+        if cached and cached["sha256"] == digest:
             rows += cached["rows"]
             continue
+        if lineage is not None and ((lineages is not None and lineage not in lineages)
+                                    or (steps is not None and step not in steps)):
+            continue
+        records = read_jsonl_gz(path)
+        picked = [records[i] for i in selection["positions"]]
+        if [r["uid"] for r in picked] != selection["uids"]:
+            raise RuntimeError(f"{path}: the answers are not in the order of the base model's probe answers")
         if policy is None:
             policy = Policy(run.cfg.model, run.cfg.lora, run.cfg.trainer)
-        records = read_jsonl_gz(path)
-        subject_rows = score_rows(subject, lineage, step, context_deltas(run, policy, records))
-        write_json(cache, {"time": now(), "responses": str(path), "sha256": digest, "rows": subject_rows})
+        t0 = time.perf_counter()
+        subject_rows = score_rows(subject, lineage, step, context_deltas(run, policy, picked, selection["contexts"],
+                                                                         budget))
+        seconds = round(time.perf_counter() - t0, 1)
+        write_json(cache, {"time": now(), "responses": str(path), "sha256": digest, "seconds": seconds,
+                           "rows": subject_rows})
         rows += subject_rows
-        log.info("context score of %s: %d responses", subject, len(records))
+        log.info("context score of %s: %d responses x %d prompts in %.0f s", subject, len(picked),
+                 1 + len(selection["contexts"]), seconds)
     text = io.StringIO()
     writer = csv.DictWriter(text, fieldnames=SCORE_COLUMNS)
     writer.writeheader()
     writer.writerows(rows)
     atomic_write(out / "table.csv", text.getvalue().encode())
     log.info("wrote %s (%d rows)", out / "table.csv", len(rows))
+
+
+def _names(text: str | None) -> list[str] | None:
+    """A comma-separated command-line list; None when the option is absent."""
+    return [x for x in text.split(",") if x] if text else None
 
 
 def main(argv=None) -> None:
@@ -462,15 +517,20 @@ def main(argv=None) -> None:
     c = sub.add_parser("context-score", help="how much better each context lets the base model predict the stored "
                                              "probe answers (a table; the index is computed in analysis)")
     c.add_argument("run_dir", type=Path)
+    c.add_argument("--items", type=int, help="a domain-stratified sample of this many probe items, the same for every "
+                                              "subject (default: all)")
+    c.add_argument("--contexts", help="comma-separated contexts (default: every context of the run)")
     c.add_argument("--members", help="comma-separated lineage ids to score (default: all; the base references always)")
+    c.add_argument("--steps", help="comma-separated probe steps to score (default: all)")
     args = ap.parse_args(argv)
     if args.cmd == "run":
         setup_logging(args.run_dir.name, f"eval-{args.suite}")
-        logged(evaluate, args.run_dir, args.suite, [a for a in args.adapters.split(",") if a], args.per_family,
+        logged(evaluate, args.run_dir, args.suite, _names(args.adapters), args.per_family,
                args.samples, args.shard, args.tag, args.attach, args.per_source, server_overrides(args))
     elif args.cmd == "context-score":
         setup_logging(args.run_dir.name, "context-score")
-        logged(context_score, args.run_dir, [m for m in args.members.split(",") if m] if args.members else None)
+        logged(context_score, args.run_dir, args.items, _names(args.contexts), _names(args.members),
+               [int(x) for x in _names(args.steps)] if args.steps else None)
     else:
         harvest(args.run_dir, args.tag, args.step)
 

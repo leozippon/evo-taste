@@ -145,13 +145,19 @@ def test_a_clone_waits_for_a_parent_advanced_elsewhere(tmp_path, base_model, mon
     assert load_lineage(run, "a1").status == "new" and not (run.dir / "members" / "a1" / "probes.jsonl").exists()
 
 
+def score_table(run, name):
+    with open(run.dir / "context_score" / name / "table.csv") as f:
+        return list(csv.DictReader(f))
+
+
 def test_context_score(finished, monkeypatch):
     run = finished
     monkeypatch.setattr(evaluate, "Run", lambda d: run)
     monkeypatch.setattr(evaluate, "Policy", lambda *a: run.policy)
     evaluate.context_score(run.dir)
-    with open(run.dir / "context_score" / "table.csv") as f:
-        rows = list(csv.DictReader(f))
+    (full,) = [p.name for p in (run.dir / "context_score").iterdir()]
+    assert full.startswith("6items-12contexts-")
+    rows = score_table(run, full)
     subjects = {r["subject"] for r in rows}
     assert {"base", "base:refute", "a@0", "a@4", "a1@1", "c@2"} <= subjects and len(subjects) == 13 + 3 + 3 + 2 + 3 + 3
     assert {r["context"] for r in rows} == set(run.contexts)
@@ -167,22 +173,105 @@ def test_context_score(finished, monkeypatch):
         assert float(row["delta_mean"]) == pytest.approx(expected, rel=1e-5)
         assert int(row["tokens"]) == sum(len(r["token_ids"]) for r in mine)
 
-    # a rerun takes every subject from its cache; a rewritten probe file is scored again
+    # a selection: 4 items stratified by domain, two contexts, one lineage at one step; its own directory and cache
+    cached = {p: p.read_bytes() for p in (run.dir / "context_score" / full).iterdir()}
+    evaluate.context_score(run.dir, items=4, contexts=["refute", "map"], lineages=["a"], steps=[2])
+    (part,) = [p.name for p in (run.dir / "context_score").iterdir() if p.name != full]
+    selection = read_json(run.dir / "context_score" / part / "selection.json")
+    assert part.startswith("4items-2contexts-") and selection["contexts"] == ["map", "refute"]
+    domains = [run.probe_tasks[i].domain for i in selection["positions"]]
+    assert sorted(domains) == ["code", "code", "logic", "math"]  # 2 of 6 per domain: 4 x 2 / 6, largest remainders
+    rows = score_table(run, part)
+    assert {r["subject"] for r in rows} == {"base", "base:map", "base:refute", "a@2"}
+    assert sum(int(r["responses"]) for r in rows if (r["subject"], r["context"]) == ("a@2", "map")) == 4
+    assert {p: p.read_bytes() for p in (run.dir / "context_score" / full).iterdir()} == cached  # not confused
+
+    # a rerun takes every subject from its cache; a rewritten probe file is scored again; a misordered one refused
     monkeypatch.setattr(evaluate, "Policy", lambda *a: pytest.fail("nothing should be recomputed"))
     evaluate.context_score(run.dir)
     path = run.dir / "members" / "c" / "probe_responses" / "step_000002.jsonl.gz"
     records = read_jsonl_gz(path)
-    path.write_bytes(gzip.compress("".join(json.dumps(r) + "\n" for r in records[:3]).encode()))
+    records[0] = {**records[0], "token_ids": records[0]["token_ids"][:-1] or [1]}
+    path.write_bytes(gzip.compress("".join(json.dumps(r) + "\n" for r in records).encode()))
     monkeypatch.setattr(evaluate, "Policy", lambda *a: run.policy)
     evaluate.context_score(run.dir)
-    assert read_json(run.dir / "context_score" / "c@2.json")["rows"][0]["responses"] < len(records)
+    rescored = read_json(run.dir / "context_score" / full / "c@2.json")
+    assert sum(r["tokens"] for r in rescored["rows"] if r["context"] == "map") == sum(
+        len(r["token_ids"]) for r in records)
+    path.write_bytes(gzip.compress("".join(json.dumps(r) + "\n" for r in records[::-1]).encode()))
+    with pytest.raises(RuntimeError, match="not in the order"):
+        evaluate.context_score(run.dir)
 
 
 def test_context_score_of_a_plain_prompt_context_is_zero(finished, monkeypatch):
     run = copy.copy(finished)
-    run.contexts = {"same": None}
     run.prompt = lambda question, context=None: finished.prompt(question)
     records = read_jsonl_gz(run.dir / "base" / "probe_responses.jsonl.gz")
-    deltas = evaluate.context_deltas(run, run.policy, records)["same"]
+    deltas = evaluate.context_deltas(run, run.policy, records, ["same"], token_budget=8)["same"]
     assert all(x == 0.0 for _, x, _ in deltas) and sum(n for _, _, n in deltas) == sum(
         r["completion_tokens"] for r in records)
+
+
+CHAIN = [  # pilot C's layout: seeded once, cloned at step 0 into both update rules
+    {"id": "s", "seed": 1, "context": "refute", "overrides": {"amplification": {"steps": 0}}},
+    {"id": "adv", "seed": 2, "parent": {"member": "s", "step": 0},
+     "overrides": {"amplification": {"steps": 3, "self_imitation": 0.0}}},
+    {"id": "si", "seed": 3, "parent": {"member": "s", "step": 0},
+     "overrides": {"amplification": {"steps": 3, "self_imitation": 0.5}}},
+]
+PAIR = [{"id": "k1", "seed": 4, "parent": {"member": "si", "step": 2}},  # appended after si has finished
+        {"id": "k2", "seed": 5, "parent": {"member": "si", "step": 2}}]
+
+
+def member_files(run_dir, members):
+    return {p: p.read_bytes() for m in members for p in sorted((run_dir / "members" / m).rglob("*")) if p.is_file()}
+
+
+def test_clone_chains_and_clones_added_to_a_finished_run(tmp_path, base_model, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(member_module, "score_many", engine_fakes.score_many)
+    data = {**{k: v for k, v in CONFIG.items() if k != "strata"}, "name": "chain", "members": CHAIN,
+            "clonable_steps": [2]}
+    run_dir = engine_fakes.frozen_run(tmp_path, data)
+    run = engine_fakes.FakeRun(run_dir)
+    run.policy = make_policy(base_model)
+    run.sampler = engine_fakes.FakeSampler(run.policy, tmp_path)
+    for context in [None, *run.contexts]:
+        worker.base_probe(run, run.sampler, context)
+    worker.advance(run, ["s", "adv", "si"])
+    assert [(load_lineage(run, m).status, load_lineage(run, m).step) for m in ("s", "adv", "si")] == [
+        ("done", 0), ("done", 3), ("done", 3)]
+    weights = "checkpoints/step_000000/adapter_model.safetensors"
+    assert ((run_dir / "members" / "adv" / weights).read_bytes() == (run_dir / "members" / "si" / weights).read_bytes()
+            == (run_dir / "members" / "s" / weights).read_bytes())  # both rules start from the same weights
+    reqs = {r.seed: r for r in run.sampler.requests}
+    for t in range(3):
+        for j in range(3):
+            assert reqs[stable_seed("rollout", 2, t, j)].prompt == reqs[stable_seed("rollout", 3, t, j)].prompt
+    assert all(r["si_sequences"] == 0 for r in history(run, "adv")) and any(
+        r["si_sequences"] > 0 for r in history(run, "si"))  # the two rules
+    assert (run_dir / "members" / "si" / "checkpoints" / "step_000002" / "optimizer.pt").exists()  # clonable step
+
+    before = member_files(run_dir, ("s", "adv", "si"))
+    refused = [({**data, "members": CHAIN + [{"id": "k0", "seed": 9, "parent": {"member": "si", "step": 1}}]},
+                "keeps its optimizer state only at steps"),
+               ({**data, "members": CHAIN + [{"id": "x", "seed": 9, "context": "verify"}]}, "different config"),
+               ({**data, "members": CHAIN + PAIR, "probes": {"every": 3, "max_tokens": 12}}, "different config")]
+    for changed, match in refused:
+        with pytest.raises(SystemExit, match=match):
+            engine_fakes.frozen_run(tmp_path, changed, "bad.yaml")
+    engine_fakes.frozen_run(tmp_path, {**data, "members": CHAIN + PAIR}, "extended.yaml")
+    run = engine_fakes.FakeRun(run_dir)
+    assert [m.id for m in run.cfg.members] == ["s", "adv", "si", "k1", "k2"]
+    run.policy = make_policy(base_model)
+    run.sampler = engine_fakes.FakeSampler(run.policy, tmp_path)
+    worker.advance(run, ["k1", "k2"])
+    clone_point = run_dir / "members" / "si" / "checkpoints" / "step_000002" / "adapter_model.safetensors"
+    for k in ("k1", "k2"):
+        lin = load_lineage(run, k)
+        assert (lin.status, lin.step, lin.parent) == ("done", 3, {"lineage": "si", "step": 2})
+        ckpt = run_dir / "members" / k / "checkpoints" / "step_000002" / "adapter_model.safetensors"
+        assert ckpt.read_bytes() == clone_point.read_bytes() and [r["step"] for r in history(run, k)] == [2]
+        assert history(run, k)[0]["si_sequences"] == sum(
+            r["reward"] == 1.0 for r in read_jsonl_gz(run_dir / "members" / k / "rollouts" / "step_000002.jsonl.gz"))
+    assert member_files(run_dir, ("s", "adv", "si")) == before  # the finished members are untouched

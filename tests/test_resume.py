@@ -245,6 +245,43 @@ def test_clone_continues_the_parent_bit_exactly(tmp_path, base_model):
     _assert_same_state(resumed.weights, reference.weights)
 
 
+def test_second_generation_clone_starts_from_its_parents_clone_point(tmp_path, base_model):
+    """p -> c1 (at step 2) -> c2 (at step 4): c2 starts bit-identically from c1's state at step 4, and its
+    optimizer-state check sees the whole chain's updates."""
+    policy = make_policy(base_model)
+    members = [PARENT, {"id": "c1", "seed": 2, "parent": {"member": "p", "step": 2}},
+               {"id": "c2", "seed": 3, "parent": {"member": "c1", "step": 4}}]
+    run = _fake_run(tmp_path, policy, members=members)
+    _train_parent(run, policy, 3, light_every=10)  # keeps its clone point 2
+    c1 = Member(run, first_lineage(run.cfg, "c1"))
+    assert c1.clone_points == {4} and c1.lin.parent == {"lineage": "p", "step": 2} and c1.lin.context == "refute"
+    c1.start_clone(c1.parent_checkpoint())
+    c1.lin.status = "active"
+    c1.write_checkpoint()
+    _commit(c1)
+    c2 = Member(run, first_lineage(run.cfg, "c2"))
+    assert c2.parent_checkpoint() is None  # c1 has not reached its clone point yet
+    for t in (2, 3):
+        stats = policy.update(c1.weights, random_groups(seed=20 + t), lr=1e-3)
+        append_jsonl(c1.dir / "history.jsonl", {"phase": "amp", "step": t, "sequences": stats["sequences"]})
+        c1.lin.step = t + 1
+        if c1.checkpoint_due(10 ** 6):
+            c1.light_checkpoint()
+    reference = copy.deepcopy(c1.weights)  # c1 at step 4
+    assert (c1.checkpoint_dir(4) / "optimizer.pt").exists()  # its clone point
+    c2.start_clone(c2.parent_checkpoint())
+    assert c2.lin.step == 4 and c2.lin.context == "refute"
+    _assert_same_state(c2.weights, reference)
+    seqs = random_groups(seed=40)
+    policy.update(c2.weights, seqs, lr=1e-3)
+    policy.update(reference, seqs, lr=1e-3)
+    _assert_same_state(c2.weights, reference)
+
+    (c1.checkpoint_dir(4) / "optimizer.pt").unlink()  # a lost file is refused, whoever made the updates
+    with pytest.raises(RuntimeError, match="optimizer.pt is missing"):
+        Member(run, first_lineage(run.cfg, "c2")).start_clone(c1.checkpoint_dir(4))
+
+
 def test_clone_refuses_a_parent_culled_before_the_clone_point(tmp_path, base_model):
     policy = make_policy(base_model)
     run = _fake_run(tmp_path, policy, members=[PARENT, *CLONES])

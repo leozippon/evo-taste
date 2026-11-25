@@ -142,7 +142,8 @@ FROZEN = ("suites", "contexts")  # files copied next to the frozen config
 
 def freeze(config_path: Path) -> Path:
     """Copy the config, suites, contexts and the strata table into runs/<name>/ once; later calls must find them
-    unchanged. The strata table must have its pinned SHA-256."""
+    unchanged, except that clones may be appended to the member list (see check_extension). The strata table must
+    have its pinned SHA-256."""
     cfg = config.load(config_path)  # validate before writing anything
     data = yaml.safe_load(config_path.read_text())
     run_dir = Path("runs") / data["name"]
@@ -155,17 +156,54 @@ def freeze(config_path: Path) -> Path:
         data["strata"] = {**data["strata"], "path": str(run_dir / "strata.tsv")}
     text = yaml.safe_dump(data, sort_keys=False)
     if (run_dir / "config.yaml").exists():
-        same = (run_dir / "config.yaml").read_text() == text and all(
-            (run_dir / name).read_bytes() == src.read_bytes() for name, src in sources.items())
-        if not same:
-            raise SystemExit(f"{run_dir} exists with a different config, suites, contexts or strata; use a new run "
-                             "name")
+        if not all((run_dir / name).read_bytes() == src.read_bytes() for name, src in sources.items()):
+            raise SystemExit(f"{run_dir} exists with other suites, contexts or strata; use a new run name")
+        frozen = yaml.safe_load((run_dir / "config.yaml").read_text())
+        if frozen == data:
+            return run_dir
+        added = appended_clones(frozen, data)
+        if added is None:
+            raise SystemExit(f"{run_dir} exists with a different config; use a new run name (a run can only be "
+                             "extended by clones appended to its member list)")
+        check_extension(config.load(run_dir / "config.yaml"), cfg, added)
+        (run_dir / "config.yaml").write_text(text)
+        if (run_dir / "prepared.json").exists():
+            info = read_json(run_dir / "prepared.json")
+            info.setdefault("extensions", []).append({"time": now(), "revision": revision(), "members": added})
+            write_json(run_dir / "prepared.json", info)
+        log.info("run %s extended by the clones %s", run_dir, ", ".join(added))
         return run_dir
     run_dir.mkdir(parents=True)
     for name, src in sources.items():
         shutil.copyfile(src, run_dir / name)
     (run_dir / "config.yaml").write_text(text)
     return run_dir
+
+
+def appended_clones(frozen: dict, new: dict) -> list[str] | None:
+    """The ids of the members `new` appends to the frozen config, if that is its only change and they are all clones;
+    otherwise None."""
+    n = len(frozen["members"])
+    if {**frozen, "members": None} != {**new, "members": None} or new["members"][:n] != frozen["members"]:
+        return None
+    added = new["members"][n:]
+    return [m["id"] for m in added] if added and all("parent" in m for m in added) else None
+
+
+def check_extension(frozen, extended, added: list[str]) -> None:
+    """Clones appended to a run whose members may already have passed the clone point: the parent must keep that
+    checkpoint with its optimizer state by its frozen config (a clone point it already has, or a clonable step), or
+    be a seeded member cloned at step 0 (the checkpoint after seeding, which has no optimizer state), or be appended
+    together with the clone."""
+    for member_id in added:
+        p = extended.member(member_id).parent
+        if p.member in added:
+            continue
+        parent = frozen.member(p.member)
+        kept = frozen.clone_points(parent.id) | ({0} if parent.parent is None else set())
+        if p.step not in kept:
+            raise SystemExit(f"cannot add {member_id}: {parent.id} keeps its optimizer state only at steps "
+                             f"{sorted(kept)}; list step {p.step} in clonable_steps before the parent passes it")
 
 
 def base_probe(run: Run, sampler: Sampler, context: str | None = None) -> None:
@@ -214,7 +252,8 @@ def prepare(config_path: Path, attach: str | None, server: dict | None = None) -
             if server:
                 server.stop()
     run.check_probe_set()
-    write_json(run.dir / "prepared.json", {"time": now(), "revision": revision(), "contexts": sorted(run.contexts)})
+    if not (run.dir / "prepared.json").exists():  # a prepared run keeps its record (fork, extensions)
+        write_json(run.dir / "prepared.json", {"time": now(), "revision": revision(), "contexts": sorted(run.contexts)})
     log.info("run %s prepared", run.dir)
 
 

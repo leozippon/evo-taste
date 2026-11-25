@@ -57,6 +57,23 @@ def test_a_clone_continues_its_parent():
     assert cfg.clone_points("p") == {60} and cfg.clone_points("c1") == set()
 
 
+def test_clone_chains_inherit_along_the_chain():
+    """Pilot C: a context seeded once, cloned at step 0 into both update rules, and a rule's member cloned again."""
+    cfg = parse([{"id": "s", "seed": 1, "context": "refute", "overrides": {"amplification": {"steps": 0}}},
+                 {"id": "adv", "seed": 2, "parent": {"member": "s", "step": 0},
+                  "overrides": {"amplification": {"steps": 60}}},
+                 {"id": "si", "seed": 3, "parent": {"member": "s", "step": 0},
+                  "overrides": {"amplification": {"steps": 60, "self_imitation": 0.5}}},
+                 {"id": "si-c1", "seed": 4, "parent": {"member": "si", "step": 45},
+                  "overrides": {"amplification": {"steps": 105}}}], clonable_steps=[45])
+    s, adv, si, c1 = cfg.members
+    assert [cfg.context_of(m) for m in cfg.members] == ["refute"] * 4
+    assert [cfg.start_step(m) for m in cfg.members] == [0, 0, 0, 45]
+    assert cfg.settings(c1)[1].self_imitation == 0.5 and cfg.settings(c1)[1].steps == 105  # the parent's rule
+    assert cfg.settings(adv)[1].self_imitation == 0.0 and cfg.settings(adv)[0] == cfg.settings(s)[0]
+    assert cfg.clone_points("s") == {0, 45} and cfg.clone_points("si") == {45} and cfg.clone_points("si-c1") == {45}
+
+
 @pytest.mark.parametrize("members, sections, match", [
     ([{"id": "a", "seed": 1}], {}, "context is required"),  # opcd without a context
     ([{"id": "a", "seed": 1, "context": "refute", "overrides": {"seeding": {"method": "none"}}}], {}, "only for"),
@@ -74,6 +91,13 @@ def test_a_clone_continues_its_parent():
     ([{"id": "a", "seed": 1, "context": "refute"}], {"seeding": {"lr": "fast"}}, "expected a number"),
     ([{"id": "a", "seed": 1}, {"id": "a", "seed": 2}], {"seeding": {"method": "none"}}, "unique"),
     ([{"id": "a@1", "seed": 1}], {"seeding": {"method": "none"}}, "letters"),
+    ([{"id": "a", "seed": 1, "context": "refute"}], {"clonable_steps": [-1]}, "clonable_steps"),
+    # D1 of the 2026-11-25 audit: any shared seed, between seeded members, clones of different parents or points
+    ([{"id": "a", "seed": 7, "context": "refute"}, {"id": "b", "seed": 7, "context": "verify"},
+      {"id": "t1", "seed": 9, "parent": {"member": "a", "step": 0}},
+      {"id": "t2", "seed": 9, "parent": {"member": "b", "step": 0}},
+      {"id": "k1", "seed": 9, "parent": {"member": "a", "step": 10}, "overrides": {"amplification": {"steps": 70}}}],
+     {}, r"seeds must be distinct; repeated: \[7, 9\]"),
 ])
 def test_refusals(members, sections, match):
     with pytest.raises(ValueError, match=match):
@@ -85,13 +109,13 @@ PARENT = {"id": "p", "seed": 1, "context": "refute"}
 
 @pytest.mark.parametrize("clone, match", [
     ({"parent": {"member": "q", "step": 10}}, "not a member"),
-    ({"parent": {"member": "c", "step": 10}}, "another member"),
+    ({"parent": {"member": "c", "step": 10}}, "cycle"),  # its own parent
     ({"parent": {"member": "p", "step": 10}, "context": "refute"}, "do not set"),
     ({"parent": {"member": "p", "step": 10}, "overrides": {"seeding": {"lr": 1e-3}}}, "do not set"),
     ({"parent": {"member": "p", "step": 61}}, "within the parent's course"),
     ({"parent": {"member": "p", "step": 60}}, "below the clone's amplification.steps"),  # nothing left to train
     ({"parent": {"member": "p", "step": -1}}, "within the parent's course"),
-    ({"parent": {"member": "p", "step": 10}, "seed": 1}, "seed must differ"),  # the parent's seed
+    ({"parent": {"member": "p", "step": 10}, "seed": 1}, "seeds must be distinct"),  # the parent's seed
     ({"parent": {"member": "p", "step": "ten"}}, "expected int"),
 ])
 def test_clone_refusals(clone, match):
@@ -109,16 +133,29 @@ def test_training_needs_the_pinned_strata_table():
         config.parse({**data, "strata": {"path": "x"}}, CONTEXTS)
 
 
-def test_clone_of_a_clone_and_twin_seeds_are_refused():
-    twin = {"parent": {"member": "p", "step": 10}}
-    with pytest.raises(ValueError, match="not itself a clone"):
-        parse([PARENT, {"id": "c", "seed": 2, **twin}, {"id": "g", "seed": 3, "parent": {"member": "c", "step": 20}}])
-    with pytest.raises(ValueError, match="seed must differ"):
-        parse([PARENT, {"id": "c", "seed": 2, **twin}, {"id": "d", "seed": 2, **twin}])
-    parse([PARENT, {"id": "c", "seed": 2, **twin}, {"id": "d", "seed": 2, "parent": {"member": "p", "step": 20}}])
+def test_clone_chain_refusals():
+    clone = {"id": "c", "seed": 2, "parent": {"member": "p", "step": 10}}
+    with pytest.raises(ValueError, match="cycle: c <- g <- c"):
+        parse([PARENT, {**clone, "parent": {"member": "g", "step": 20}}, {"id": "g", "seed": 3,
+                                                                          "parent": {"member": "c", "step": 20}}])
+    with pytest.raises(ValueError, match=r"within the parent's course \(10\.\.60\)"):  # before its parent started
+        parse([PARENT, clone, {"id": "g", "seed": 3, "parent": {"member": "c", "step": 5}}])
+    parse([PARENT, clone, {"id": "g", "seed": 3, "parent": {"member": "c", "step": 10}}])  # at its parent's start
 
 
-def test_template_parses():
+def test_template_and_pilot_b_parse():
     cfg = config.load(ROOT / "configs" / "run" / "pilot-template.yaml")
-    assert not cfg.culling.enabled and any(m.parent for m in cfg.members)
-    assert {cfg.settings(m)[0].method for m in cfg.members} == {"opcd", "imitation", "none"}
+    assert not cfg.culling.enabled and cfg.clonable_steps == (45,)
+    twins = [m for m in cfg.members if m.parent]
+    assert twins and all(m.parent.step == 0 and cfg.settings(m)[1].steps == 60 for m in twins)
+    assert {cfg.settings(m)[1].self_imitation for m in twins} == {0.0, 0.5}
+    b = config.load(ROOT / "configs" / "run" / "pilot-b.yaml")
+    settings = [b.settings(m) for m in b.members]
+    assert len(b.members) == 26 and not b.culling.enabled and b.strata is None
+    assert all(a.steps == 0 for _, a, _ in settings)
+    assert sorted(s.method for s, _, _ in settings).count("opcd") == 23
+    assert {m.context for m in b.members if m.context} == set(CONTEXTS)
+    math_only = [m.context for m, (s, _, _) in zip(b.members, settings) if s.domains == ("math",)]
+    assert sorted(math_only) == sorted(set(CONTEXTS) - {"placebo"})
+    assert sorted(m.context for m, (s, _, _) in zip(b.members, settings) if s.method == "imitation") == [
+        "refute", "verify"]

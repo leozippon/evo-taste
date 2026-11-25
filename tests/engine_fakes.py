@@ -4,6 +4,7 @@ on the CPU with the tiny model of conftest.py. Task and Score carry exactly the 
 
 from __future__ import annotations
 
+import hashlib
 import random
 import shutil
 from dataclasses import dataclass
@@ -136,6 +137,22 @@ class FakeSampler:
                 group.append(Sample(" ".join(map(str, ids)), ids, "stop" if ids[-1] == EOT else "length", lps))
             out.append(group)
         return out
+
+
+def frozen_run(tmp_path: Path, data: dict, name: str = "config.yaml") -> Path:
+    """runs/<name>/ as `worker.freeze` makes it from a config file in tmp_path, which must be the working directory,
+    with stand-in suites and strata files and a copy of the real contexts file."""
+    from evotaste import worker
+
+    if not (tmp_path / "contexts.yaml").exists():
+        shutil.copyfile(ROOT / "configs" / "contexts.yaml", tmp_path / "contexts.yaml")
+        (tmp_path / "suites.yaml").write_text("suites: {}\n")
+        (tmp_path / "strata.tsv").write_text("uid\tpasses\tsamples\n")
+    sha = hashlib.sha256((tmp_path / "strata.tsv").read_bytes()).hexdigest()
+    path = tmp_path / name
+    path.write_text(yaml.safe_dump({"model": MODEL, "seed": 0, "suites": "suites.yaml", "contexts": "contexts.yaml",
+                                    "strata": {"path": "strata.tsv", "sha256": sha}, **data}, sort_keys=False))
+    return worker.freeze(path)
 
 
 def write_run(tmp_path: Path, data: dict) -> Path:

@@ -244,8 +244,9 @@ class Policy:
         return lora
 
     # -- forward ---------------------------------------------------------------------------------------------
-    def _batches(self, seqs: list[Sequence]) -> list[list[_Row]]:
-        return micro_batches(build_rows(seqs, self.cfg.shared_prefix, self.cfg.token_budget), self.cfg.token_budget)
+    def _batches(self, seqs: list[Sequence], token_budget: int | None = None) -> list[list[_Row]]:
+        budget = token_budget or self.cfg.token_budget
+        return micro_batches(build_rows(seqs, self.cfg.shared_prefix, budget), budget)
 
     def _hidden(self, rows: list[_Row]) -> tuple[torch.Tensor, torch.Tensor]:
         """Final hidden states at the positions that predict each row's targets (rows concatenated), and the
@@ -280,9 +281,9 @@ class Policy:
         lp = head_logprobs(hidden, self.head_weight, targets)
         return list(lp.split([len(r.targets) for r in rows]))
 
-    def _logprobs(self, seqs: list[Sequence]) -> list[torch.Tensor]:
+    def _logprobs(self, seqs: list[Sequence], token_budget: int | None = None) -> list[torch.Tensor]:
         out: list = [None] * len(seqs)
-        for batch in self._batches(seqs):
+        for batch in self._batches(seqs, token_budget):
             for row, lp in zip(batch, self._forward(batch)):
                 for i, a, b in row.spans:
                     out[i] = lp[a:b].cpu()
@@ -295,10 +296,11 @@ class Policy:
         return self._logprobs(seqs)
 
     @torch.no_grad()
-    def base_logprobs(self, seqs: list[Sequence]) -> list[torch.Tensor]:
-        """Per-token log-probabilities (CPU, fp32) of each sequence's completion under the frozen base model."""
+    def base_logprobs(self, seqs: list[Sequence], token_budget: int | None = None) -> list[torch.Tensor]:
+        """Per-token log-probabilities (CPU, fp32) of each sequence's completion under the frozen base model; a
+        forward-only pass may use a larger token budget than the trainer's."""
         with self.model.disable_adapter():
-            return self._logprobs(seqs)
+            return self._logprobs(seqs, token_budget)
 
     # -- updates ---------------------------------------------------------------------------------------------
     def _optimizer(self, member: MemberWeights, lr: float) -> torch.optim.AdamW:

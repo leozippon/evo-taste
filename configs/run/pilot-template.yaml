@@ -1,6 +1,6 @@
 # Template for the Round 2 pilots (docs/design/round-2.md, "Pilots"): copy it under a new name and cut the member list.
 # The values written out are the pilot defaults of docs/dev/ROUND2_SPEC.md (also the schema defaults in
-# evotaste/config.py); the members show each way a member can start. Schema: docs/dev/ENGINE_NOTES.md.
+# evotaste/config.py); the members show the layout of pilot C. Schema: docs/dev/ENGINE_NOTES.md.
 name: pilot-template
 model: Qwen/Qwen3-1.7B
 seed: 2026
@@ -28,19 +28,28 @@ probes:
   max_tokens: 4096
 culling:
   enabled: false  # the pilots observe failures: would-be culls are recorded, nobody is replaced
+# every member keeps its step-45 state with optimizer, so that clone pairs can be added after step 45 is seen
+clonable_steps: [45]
 members:
-  # distilled from a stance, a tactic and the placebo on prompts from all domains
-  - {id: refute, context: refute, seed: 101}
-  - {id: verify, context: verify, seed: 201}
-  - {id: placebo, context: placebo, seed: 301}
-  # the unseeded control
-  - {id: unseeded, seed: 401, overrides: {seeding: {method: none}}}
-  # seeding-only members (no amplification): distilled on math alone, and Round 1's imitation for comparison
-  - {id: refute-math, context: refute, seed: 102, overrides: {seeding: {domains: [math]}, amplification: {steps: 0}}}
-  - {id: refute-imitation, context: refute, seed: 103,
-     overrides: {seeding: {method: imitation}, amplification: {steps: 0}}}
-  # the other update rule from the same seeded weights: a twin cloned at step 0 with self-imitation
-  - {id: refute-si, parent: {member: refute, step: 0}, seed: 104, overrides: {amplification: {self_imitation: 0.5}}}
-  # a clone pair for heritability: both continue refute's step-60 state for 60 more steps, differing only in seed
-  - {id: refute-c1, parent: {member: refute, step: 60}, seed: 105, overrides: {amplification: {steps: 120}}}
-  - {id: refute-c2, parent: {member: refute, step: 60}, seed: 106, overrides: {amplification: {steps: 120}}}
+  # each seed is distilled once and not trained itself ...
+  - {id: refute, context: refute, seed: 101, overrides: {amplification: {steps: 0}}}
+  - {id: verify, context: verify, seed: 102, overrides: {amplification: {steps: 0}}}
+  - {id: placebo, context: placebo, seed: 103, overrides: {amplification: {steps: 0}}}
+  - {id: unseeded, seed: 104, overrides: {seeding: {method: none}, amplification: {steps: 0}}}
+  # ... but cloned at step 0 into the two update rules, which so start from byte-identical weights
+  - {id: refute-adv, parent: {member: refute, step: 0}, seed: 111, overrides: {amplification: {steps: 60}}}
+  - {id: refute-si, parent: {member: refute, step: 0}, seed: 112,
+     overrides: {amplification: {steps: 60, self_imitation: 0.5}}}
+  - {id: verify-adv, parent: {member: verify, step: 0}, seed: 121, overrides: {amplification: {steps: 60}}}
+  - {id: verify-si, parent: {member: verify, step: 0}, seed: 122,
+     overrides: {amplification: {steps: 60, self_imitation: 0.5}}}
+  - {id: placebo-adv, parent: {member: placebo, step: 0}, seed: 131, overrides: {amplification: {steps: 60}}}
+  - {id: placebo-si, parent: {member: placebo, step: 0}, seed: 132,
+     overrides: {amplification: {steps: 60, self_imitation: 0.5}}}
+  - {id: unseeded-adv, parent: {member: unseeded, step: 0}, seed: 141, overrides: {amplification: {steps: 60}}}
+  - {id: unseeded-si, parent: {member: unseeded, step: 0}, seed: 142,
+     overrides: {amplification: {steps: 60, self_imitation: 0.5}}}
+  # A heritability pair, appended after step 45 has been looked at (`worker prepare` on this file with the lines
+  # added; finished members are not touched). The clones inherit refute-si's rule and run 60 more steps.
+  # - {id: refute-si-c1, parent: {member: refute-si, step: 45}, seed: 151, overrides: {amplification: {steps: 105}}}
+  # - {id: refute-si-c2, parent: {member: refute-si, step: 45}, seed: 152, overrides: {amplification: {steps: 105}}}

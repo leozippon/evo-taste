@@ -211,6 +211,17 @@ def current_lineage(run: Run, slot: str) -> Lineage | None:
     return lin
 
 
+def ancestry_history(run: Run, lineage_id: str, before: int) -> list[dict]:
+    """The amplification history behind a lineage's state at step `before`: its own lines before that step and, for a
+    clone, its parent's before the clone point, and so on up the chain."""
+    lines = [r for r in read_jsonl(lineage_dir(run, lineage_id) / "history.jsonl")
+             if r["phase"] == "amp" and r["step"] < before]
+    lin = load_lineage(run, lineage_id)
+    if lin is not None and lin.parent is not None:
+        lines += ancestry_history(run, lin.parent["lineage"], min(before, lin.parent["step"]))
+    return lines
+
+
 def load_checkpoint(policy, ckpt: Path, history: list[dict], step: int, owner: str) -> MemberWeights:
     """Weights and optimizer state of a checkpoint at `step`; refuses when the optimizer state is missing although
     `history` shows amplification updates before that step (a lost file must not silently restart AdamW)."""
@@ -227,7 +238,7 @@ class Member:
         self.spec = run.cfg.member(lin.slot)
         self.seeding, self.amp, self.culling = run.cfg.settings(self.spec)
         self.dir = lineage_dir(run, lin.id)
-        # checkpoints this lineage keeps with optimizer state, for the clones that start from it
+        # checkpoints this lineage keeps with optimizer state, for the clones that start from it now or later
         self.clone_points = run.cfg.clone_points(lin.id) if lin.generation == 0 else set()
         self.weights: MemberWeights | None = None
         self.version: str | None = None  # adapter version currently served for this member
@@ -267,11 +278,7 @@ class Member:
             if path.name.endswith(".tmp") or int(path.name[5:11]) > s:
                 shutil.rmtree(path)
         ckpt = self.checkpoint_dir(s)
-        history = read_jsonl(self.dir / "history.jsonl")
-        if self.lin.parent is not None:  # a clone's updates before its start are its parent's
-            p = self.lin.parent
-            history += [r for r in read_jsonl(lineage_dir(self.run, p["lineage"]) / "history.jsonl")
-                        if r["phase"] == "amp" and r["step"] < p["step"]]
+        history = ancestry_history(self.run, self.lin.id, s)  # a clone's updates before its start are its parents'
         self.weights = load_checkpoint(self.run.policy, ckpt, history, s, self.lin.id)
         log.info("%s resumed from %s", self.lin.id, ckpt)
 
@@ -366,7 +373,7 @@ class Member:
         """The parent's weights and optimizer state at the clone point, and its step counter. The clone commits its
         own copy of that checkpoint with its first probe."""
         p = self.lin.parent
-        history = read_jsonl(lineage_dir(self.run, p["lineage"]) / "history.jsonl")
+        history = ancestry_history(self.run, p["lineage"], p["step"])
         self.weights = load_checkpoint(self.run.policy, ckpt, history, p["step"], p["lineage"])
         self.lin.step = p["step"]
         log.info("%s cloned from %s at step %d", self.lin.id, p["lineage"], p["step"])

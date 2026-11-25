@@ -119,7 +119,8 @@ class MemberSpec:
     id: str
     seed: int  # lineage seed: LoRA initialisation, every sampling seed, imitation draws
     context: str | None = None  # a name in the contexts file; required by seeding opcd and imitation
-    parent: Parent | None = None  # a clone: starts from the parent's checkpoint at that step, optimizer included
+    parent: Parent | None = None  # a clone: starts from the parent's checkpoint at that step, optimizer included;
+    # the parent may itself be a clone
     overrides: Overrides = field(default_factory=Overrides)
     role: str = "member"  # member: population, ranked by the harvest; baseline: listed but never ranked
 
@@ -133,6 +134,9 @@ class RunConfig:
     suites: str = "configs/suites-r2.yaml"
     contexts: str = "configs/contexts.yaml"
     strata: Strata | None = None  # required as soon as any member has amplification steps
+    # Steps at which every member keeps its checkpoint with optimizer state, so that clones can be added to the run
+    # after their parents have passed them (worker prepare on the config extended by those clones).
+    clonable_steps: tuple[int, ...] = ()
     server: Server = field(default_factory=Server)
     lora: Lora = field(default_factory=Lora)
     trainer: Trainer = field(default_factory=Trainer)
@@ -158,11 +162,17 @@ class RunConfig:
 
     def context_of(self, spec: MemberSpec) -> str | None:
         """The member's seeding context; a clone's is its parent's."""
-        return self.member(spec.parent.member).context if spec.parent else spec.context
+        return self.context_of(self.member(spec.parent.member)) if spec.parent else spec.context
+
+    def start_step(self, spec: MemberSpec) -> int:
+        """The amplification step a member starts at: 0, or a clone's clone point."""
+        return spec.parent.step if spec.parent else 0
 
     def clone_points(self, member_id: str) -> set[int]:
-        """Steps at which the lineage `member_id` must keep a checkpoint with optimizer state for its clones."""
-        return {m.parent.step for m in self.members if m.parent and m.parent.member == member_id}
+        """Steps at which the lineage `member_id` keeps a checkpoint with optimizer state: those its clones name, and
+        the run's clonable steps."""
+        return {m.parent.step for m in self.members if m.parent and m.parent.member == member_id} | set(
+            self.clonable_steps)
 
 
 def _override(cls, value, changes: dict, where: str):
@@ -240,6 +250,12 @@ def parse(data: dict, context_names) -> RunConfig:
     ids = [m.id for m in cfg.members]
     if not ids or len(set(ids)) != len(ids):
         raise ValueError("config.members: member ids must be present and unique")
+    seeds = [m.seed for m in cfg.members]
+    repeated = sorted({s for s in seeds if seeds.count(s) > 1})
+    if repeated:  # a shared seed means a shared LoRA initialisation and common random numbers in every draw
+        raise ValueError(f"config.members: seeds must be distinct; repeated: {repeated}")
+    if any(s < 0 for s in cfg.clonable_steps):
+        raise ValueError("config.clonable_steps: steps must be >= 0")
     for m in cfg.members:
         where = f"member {m.id}"
         if not _ID.match(m.id):
@@ -264,24 +280,24 @@ def parse(data: dict, context_names) -> RunConfig:
 
 def _check_clone(cfg: RunConfig, m: MemberSpec) -> None:
     where = f"member {m.id} (a clone)"
-    try:
-        parent = cfg.member(m.parent.member)
-    except KeyError:
-        raise ValueError(f"{where}: parent {m.parent.member!r} is not a member of this run") from None
-    if parent.id == m.id or parent.parent is not None:
-        raise ValueError(f"{where}: the parent must be another member that is not itself a clone")
+    chain, spec = [m.id], m
+    while spec.parent is not None:  # the chain of parents must end at a seeded member
+        try:
+            spec = cfg.member(spec.parent.member)
+        except KeyError:
+            raise ValueError(f"{where}: parent {spec.parent.member!r} is not a member of this run") from None
+        if spec.id in chain:
+            raise ValueError(f"{where}: its chain of parents is a cycle: {' <- '.join(chain + [spec.id])}")
+        chain.append(spec.id)
     if m.context is not None or m.overrides.seeding:
         raise ValueError(f"{where}: a clone has its parent's context and seeding; do not set them")
     seeding, amp, culling = cfg.settings(m)
     _check_settings(where, seeding, amp, culling)
-    parent_steps = cfg.settings(parent)[1].steps
-    if not 0 <= m.parent.step <= parent_steps or m.parent.step >= amp.steps:
-        raise ValueError(f"{where}: parent.step {m.parent.step} must be within the parent's course (0..{parent_steps}) "
+    parent = cfg.member(m.parent.member)
+    start, end = cfg.start_step(parent), cfg.settings(parent)[1].steps
+    if not start <= m.parent.step <= end or m.parent.step >= amp.steps:
+        raise ValueError(f"{where}: parent.step {m.parent.step} must be within the parent's course ({start}..{end}) "
                          f"and below the clone's amplification.steps ({amp.steps})")
-    siblings = [o for o in cfg.members if o.parent == m.parent and o.id != m.id]
-    if m.seed == parent.seed or any(o.seed == m.seed for o in siblings):
-        raise ValueError(f"{where}: its seed must differ from its parent's and from every clone of the same parent "
-                         "and step, or the two would draw the same samples")
 
 
 def load_contexts(path: str | Path) -> dict[str, str]:

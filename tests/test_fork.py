@@ -143,3 +143,20 @@ def test_fork_refuses_other_contexts_or_an_unprepared_source(source, tmp_path):
     (source / "prepared.json").unlink()
     with pytest.raises(SystemExit, match="not prepared"):
         worker.fork(source, new_config(tmp_path), dry_run=True)
+
+
+def test_prepare_extends_a_run_by_appended_clones_only(source, tmp_path):
+    """The frozen config may gain clones at the end, whose parents keep the clone point; anything else is refused."""
+    files = {p: p.read_bytes() for p in sorted((source / "members").rglob("*")) if p.is_file()}
+    twin = {"id": "a-si", "seed": 11, "parent": {"member": "a", "step": 0},
+            "overrides": {"amplification": {"self_imitation": 0.5}}}
+    for members, match in ((MEMBERS + [{**twin, "parent": {"member": "a", "step": 3}}], "only at steps \\[0\\]"),
+                           (MEMBERS + [{"id": "e", "seed": 11, "context": "map"}], "different config"),
+                           (MEMBERS[:3] + [twin], "different config")):
+        with pytest.raises(SystemExit, match=match):
+            worker.freeze(write_config(tmp_path / "x.yaml", base_config("src", members)))
+    worker.freeze(write_config(tmp_path / "x.yaml", base_config("src", MEMBERS + [twin])))
+    assert [m.id for m in config.load(source / "config.yaml").members] == ["a", "b", "c", "d", "a-si"]
+    (extension,) = read_json(source / "prepared.json")["extensions"]
+    assert extension["members"] == ["a-si"] and read_json(source / "prepared.json")["revision"] == "abc123"
+    assert {p: p.read_bytes() for p in sorted((source / "members").rglob("*")) if p.is_file()} == files

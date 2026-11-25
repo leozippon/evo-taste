@@ -1,0 +1,58 @@
+# Pilot B, seeding (docs/design/round-2.md, "Pilots"): every context distilled once on prompts from all domains and,
+# except the placebo, once on math prompts only; two contexts also seeded by Round 1's imitation; one unseeded member.
+# No reinforcement learning: with amplification.steps 0 a member stops after seeding and its step-0 probe, which is
+# the measurement (absorption by context score, cross-domain carry-over, accuracy, recitation).
+# Pilot C can fork this run (`worker fork runs/pilot-b <pilot C config>`) to reuse the seeded members, provided its
+# model, seed, lora, seeding, probes and trainer sections and the members' ids, contexts and seeds stay identical.
+name: pilot-b
+model: Qwen/Qwen3-1.7B
+seed: 2026
+contexts: configs/contexts.yaml
+# A run without amplification steps needs no strata table. PLACEHOLDER, to be pinned when the census is done if this
+# run is to share its config sections with a forked training run:
+# strata: {path: results/census/census-r2/strata.tsv, sha256: "<SHA-256 of the strata table>"}
+lora: {rank: 32, alpha: 64}
+seeding:
+  method: opcd
+  steps: 40
+  batch: 64
+  lr: 1.0e-4
+  max_tokens: 4096
+amplification:
+  steps: 0
+probes:
+  every: 15
+  max_tokens: 4096
+culling:
+  enabled: false
+members:
+  # opcd on all domains: the placebo, five stances, six tactics
+  - {id: placebo, context: placebo, seed: 201}
+  - {id: refute, context: refute, seed: 202}
+  - {id: parsimony, context: parsimony, seed: 203}
+  - {id: ground_up, context: ground_up, seed: 204}
+  - {id: observe, context: observe, seed: 205}
+  - {id: relations, context: relations, seed: 206}
+  - {id: verify, context: verify, seed: 207}
+  - {id: direct, context: direct, seed: 208}
+  - {id: define, context: define, seed: 209}
+  - {id: small_case, context: small_case, seed: 210}
+  - {id: map, context: map, seed: 211}
+  - {id: procedure, context: procedure, seed: 212}
+  # opcd on math prompts only: does the disposition reach code and logic?
+  - {id: refute-math, context: refute, seed: 222, overrides: {seeding: {domains: [math]}}}
+  - {id: parsimony-math, context: parsimony, seed: 223, overrides: {seeding: {domains: [math]}}}
+  - {id: ground_up-math, context: ground_up, seed: 224, overrides: {seeding: {domains: [math]}}}
+  - {id: observe-math, context: observe, seed: 225, overrides: {seeding: {domains: [math]}}}
+  - {id: relations-math, context: relations, seed: 226, overrides: {seeding: {domains: [math]}}}
+  - {id: verify-math, context: verify, seed: 227, overrides: {seeding: {domains: [math]}}}
+  - {id: direct-math, context: direct, seed: 228, overrides: {seeding: {domains: [math]}}}
+  - {id: define-math, context: define, seed: 229, overrides: {seeding: {domains: [math]}}}
+  - {id: small_case-math, context: small_case, seed: 230, overrides: {seeding: {domains: [math]}}}
+  - {id: map-math, context: map, seed: 231, overrides: {seeding: {domains: [math]}}}
+  - {id: procedure-math, context: procedure, seed: 232, overrides: {seeding: {domains: [math]}}}
+  # Round 1's method for comparison: imitation of the teacher's correct answers, all domains
+  - {id: refute-imitation, context: refute, seed: 242, overrides: {seeding: {method: imitation}}}
+  - {id: verify-imitation, context: verify, seed: 247, overrides: {seeding: {method: imitation}}}
+  # the unseeded control
+  - {id: unseeded, seed: 250, overrides: {seeding: {method: none}}}

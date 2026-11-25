@@ -1,5 +1,7 @@
-"""The blind guard refuses without a committed, unmodified manifest listing the adapter's hash; base is exempt."""
+"""The blind guard refuses without a committed, unmodified manifest listing the adapter's hash, for the base model
+too."""
 
+import hashlib
 import json
 import subprocess
 
@@ -75,10 +77,19 @@ def test_refusals(repo, adapter):
     assert ledger_lines(repo) == 1
 
 
-def test_base_model_is_exempt_but_logged(repo):
-    receipt = blind_guard("blind1", "r", {"base": None}, 8, 2, repo)
-    assert receipt.vault == "blind1" and "base model only" in receipt.ledger_line
-    assert ledger_lines(repo) == 1
+def test_the_base_model_needs_the_manifest_too(repo):
+    """Round 2: no model, the base model included, runs on a blind item before the manifest is committed."""
+    with pytest.raises(PermissionError, match="not tracked"):
+        blind_guard("blind2", "r", {"base": None}, 8, 2, repo)
+    path = write_manifest(repo, "1" * 64)
+    with pytest.raises(PermissionError, match="not tracked"):  # written but not committed
+        blind_guard("blind2", "r", {"base": None}, 8, 2, repo)
+    assert ledger_lines(repo) == 0
+    git(repo, "add", str(path.relative_to(repo)))
+    git(repo, "commit", "-qm", "manifest")
+    receipt = blind_guard("blind2", "r", {"base": None}, 8, 2, repo)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert receipt.vault == "blind2" and digest in receipt.ledger_line and ledger_lines(repo) == 1
     with pytest.raises(ValueError):
         blind_guard("selection", "r", {"base": None}, 8, 2, repo)
 
