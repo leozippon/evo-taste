@@ -76,3 +76,20 @@ members:
   - {id: unseeded-si, parent: {member: unseeded, step: 0}, seed: 413, overrides: {amplification: {steps: 45, self_imitation: 0.5}}}
   - {id: unseeded-b-adv, parent: {member: unseeded-b, step: 0}, seed: 314, overrides: {amplification: {steps: 45}}}
   - {id: unseeded-b-si, parent: {member: unseeded-b, step: 0}, seed: 414, overrides: {amplification: {steps: 45, self_imitation: 0.5}}}
+  # Heritability pairs: two clones of a member at step 45, continued to step 90 under the parent's rule with different
+  # sampling seeds. Fourteen parents, seven per rule; which ones was fixed by which workers finished first, before any
+  # step-45 result had been looked at. First batch (26 November, 00:30):
+  - {id: observe-si-c1, parent: {member: observe-si, step: 45}, seed: 501, overrides: {amplification: {steps: 90}}}
+  - {id: observe-si-c2, parent: {member: observe-si, step: 45}, seed: 502, overrides: {amplification: {steps: 90}}}
+  - {id: relations-adv-c1, parent: {member: relations-adv, step: 45}, seed: 503, overrides: {amplification: {steps: 90}}}
+  - {id: relations-adv-c2, parent: {member: relations-adv, step: 45}, seed: 504, overrides: {amplification: {steps: 90}}}
+  - {id: define-si-c1, parent: {member: define-si, step: 45}, seed: 505, overrides: {amplification: {steps: 90}}}
+  - {id: define-si-c2, parent: {member: define-si, step: 45}, seed: 506, overrides: {amplification: {steps: 90}}}
+  - {id: small_case-adv-c1, parent: {member: small_case-adv, step: 45}, seed: 507, overrides: {amplification: {steps: 90}}}
+  - {id: small_case-adv-c2, parent: {member: small_case-adv, step: 45}, seed: 508, overrides: {amplification: {steps: 90}}}
+  - {id: map-si-c1, parent: {member: map-si, step: 45}, seed: 509, overrides: {amplification: {steps: 90}}}
+  - {id: map-si-c2, parent: {member: map-si, step: 45}, seed: 510, overrides: {amplification: {steps: 90}}}
+  - {id: procedure-adv-c1, parent: {member: procedure-adv, step: 45}, seed: 511, overrides: {amplification: {steps: 90}}}
+  - {id: procedure-adv-c2, parent: {member: procedure-adv, step: 45}, seed: 512, overrides: {amplification: {steps: 90}}}
+  - {id: unseeded-b-si-c1, parent: {member: unseeded-b-si, step: 45}, seed: 513, overrides: {amplification: {steps: 90}}}
+  - {id: unseeded-b-si-c2, parent: {member: unseeded-b-si, step: 45}, seed: 514, overrides: {amplification: {steps: 90}}}
