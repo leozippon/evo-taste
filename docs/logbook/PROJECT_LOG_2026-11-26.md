@@ -60,8 +60,23 @@ Base model and the 28 members on 3,520 selection items, two samples each: 1,840 
 - **Authorship.** A classifier trained on half the sources names the author of an answer from the other half 56% of the time (chance 3.6%); with layout and notation stripped, 48%; from layout alone, 21%. Unlike Round 1, most of what makes a member recognisable is not layout.
 - **No format loss on real-data units**: strict and format-forgiving accuracy agree within 0.1 point for every member. Compliance with the requested wrapper is 95 to 98% under the relative-only rule and 86 to 99% with self-imitation, the shortfall being cut-off answers.
 
+## First checks of the amplification mechanisms, 14:00
+
+The engine now has exaggerated self-imitation, self-chosen practice, a scaled-adapter probe and likelihood-based measures of deviation and of who wrote an answer. The developer's five-step check on one card was already informative.
+
+- **Exaggerated self-imitation runs away.** At weight 0.5 a member's answers grew from 527 to 1,559 tokens in five updates and its probe accuracy fell from 0.43 to 0.29 (code from 0.47 to 0.06). The term's gradient grows with the deviation it produces: at weights 0.2, 0.1 and 0.05 its size relative to the advantage gradient rose over four updates to 2.3, 4.6 and 1.7 times. A fixed weight only sets when it takes over. After five steps the deviation from the base model was 0.27 nats per token with exaggeration against 0.05 without; 45 steps of plain training in pilot C had reached 0.20 to 0.26.
+- **Scaling an adapter degrades it.** Unseeded pilot C members at 1, 1.5 and 2 times their adapter: accuracy 0.47, 0.35, 0.32 and 0.48, 0.40, 0.20; answer length 1,109, 1,518, 2,052 and 1,438, 2,381, 3,617 tokens; compliance down to 0.73 and 0.31. Training had taken them about as far along their own direction as pays.
+- **Self-chosen practice follows common difficulty.** After five steps both practising members had shifted toward the same sources.
+- A defect in the shared prompt stream surfaced: at two steps of a 48-problem course a batch has 49 prompts and one repeated item. It affected all pilot C members identically. It will be fixed for new runs under a version flag so that existing runs keep their batches.
+
+**Reading.** A member's deviation is a mixture of what the reward shaped, habit the reward ignores, and length, and amplifying the whole mixture amplifies length first. The design was revised (`docs/design/amplification.md`): the next mechanism acts only among a member's correct answers to the same problem, raising the reward of the most characteristic one and lowering the least, with a clipped strength relative to the step, so that it cannot buy deviation with accuracy and does not strengthen as the member moves. The reversed sign is the control.
+
+**Launched.** Pilot D, reduced to eight unseeded members on two cards: three relative-only, three with practice, two with exaggeration at weight 0.01. It characterises the undirected mechanisms at low strength and adds unseeded baselines. A deviation measurement of all pilot C members and clones runs on a third card. Pilot E, the taste-shaped reward on clones of four pilot C members in three variants, starts when its engine work is done.
+
+- The real-data null for the member-by-problem interaction, the base model against itself on four samples, reads −131 pp² (interval −398 to +157) against 197 pp² measured between members: consistent with zero, though imprecise with a single model.
+- The last four interrupted clones of pilot C finished their five steps; seven clone pairs are complete at step 90, and five more stopped at step 60 to 70.
+
 ## In progress
 
-- The step-45 evaluation of pilot C; from it, how much members differ in which problems they solve, and a harvest simulation inside the selection suite.
-- The engine work for the amplification mechanisms, then pilot D: four arms of four unseeded lineages.
-- Seven clone pairs of pilot C (three complete, four at step 85) remain for a heritability baseline once cards are free.
+- Pilot D to step 45 (about 20:00); the engine and analysis work for selective amplification; pilot E.
+- How much of the member-by-problem interaction is explained by answer length and truncation.
