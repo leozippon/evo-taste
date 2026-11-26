@@ -36,4 +36,6 @@ The sections above describe Round 1. Round 2 keeps the paradigm and rebuilds wha
 - **Seeding.** A member's starting bias is distilled from an instruction that only a frozen teacher sees. Epistemic stances, such as trying to break every answer before accepting it, are compared with mechanical tactics on the same themes.
 - **Amplification.** The Round 1 update is compared with one in which a member also imitates its own successes, which makes accidents of sampling compound.
 
+A second direction, in [design/amplification.md](design/amplification.md), no longer puts a bias in from outside. It looks for the training paradigm that makes a member's own deviation from the base model grow along its own direction: training a member toward an exaggerated version of itself on its successes, and letting it practise more of what it already solves best.
+
 Small pilots come first. They must show that members come to solve different problems, not just to write differently, and that two copies of a member trained further stay more alike than two unrelated members. A population run and the opening of the second blind vault, which stays sealed and is extended with new unseen sources, follow only then.

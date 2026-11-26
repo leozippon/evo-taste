@@ -39,8 +39,17 @@ How much of its context a member carries, on the scale where 0 is the base model
 - Another project of the same owner needs cards; its session asked for an estimate and was given one, later revised by an hour. No further wave of this project is started on cards as they empty, and the last four clones in the pilot config (the neutral-context and unseeded members under the relative-only rule) were withdrawn before starting, leaving twelve clone pairs.
 - The step-45 evaluation was sized on the base model's answer length. Trained members write about twice as much, and half of its 3,520 items are the procedural format-probe units, which were meant to be a small side measurement. It takes about seven hours instead of three.
 
+## Change of direction, 09:00
+
+The user redirected the work: away from distilling instructions into members, toward training paradigms that reinforce and amplify a member's own biases so that it leaves the base model's average behaviour, on at most four GPUs.
+
+- **Compute.** This project now holds four cards (1, 2, 5, 7); the owner's other project uses the other four. Stopped at once: the second batch of clone pairs (five seeded parents, at steps 61 and 71 of 90), the first batch's last worker (four clones at step 85 of 90, resumable), the scoring of the imitation side run, and all supervisors. The step-45 evaluation keeps the four cards until it finishes.
+- **What carries over.** The pilots are the baseline for the new question: relative-only training removes what costs reward and otherwise leaves a member where it was; self-imitation amplified length, not disposition; a member starting from the bare base model is fragile. Nothing tried so far reinforces a lineage's own direction.
+- **Design.** `docs/design/amplification.md`: an endogenous bias is a member's deviation from the base model on the same input, and three mechanisms are built to reinforce it along its own direction — exaggerated self-imitation (training toward the member's own distribution pushed further from the base model's, on its successes), self-chosen practice (more of what the member solves best), and scaling an adapter's deviation as a probe on existing members. Deviation and distinctness are measured by likelihood: how much more probable a member finds its own answers than the base model does, and than another member does.
+- The seeding results stand as reported; the wash-out comparison is not extended further.
+
 ## In progress
 
-- The step-45 evaluation; from it, how much members differ in which problems they solve, and a harvest simulation inside the selection suite (rank on half the unseen sources, test on the other half).
-- Twelve clone pairs from step 45 to step 90 for the heritability test.
-- The two imitation-seeded members under both rules, as one strongly absorbed tactic for the wash-out comparison.
+- The step-45 evaluation of pilot C; from it, how much members differ in which problems they solve, and a harvest simulation inside the selection suite.
+- The engine work for the amplification mechanisms, then pilot D: four arms of four unseeded lineages.
+- Seven clone pairs of pilot C (three complete, four at step 85) remain for a heritability baseline once cards are free.
