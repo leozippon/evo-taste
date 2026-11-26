@@ -6,34 +6,47 @@ The second direction of Round 2. The first, in [round-2.md](round-2.md), put a b
 
 - **Relative-only reinforcement learning does not amplify.** It removes within about 30 steps whatever costs reward and leaves everything else where it was. A harmless seeded disposition is still there after 45 steps, at about its seeded strength, not stronger.
 - **Self-imitation is not the amplifier it was meant to be.** Imitating one's own successes halved the seeded dispositions and amplified one trait, answer length, up to the token limit.
+- **Members do diverge by themselves, and substantively.** After 45 steps, which problems a member solves differs between members by about 14 points per problem beyond what level and difficulty explain, and a member's standing carries over to unseen sources at about half strength. The largest single difference is how long members' answers have become.
 - **A member that starts from the bare base model is fragile under relative-only training.** It lengthens, loses held-out answer formats and loses mastered problems within 15 steps, while members whose adapter had first been through any distillation, even of a neutral instruction, do not.
 
-So nothing tried so far reinforces a lineage's own direction. The mechanisms below are built to do exactly that.
+So lineages drift apart, but nothing tried so far reinforces a lineage's own direction.
 
 ## What is to be amplified
 
 A member's endogenous bias is the way its behaviour differs from the base model's on the same input, whatever produced the difference: its initialisation, the accidents of its own sampling, its own history of successes. Average behaviour is the base model's. A paradigm amplifies endogenous bias if, over training, a member's deviation from the base model grows along the direction it already has, stays functional, and differs from lineage to lineage. Growth that is the same for every lineage is a property of the environment, not a taste; growth that destroys accuracy is collapse.
 
-## Mechanisms
+## Undirected amplification fails
 
-Each adds one thing to relative-only training. All members start unseeded and differ only by seed.
+The first mechanisms pushed a member further along everything it had become, and the first checks were enough to judge them.
 
-1. **Exaggerated self-imitation.** On its own successful answers a member is trained toward a caricature of itself: its own next-token distribution pushed further away from the base model's (member plus a multiple of member minus base, in logit space). Standard practice penalises distance from a reference model; this rewards it, but only in the direction the member has already taken and only where the answer was right. A member identical to the base model feels no push, so the symmetry has to be broken by the member's own sampling first, and whatever breaks it is then reinforced.
-2. **Self-chosen practice.** A member practises more of the kind of problem it currently solves best. All sources stay in the mix within bounds, so the environment remains whole, but the proportions follow the member's own record: early luck on one kind of problem becomes more practice on it, and more skill.
-3. **Weight-space extrapolation.** The adapter is the member's deviation from the base model in weight space. Scaling it up exaggerates the member directly, with no training. It is tried first as a probe on the adapters that already exist: does a member at 1.5 or 2 times its own deviation become more itself, or just worse?
+- **Exaggerated self-imitation.** On its own successful answers a member is trained toward a caricature of itself: its own next-token distribution pushed further away from the base model's. The push grows with the deviation it produces, so it has no resting point: at the planned strength a member collapsed within five updates (answers three times as long, accuracy down by a third), and a weaker push only postpones the take-off.
+- **Scaling the adapter.** Multiplying an existing member's deviation in weight space by 1.5 or 2, with no training, made it less accurate, less compliant and far more verbose. Training had already taken the member about as far along its own direction as pays.
+- **Self-chosen practice,** in which a member practises more of the kind of problem it solves best, mostly followed which sources are easy for every member.
 
-Because the previous amplifier fed on length, the imitation terms apply only to successful answers that stay within the free length.
+The lesson is that a member's deviation is a mixture. Part of it is what the reward shaped, part is habit that the reward is indifferent to, and the largest part by size is length. Amplifying the whole mixture amplifies length first.
+
+## Selective amplification
+
+The next mechanisms act only where the reward is indifferent, and with a strength that does not grow with the deviation.
+
+1. **Taste-shaped reward.** Among a member's correct answers, the ones most characteristic of itself earn more. An answer's characteristic score is how much more probable the member finds it than the base model does, per token; scores are standardised across the step's correct answers and clipped, and a correct answer's reward is scaled by between 0.5 and 1.5 accordingly. A wrong answer earns nothing however characteristic it is, so deviation cannot be bought with accuracy, and because the scale is relative within a step the pressure stays the same size as the member moves away. Where two answers are both right, the member is steered toward its own way of being right: this turns the drift that the reward ignores into a self-reinforcing direction. Run with the sign reversed, the same term steers a member back toward the base model, which gives a control that differs in nothing else.
+2. **Practice relative to the base model.** A member practises more of the sources on which it has gained most over the base model's own pass rate, so that what is reinforced is the member's own progress, not the common difficulty of a source.
+
+The taste-shaped reward is applied to members that training has already shaped, by cloning members at step 45 into the three variants (own direction, neutral, toward the base model), so that the three start from identical weights.
 
 ## Measurements
 
 - **Deviation.** How much more likely a member finds its own answers than the base model does, in nats per token: its distance from average behaviour.
 - **Distinctness.** How much better a member predicts its own answers than another member's, and how often the author of an answer is identified by likelihood alone. This needs no classifier and no features.
 - **Coherence.** Whether a member is recognisable by the same measure on domains and sources other than those the comparison was fitted on.
-- **Substance.** Which problems a member solves, relative to its overall level and each problem's difficulty; its profile across domains; accuracy on unseen sources; and health: answer formats, mastered problems, length.
-- **Heritability.** Clone pairs, as before: do two continuations of one member stay closer than two unrelated members, in all of the above.
+- **Substance.** Which problems a member solves, relative to its overall level and each problem's difficulty; its profile across domains; accuracy on unseen sources; and health: answer formats, mastered problems, length. Because presentation is the cheapest way to be characteristic, the share of a member's recognisability that survives stripping layout and notation is reported with every result.
+- **Heritability.** Clone pairs: do two continuations of one member stay closer than two unrelated members, in all of the above.
 
-A mechanism is worth a population run if it raises deviation and distinctness above relative-only training, the difference is heritable, and accuracy on unseen sources does not fall.
+A mechanism is worth a population run if it raises deviation and distinctness above the neutral variant, the gain is not presentation or length, the difference is heritable, and accuracy on unseen sources does not fall.
 
-## Pilot D
+## Pilots
 
-Four arms of four unseeded lineages each — relative-only, exaggerated self-imitation, self-chosen practice, and both together — for 45 steps of 48 problems × 4 attempts, with the two unseeded self-imitation members of pilot C as a fifth reference. Clone pairs follow for the arm that deviates most. Everything runs on at most four GPUs.
+- **Pilot D** (running): eight unseeded lineages on two GPUs — relative-only, weak exaggerated self-imitation, and self-chosen practice — to characterise the undirected mechanisms at low strength and to add unseeded baselines.
+- **Pilot E**: four members of pilot C at step 45, each cloned into the taste-shaped reward toward its own direction, the neutral rule, and the reversed sign, for 45 further steps.
+
+Everything runs on at most four GPUs.
