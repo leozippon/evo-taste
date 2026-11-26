@@ -54,17 +54,23 @@ The base model attempted 27,612 training items eight times each and the censused
 
 ## Seeding (pilot B), all-domain seeds
 
-Twelve contexts were each distilled into a member in 40 updates of 64 of the member's own answers; a thirteenth member is unseeded. The 22 math-only and imitation seeds were still running at the end of the day.
+Twelve contexts were each distilled into a member in 40 updates of 64 of the member's own answers; a thirteenth member is unseeded. Eleven contexts were distilled a second time on math prompts only, and two (`refute`, `verify`) by Round 1's method, imitation of the teacher's correct instructed answers.
 
 - **Stances are absorbed far more completely than tactics.** On the scale where 0 is the base model and 1 the teacher's own instructed answers, with the drift shared by all contexts removed, the five stances reach 0.25 to 0.34 (mean 0.30) and the six tactics −0.07 to 0.21 (mean 0.07). Two tactics, `map` and `procedure`, are not absorbed at all.
 - **In absolute terms the picture is different.** The index is a share of each context's own effect on the teacher, and the stances barely move the teacher: 0.03 to 0.06 nats per token, against 0.09 to 0.31 for the tactics. A stance-seeded member took up 0.010 to 0.015 nats per token. `direct` and `define` took up 0.053 and 0.032, two to four times more, though a smaller share of what was asked; `verify` and `small_case` about as much as a stance; `map` and `procedure`, the contexts that move the teacher most, nothing. So the stances are small, fully general nudges that distil cleanly, and the tactics are large changes of procedure that distil partly or not at all. A member's own context is the top-ranked one for 4 of 11 members (chance 1 in 11).
 - **Stances show up in every domain** at similar strength (for `refute`: code 0.39, logic 0.32, math 0.33); tactics are uneven, and four of the six are negative on math.
 - **No recitation.** Blacklisted terms appear in 0.3 to 0.8% of responses, the same as for the unseeded member.
+- **What is absorbed carries across domains, for stances and tactics alike.** Stances distilled on math alone show up on logic problems at 0.17 to 0.29, against 0.24 to 0.35 when distilled on all domains, so two thirds or more of the full strength; on code the eight probe items are too few to say more than that the sign is the same. The two tactics that were absorbed at all, `direct` and `define`, carry over to logic just as well (0.23 and 0.41).
+- **The gap between stances and tactics is a property of the method, not of the level.** Seeded by imitation, the `verify` tactic reaches 0.34 [0.23, 0.48], as high as any stance, against 0.10 [0.04, 0.17] by on-policy distillation; `refute` reaches 0.28 by imitation and 0.33 by distillation. On-policy distillation pulls a member toward the teacher only along answers the member already writes, which suffices for a small general nudge and fails for a change of procedure the member never produces by itself. The claim that survives is narrower: stances are small changes that any method distils cleanly and that appear everywhere at once.
 - Accuracy after seeding cannot be read from the single-sample probes; it will come from the evaluation at the end of pilot C.
 
 ## Amplification (pilot C), started
 
 Each of the twelve seeds and two unseeded controls was cloned at step 0 into both update rules: 28 members, 45 steps of 48 problems × 4 attempts. In the first steps the training reward is 0.41 to 0.45 and 23 to 29 of 48 problems per step have attempts with different rewards, against 16 to 28 of 128 in Round 1.
+
+An add-on run trains the two imitation seeds under both rules with the same settings, so that the wash-out comparison includes one strongly absorbed tactic.
+
+**Early reading at step 15, from single-sample probes.** The two unseeded members under the relative-only rule are degrading: answers have grown to 1,200 to 1,300 tokens (others 340 to 860), compliance on held-out answer formats is 29 and 44 points below the base weights, and accuracy on mastered items is down 10 and 17 points. No seeded member shows this, the neutral-context one included, and neither do the unseeded members trained with self-imitation. Learning is modest so far: about +4 to +5 points on frontier items in both rules, nothing clear on unseen sources.
 
 ## In progress
 
