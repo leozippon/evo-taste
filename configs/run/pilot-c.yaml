@@ -1,0 +1,78 @@
+# Pilot C, amplification (docs/design/round-2.md, "Pilots"): the seeded members of pilot B, each cloned at step 0 into
+# the two update rules, so that both rules start from byte-identical weights. 45 steps of 48 problems x 4 attempts.
+# Clone pairs for the heritability test are appended after step 45 has been looked at (clonable_steps keeps the state).
+# Forked from runs/pilot-b: model, seed, lora, seeding and probes sections and the seeds' ids, contexts and seeds are
+# identical to configs/run/pilot-b.yaml.
+name: pilot-c
+model: Qwen/Qwen3-1.7B
+seed: 2026
+contexts: configs/contexts.yaml
+strata: {path: results/census/census-r2/strata.tsv, sha256: "1291ab8ea23b92030d178bfa844cc6125308a4bd9a0b6b20b46c884b1844b31c"}
+lora: {rank: 32, alpha: 64}
+seeding:
+  method: opcd
+  steps: 40
+  batch: 64
+  lr: 1.0e-4
+  max_tokens: 4096
+amplification:
+  steps: 45
+  prompts: 48
+  rollouts: 4
+  max_tokens: 4096
+  lr: 1.0e-4
+  length: {free: 2048, slope: 0.25}
+  advantage: centered
+  self_imitation: 0.0
+probes:
+  every: 15
+  max_tokens: 4096
+culling:
+  enabled: false
+clonable_steps: [45]
+members:
+  # the seeds: distilled in pilot B, not trained themselves
+  - {id: placebo, context: placebo, seed: 201, overrides: {amplification: {steps: 0}}}
+  - {id: refute, context: refute, seed: 202, overrides: {amplification: {steps: 0}}}
+  - {id: parsimony, context: parsimony, seed: 203, overrides: {amplification: {steps: 0}}}
+  - {id: ground_up, context: ground_up, seed: 204, overrides: {amplification: {steps: 0}}}
+  - {id: observe, context: observe, seed: 205, overrides: {amplification: {steps: 0}}}
+  - {id: relations, context: relations, seed: 206, overrides: {amplification: {steps: 0}}}
+  - {id: verify, context: verify, seed: 207, overrides: {amplification: {steps: 0}}}
+  - {id: direct, context: direct, seed: 208, overrides: {amplification: {steps: 0}}}
+  - {id: define, context: define, seed: 209, overrides: {amplification: {steps: 0}}}
+  - {id: small_case, context: small_case, seed: 210, overrides: {amplification: {steps: 0}}}
+  - {id: map, context: map, seed: 211, overrides: {amplification: {steps: 0}}}
+  - {id: procedure, context: procedure, seed: 212, overrides: {amplification: {steps: 0}}}
+  # unseeded controls; the second differs from the first only by seed
+  - {id: unseeded, seed: 250, overrides: {seeding: {method: none}, amplification: {steps: 0}}}
+  - {id: unseeded-b, seed: 251, overrides: {seeding: {method: none}, amplification: {steps: 0}}}
+  # each seed under the relative-only rule (-adv) and with self-imitation of its own successes (-si)
+  - {id: placebo-adv, parent: {member: placebo, step: 0}, seed: 301, overrides: {amplification: {steps: 45}}}
+  - {id: placebo-si, parent: {member: placebo, step: 0}, seed: 401, overrides: {amplification: {steps: 45, self_imitation: 0.5}}}
+  - {id: refute-adv, parent: {member: refute, step: 0}, seed: 302, overrides: {amplification: {steps: 45}}}
+  - {id: refute-si, parent: {member: refute, step: 0}, seed: 402, overrides: {amplification: {steps: 45, self_imitation: 0.5}}}
+  - {id: parsimony-adv, parent: {member: parsimony, step: 0}, seed: 303, overrides: {amplification: {steps: 45}}}
+  - {id: parsimony-si, parent: {member: parsimony, step: 0}, seed: 403, overrides: {amplification: {steps: 45, self_imitation: 0.5}}}
+  - {id: ground_up-adv, parent: {member: ground_up, step: 0}, seed: 304, overrides: {amplification: {steps: 45}}}
+  - {id: ground_up-si, parent: {member: ground_up, step: 0}, seed: 404, overrides: {amplification: {steps: 45, self_imitation: 0.5}}}
+  - {id: observe-adv, parent: {member: observe, step: 0}, seed: 305, overrides: {amplification: {steps: 45}}}
+  - {id: observe-si, parent: {member: observe, step: 0}, seed: 405, overrides: {amplification: {steps: 45, self_imitation: 0.5}}}
+  - {id: relations-adv, parent: {member: relations, step: 0}, seed: 306, overrides: {amplification: {steps: 45}}}
+  - {id: relations-si, parent: {member: relations, step: 0}, seed: 406, overrides: {amplification: {steps: 45, self_imitation: 0.5}}}
+  - {id: verify-adv, parent: {member: verify, step: 0}, seed: 307, overrides: {amplification: {steps: 45}}}
+  - {id: verify-si, parent: {member: verify, step: 0}, seed: 407, overrides: {amplification: {steps: 45, self_imitation: 0.5}}}
+  - {id: direct-adv, parent: {member: direct, step: 0}, seed: 308, overrides: {amplification: {steps: 45}}}
+  - {id: direct-si, parent: {member: direct, step: 0}, seed: 408, overrides: {amplification: {steps: 45, self_imitation: 0.5}}}
+  - {id: define-adv, parent: {member: define, step: 0}, seed: 309, overrides: {amplification: {steps: 45}}}
+  - {id: define-si, parent: {member: define, step: 0}, seed: 409, overrides: {amplification: {steps: 45, self_imitation: 0.5}}}
+  - {id: small_case-adv, parent: {member: small_case, step: 0}, seed: 310, overrides: {amplification: {steps: 45}}}
+  - {id: small_case-si, parent: {member: small_case, step: 0}, seed: 410, overrides: {amplification: {steps: 45, self_imitation: 0.5}}}
+  - {id: map-adv, parent: {member: map, step: 0}, seed: 311, overrides: {amplification: {steps: 45}}}
+  - {id: map-si, parent: {member: map, step: 0}, seed: 411, overrides: {amplification: {steps: 45, self_imitation: 0.5}}}
+  - {id: procedure-adv, parent: {member: procedure, step: 0}, seed: 312, overrides: {amplification: {steps: 45}}}
+  - {id: procedure-si, parent: {member: procedure, step: 0}, seed: 412, overrides: {amplification: {steps: 45, self_imitation: 0.5}}}
+  - {id: unseeded-adv, parent: {member: unseeded, step: 0}, seed: 313, overrides: {amplification: {steps: 45}}}
+  - {id: unseeded-si, parent: {member: unseeded, step: 0}, seed: 413, overrides: {amplification: {steps: 45, self_imitation: 0.5}}}
+  - {id: unseeded-b-adv, parent: {member: unseeded-b, step: 0}, seed: 314, overrides: {amplification: {steps: 45}}}
+  - {id: unseeded-b-si, parent: {member: unseeded-b, step: 0}, seed: 414, overrides: {amplification: {steps: 45, self_imitation: 0.5}}}
