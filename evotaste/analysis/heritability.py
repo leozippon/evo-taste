@@ -1,7 +1,7 @@
 """Heritability: whether members that share a trained state (clones of one parent) stay more alike than unrelated
 members, in scalar traits and in which problems they solve.
 
-    python -m evotaste.analysis.heritability runs/<name> --tag T [--null-tag T0] [--table <context-score table>]
+    python -m evotaste.analysis.heritability runs/<name> --tag T [--null-tag T0] [--selection <context-score selection>]
                                               [--out DIR]
 
 A family is the lineages of one root under one update rule: a member and its clones (members that continue a
@@ -147,17 +147,17 @@ def slope(x, y) -> float:
 def analyse(run: data.Run, grid: data.Grid, null: data.Grid | None, rng, table: Path | None = None,
             b: int = stats.B) -> dict:
     spec = {}
-    if table is not None or len(list((run.dir / "context_score").glob("*/table.csv"))) == 1:
+    if table is not None or len(data.selections(run)) == 1:
         s = washout.analyse(run, rng, table)["specific"]
         if len(s):
             s = s[s["domain"] == washout.DOMAINS_ALL]
             spec = dict(zip(s["subject"], s["specific"]))
     null_mean = {}
     if null is not None:
-        nl = divergence.null_pairs(null, lambda it: stats.item_draws(it["family"], b, rng))
+        nl = divergence.null_pairs(null, lambda it: stats.item_draws(data.strata(it), b, rng))
         null_mean = dict(zip(nl.loc[nl["adapter"] == "mean", "estimator"], nl.loc[nl["adapter"] == "mean", "d2"]))
     icc, reg, dist, pairs, families = [], [], [], [], []
-    w = stats.item_draws(grid.items["family"], b, rng)
+    w = stats.item_draws(data.strata(grid.items), b, rng)
     values_all, draws_all = scalar_traits(grid, stats.ones(len(grid.items))), scalar_traits(grid, w)
     for step, group in sorted(members_at(run, grid).items()):
         labels = [lab for lab, _ in group]
@@ -256,15 +256,15 @@ def main(argv=None) -> None:
     ap.add_argument("run_dir", type=Path)
     ap.add_argument("--tag", required=True)
     ap.add_argument("--null-tag", help="evaluation with >= 4 samples per item whose adapters give the noise floor")
-    ap.add_argument("--table", type=Path, help="a context-score table for the specific index (default: the run's "
-                                                "only selection, if any)")
+    ap.add_argument("--selection", type=Path, help="a context-score selection for the specific index (default: the "
+                                                    "run's only selection, if any)")
     ap.add_argument("--out", type=Path)
     args = ap.parse_args(argv)
     run = data.Run(args.run_dir)
     grid = data.load_eval(run, args.tag, traits=traits.response_traits)
     null_tag = args.null_tag or (args.tag if grid.samples >= 4 else None)
     null = (grid if null_tag == args.tag else data.load_eval(run, null_tag)) if null_tag else None
-    res = analyse(run, grid, null, np.random.default_rng(0), args.table)
+    res = analyse(run, grid, null, np.random.default_rng(0), args.selection)
     write(args.out or Path("results") / run.name / "heritability", res, report_lines(run, args.tag, grid, res, null_tag))
 
 

@@ -34,31 +34,22 @@ def _rate(x: np.ndarray, mask: np.ndarray, w: np.ndarray) -> np.ndarray:
         return (num @ w.T) / (den @ w.T)
 
 
-def _macro(x: np.ndarray, items: pd.DataFrame, keep, w: np.ndarray) -> np.ndarray:
-    """Mean over the units selected by `keep` (a mask over items) of each unit's accuracy: subject x draw."""
-    units = [u for u in dict.fromkeys(items["family"][keep])]
-    if not units:
-        return np.full((x.shape[0], len(w)), np.nan)
-    per = []
-    for u in units:
-        mask = np.broadcast_to((items["family"] == u).to_numpy()[None, :, None], x.shape)
-        per.append(_rate(x, mask, w))
-    return np.mean(per, axis=0)
-
-
 def metrics(grid: data.Grid, w: np.ndarray) -> dict[str, np.ndarray]:
-    """Every health metric of every subject of the grid under item weights w: name -> subject x draw."""
+    """Every health metric of every subject of the grid under item weights w: name -> subject x draw. Accuracies are
+    means over items (not the engine's mean over units, which in the probe set gives each single-instance procedural
+    family as much weight as a source's dozen items)."""
     items, x = grid.items, grid.x
     every = np.ones(x["reward"].shape, bool)
 
     def item(mask):
         return np.broadcast_to(np.asarray(mask)[None, :, None], x["reward"].shape)
 
-    out = {"accuracy": _macro(x["reward"], items, np.ones(len(items), bool), w)}
+    out = {"accuracy": _rate(x["reward"], every, w)}
     for d in sorted(items["domain"].unique()):
-        out[f"domain_{d}"] = _macro(x["reward"], items, (items["domain"] == d).to_numpy(), w)
+        out[f"domain_{d}"] = _rate(x["reward"], item(items["domain"] == d), w)
     for kind in data.UNIT_KINDS:
-        out[kind] = _macro(x["reward"], items, (items["unit"] == kind).to_numpy(), w)
+        if (items["unit"] == kind).any():
+            out[kind] = _rate(x["reward"], item(items["unit"] == kind), w)
     if "stratum" in items and items["stratum"].notna().any():
         for s in ("mastered", "sweet", "frontier"):
             out[s] = _rate(x["reward"], item(items["stratum"] == s), w)
@@ -77,36 +68,56 @@ def metrics(grid: data.Grid, w: np.ndarray) -> dict[str, np.ndarray]:
 
 
 def evaluate(grid: data.Grid, rng, b: int = stats.B) -> tuple[dict, dict]:
-    """Metrics of every subject: point values and b bootstrap draws (items resampled within units, the same draws
-    for every subject, so that differences between subjects are paired)."""
-    return metrics(grid, stats.ones(len(grid.items))), metrics(grid, stats.item_draws(grid.items["family"], b, rng))
+    """Metrics of every subject: point values and b bootstrap draws (items resampled within data.strata, the same
+    draws for every subject, so that differences between subjects are paired)."""
+    return metrics(grid, stats.ones(len(grid.items))), metrics(grid, stats.item_draws(data.strata(grid.items), b, rng))
 
 
-def table(grid: data.Grid, point: dict, draws: dict, base: str | None) -> pd.DataFrame:
-    """Long table: subject, metric, value and interval, and for subjects other than `base` the difference from it with
-    a paired interval, plus length percentiles."""
+REFERENCE = "reference"
+
+
+def reference_rows(run: data.Run, labels: list[str], subject) -> list[int]:
+    """Rows that sample the base model's weights (data.Run.base_weights); `subject` maps a label to (lineage, step)."""
+    return [i for i, a in enumerate(labels) if run.base_weights(*subject(a))]
+
+
+def pooled(values: dict, rows: list[int]) -> dict:
+    """The mean over `rows` of every metric: one subject averaging several draws of the same weights."""
+    return {k: v[rows].mean(0) for k, v in values.items()}
+
+
+def table(grid: data.Grid, point: dict, draws: dict, ref: list[int]) -> pd.DataFrame:
+    """Long table: subject, metric, value and interval; for every subject outside the reference, its difference from
+    the reference (the mean of the rows `ref`, draws of the base weights) with a paired interval, which carries the
+    noise of both sides; length percentiles; and a last subject REFERENCE with the number of draws it averages."""
     rows = []
-    bi = grid.labels.index(base) if base in grid.labels else None
+    rp, rd = pooled(point, ref), pooled(draws, ref)
     for s, label in enumerate(grid.labels):
         for name in point:
-            row = {"subject": label, "metric": name, "value": point[name][s, 0],
+            row = {"subject": label, "metric": name, "value": point[name][s, 0], "reference": s in ref,
                    **dict(zip(("lo", "hi"), stats.ci(draws[name][s])))}
-            if bi is not None and s != bi and name in VERSUS_BASE:
-                d = draws[name][s] - draws[name][bi]
-                row |= {"diff": point[name][s, 0] - point[name][bi, 0], **dict(zip(("diff_lo", "diff_hi"), stats.ci(d)))}
+            if ref and s not in ref and name in VERSUS_BASE:
+                d = draws[name][s] - rd[name]
+                row |= {"diff": point[name][s, 0] - rp[name][0], **dict(zip(("diff_lo", "diff_hi"), stats.ci(d)))}
             rows.append(row)
         tokens = grid.x["tokens"][s].ravel()
-        rows += [{"subject": label, "metric": f"tokens_p{q}", "value": float(np.percentile(tokens, q))}
-                 for q in (50, 90, 99)]
+        rows += [{"subject": label, "metric": f"tokens_p{q}", "value": float(np.percentile(tokens, q)),
+                  "reference": s in ref} for q in (50, 90, 99)]
+    if ref:
+        rows += [{"subject": REFERENCE, "metric": name, "value": rp[name][0], "draws": len(ref), "reference": False,
+                  **dict(zip(("lo", "hi"), stats.ci(rd[name])))} for name in point]
     return pd.DataFrame(rows)
 
 
-def group_table(grid: data.Grid, subjects: dict, point: dict, draws: dict) -> pd.DataFrame:
-    """Per probe step, update rule and seed level: the mean over members of (member - base) for the VERSUS_BASE
-    metrics, with intervals from the same item draws for every member."""
-    bi = grid.labels.index("base")
+def group_table(run: data.Run, grid: data.Grid, subjects: dict, point: dict, draws: dict,
+                ref: list[int]) -> pd.DataFrame:
+    """Per probe step, update rule and seed level: the mean over members of (member - reference) for the VERSUS_BASE
+    metrics, with intervals from the same item draws for every member. Reference draws and clones' first probes (a
+    second draw of their parent's state) are left out."""
+    rd, rp = pooled(draws, ref), pooled(point, ref)
     rows = []
-    members = [(label, lin, step) for label, (lin, step) in subjects.items() if lin is not None]
+    members = [(label, lin, step) for i, (label, (lin, step)) in enumerate(subjects.items())
+               if lin is not None and i not in ref and not run.restart(lin, step)]
     for step in sorted({s for _, _, s in members}):
         for by in ("arm", "level"):
             for g in sorted({getattr(lin, by) for _, lin, s in members if s == step}):
@@ -114,9 +125,9 @@ def group_table(grid: data.Grid, subjects: dict, point: dict, draws: dict) -> pd
                 for name in VERSUS_BASE:
                     if name not in point:
                         continue
-                    d = (draws[name][idx] - draws[name][bi]).mean(0)
+                    d = (draws[name][idx] - rd[name]).mean(0)
                     rows.append({"step": step, "by": by, "group": g, "members": len(idx), "metric": name,
-                                 "diff": float((point[name][idx, 0] - point[name][bi, 0]).mean()),
+                                 "diff": float((point[name][idx, 0] - rp[name][0]).mean()),
                                  **dict(zip(("lo", "hi"), stats.ci(d)))})
     return pd.DataFrame(rows)
 
@@ -146,15 +157,16 @@ def probe_subjects(run: data.Run) -> dict:
 
 
 def report_lines(run, subjects, probes, groups, hist, ev, tag, census) -> list[str]:
-    lines = [f"health {run.name}: {len(subjects) - 1} lineage probes, {probes['subject'].nunique()} subjects; "
-             f"percentages, [95% bootstrap interval over items]; differences are member - base on the same items",
+    lines = [f"health {run.name}: {len(subjects) - 1} lineage probes; percentages, [95% bootstrap interval over items]; "
+             "differences are member - reference on the same items, the reference being the mean of the probes of the "
+             "base weights: " + ", ".join(probes.loc[probes["reference"].fillna(False).astype(bool), "subject"].unique()),
              f"strata: {'census ' + census if census else 'not available (no --census): no retention or new-ground rows'}"]
     cell = {(r.subject, r.metric): r for r in probes.itertuples()}
     last = {}
     for label, (lin, step) in subjects.items():
         if lin is not None and step >= last.get(lin.id, (None, -1))[1]:
             last[lin.id] = (label, step)
-    cols = [m for m in ("far", "near", "mastered", "frontier", "heldout_complied") if ("base", m) in cell]
+    cols = [m for m in ("far", "near", "mastered", "frontier", "heldout_complied") if (REFERENCE, m) in cell]
     rows = []
     for lineage, (label, step) in last.items():
         lin = subjects[label][0]
@@ -162,11 +174,11 @@ def report_lines(run, subjects, probes, groups, hist, ev, tag, census) -> list[s
         rows.append([label, lin.arm, lin.level, pct(acc.value)] + [pci(cell[(label, m)].diff, cell[(label, m)].diff_lo,
                                                                      cell[(label, m)].diff_hi, sign=True) for m in cols]
                     + [pct(cell[(label, "truncated")].value), pct(cell[(label, "program_share")].value)])
-    lines += ["", "latest probe of every lineage (base accuracy " + pct(cell[("base", "accuracy")].value) + ")"]
-    lines += render(["probe", "rule", "level", "acc"] + [f"{m} - base" for m in cols] + ["trunc", "program"], rows)
+    lines += ["", "latest probe of every lineage (reference accuracy " + pct(cell[(REFERENCE, "accuracy")].value) + ")"]
+    lines += render(["probe", "rule", "level", "acc"] + [f"{m} - ref" for m in cols] + ["trunc", "program"], rows)
 
     if len(groups):
-        lines += ["", "mean over members of (member - base), by update rule and by seed level"]
+        lines += ["", "mean over members of (member - reference), by update rule and by seed level"]
         g = groups[groups["metric"].isin(["far", "mastered", "frontier", "heldout_complied", "truncated"])]
         rows = []
         for (step, by, group), sub in g.groupby(["step", "by", "group"], sort=True):
@@ -190,16 +202,18 @@ def report_lines(run, subjects, probes, groups, hist, ev, tag, census) -> list[s
 
     if ev is not None:
         cell = {(r.subject, r.metric): r for r in ev.itertuples()}
-        has_base = ("base", "accuracy") in cell
-        lines += ["", f"selection evaluation {tag}" + ("" if has_base else " (base not evaluated: no differences)")]
+        has_base = (REFERENCE, "accuracy") in cell
+        refs = ev.loc[ev["reference"].fillna(False).astype(bool), "subject"].unique()
+        lines += ["", f"selection evaluation {tag}" + (f" (reference: {', '.join(refs)})" if has_base else
+                                                       " (the base weights are not evaluated: no differences)")]
         rows = []
         for label in dict.fromkeys(ev["subject"]):
             r = cell[(label, "accuracy")]
             rows.append([label, pci(r.value, r.lo, r.hi)] + [
                 pci(cell[(label, m)].diff, cell[(label, m)].diff_lo, cell[(label, m)].diff_hi, sign=True)
-                if has_base and label != "base" and (label, m) in cell else "-" for m in cols]
+                if has_base and (label, m) in cell and pd.notna(cell[(label, m)].diff) else "-" for m in cols]
                 + [pct(cell[(label, "truncated")].value), pct(cell[(label, "program_share")].value)])
-        lines += render(["adapter", "accuracy"] + [f"{m} - base" for m in cols] + ["trunc", "program"], rows)
+        lines += render(["adapter", "accuracy"] + [f"{m} - ref" for m in cols] + ["trunc", "program"], rows)
     return lines
 
 
@@ -217,17 +231,19 @@ def main(argv=None) -> None:
     data.add_strata(grid, strata)
     rng = np.random.default_rng(0)
     point, draws = evaluate(grid, rng)
-    probes = table(grid, point, draws, "base")
-    probes.insert(1, "lineage", [subjects[s][0].id if subjects[s][0] else "base" for s in probes["subject"]])
-    probes.insert(2, "step", [subjects[s][1] for s in probes["subject"]])
-    groups = group_table(grid, subjects, point, draws)
+    ref = reference_rows(run, grid.labels, subjects.get)
+    probes = table(grid, point, draws, ref)
+    probes.insert(1, "lineage", [s if s == REFERENCE else subjects[s][0].id if subjects[s][0] else "base"
+                                 for s in probes["subject"]])
+    probes.insert(2, "step", [subjects[s][1] if s in subjects else None for s in probes["subject"]])
+    groups = group_table(run, grid, subjects, point, draws, ref)
     hist = history_table(run)
     tables = {"probes": probes, "groups": groups, "history": hist}
     ev = None
     if args.tag:
         egrid = data.load_eval(run, args.tag)
         data.add_strata(egrid, strata)
-        ev = tables["eval"] = table(egrid, *evaluate(egrid, rng), "base")
+        ev = tables["eval"] = table(egrid, *evaluate(egrid, rng), reference_rows(run, egrid.labels, run.resolve))
     write(args.out or Path("results") / run.name / "health", tables,
           report_lines(run, subjects, probes, groups, hist, ev, args.tag, args.census))
 

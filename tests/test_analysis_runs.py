@@ -4,7 +4,6 @@ and a selection evaluation with four samples. A change of the engine's record fo
 an analysis. The stand-in sampler ignores the adapter, so every member has the same solve probabilities: the
 evaluation is an exact null for divergence and heritability."""
 
-import json
 import random
 
 import numpy as np
@@ -117,27 +116,31 @@ def run_dir(tmp_path_factory, base_model):
     mp.undo()
 
 
-def test_health_reproduces_the_engine_s_probe_summaries(run_dir, tmp_path):
+def test_health_reads_every_probe_against_the_pooled_base_weights(run_dir, tmp_path):
     health.main([str(run_dir), "--tag", TAG, "--out", str(tmp_path)])
     probes = pd.read_csv(tmp_path / "probes.csv")
-    acc = probes[probes["metric"] == "accuracy"].set_index("subject")["value"]
+    acc = probes[probes["metric"] == "accuracy"].set_index("subject")
     run = data.Run(run_dir)
-    for lin in run.lineages.values():
+    for lin in run.lineages.values():  # every committed probe, accuracy the mean over its items
         for line in read_jsonl(lin.dir / "probes.jsonl"):
-            assert acc[f"{lin.id}@{line['step']}"] == pytest.approx(line["accuracy"])
-    assert acc["base"] == pytest.approx(json.loads((run_dir / "base" / "probe_summary.json").read_text())["accuracy"])
+            records = run.probe_records(lin, line["step"])
+            assert acc.loc[f"{lin.id}@{line['step']}", "value"] == pytest.approx(np.mean([r["reward"] for r in records]))
+    ref = acc.loc[health.REFERENCE]  # the base model's prepare-time answers and un@0, an unseeded member at step 0
+    assert ref["draws"] == 2 and ref["value"] == pytest.approx(acc.loc[["base", "un@0"], "value"].mean())
+    assert np.isnan(acc.loc["un@0", "diff"]) and acc.loc["st@0", "diff"] == pytest.approx(
+        acc.loc["st@0", "value"] - ref["value"])
     assert {"far", "near", "procedural", "heldout_complied", "program_share"} <= set(probes["metric"])
     hist = pd.read_csv(tmp_path / "history.csv")
     assert set(hist.loc[hist["phase"] == "seed", "lineage"]) == {"st", "ta", "pl"}
     ev = pd.read_csv(tmp_path / "eval.csv")
-    assert set(ev["subject"]) == set(EVAL_LABELS) - {"st-si@0"}  # the twin at step 0 is st@0's adapter
+    assert set(ev["subject"]) == set(EVAL_LABELS) - {"st-si@0"} | {health.REFERENCE}  # st-si@0 is st@0's adapter
     assert (tmp_path / "report.txt").read_text().startswith("health ana")
 
 
 def test_washout_and_seeding(run_dir, tmp_path):
     washout.main([str(run_dir), "--out", str(tmp_path / "w")])
     idx = pd.read_csv(tmp_path / "w" / "index.csv")
-    undefined = idx["S_teacher"] <= idx["S_base"]  # the instructed answers are not better predicted: no index
+    undefined = idx["effect"] <= 0  # the instructed answers are not better predicted: no index
     assert idx.loc[undefined, "I"].isna().all() and idx.loc[~undefined, "I"].notna().all()
     assert np.allclose(idx.loc[(idx["subject"] == "base") & ~undefined, "I"], 0)
     teacher = idx[(idx["subject"] == "base:refute") & (idx["context"] == "refute") & ~undefined]
@@ -147,11 +150,17 @@ def test_washout_and_seeding(run_dir, tmp_path):
     assert not ((spec["lineage"] == "st-c1") & (spec["step"] == 1)).any()  # a clone's first probe is its parent's
     assert spec.loc[(spec["lineage"] == "st") & (spec["step"] == 0), "controls"].max() == 2  # pl@0 and un@0
     assert len(pd.read_csv(tmp_path / "w" / "noise.csv")) > 0  # from the twin st-si
+    ok = spec.dropna(subset=["specific"])
+    assert np.allclose(ok["gain"], ok["specific"] * ok["effect"])  # specific = gain / effect
+    assert ((ok["specific_lo"] <= ok["specific"]) & (ok["specific"] <= ok["specific_hi"])).all()
     seeding.main([str(run_dir), "--out", str(tmp_path / "s")])
     members = pd.read_csv(tmp_path / "s" / "members.csv")
-    assert set(members["lineage"]) == {"st", "ta", "pl", "un"}
+    assert set(members["lineage"]) == {"st", "ta", "pl"}  # seeded, not clones; the unseeded member is the reference
     kl = pd.read_csv(tmp_path / "s" / "kl.csv")
     assert set(kl["lineage"]) == {"st", "ta", "pl"} and kl["kl"].notna().all()
+    acc = pd.read_csv(tmp_path / "s" / "accuracy.csv")
+    draws = acc[acc["metric"] == "accuracy"].set_index("subject")["draws"]
+    assert draws[health.REFERENCE] == 2 and draws["st"] == 2 and draws["ta"] == 1  # st@0 and its twin st-si@0
 
 
 def test_divergence_finds_nothing_in_an_exact_null(run_dir, tmp_path):

@@ -182,7 +182,7 @@ def analyse(run: data.Run, grid: data.Grid, members: list[str], null: data.Grid 
     items = grid.items
 
     def w_of(it):
-        return stats.item_draws(it["family"], stats.B, rng)
+        return stats.item_draws(data.strata(it), stats.B, rng)
 
     w = w_of(items)
     sets = {"all": list(range(len(members)))}

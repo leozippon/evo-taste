@@ -112,6 +112,20 @@ class Run:
         state, used for the noise of one probe and otherwise left out so that no state is counted twice."""
         return lin.parent is not None and step == lin.parent[1]
 
+    def state(self, lin: Lineage, step: int) -> tuple[str, int]:
+        """The checkpoint (lineage, step) a probe at `step` samples: a clone's first probe samples its parent's."""
+        while self.restart(lin, step):
+            lin = self.lineages[lin.parent[0]]
+        return lin.id, step
+
+    def base_weights(self, lin: Lineage | None, step: int | None) -> bool:
+        """Whether a probe (or evaluated label) samples the base model's weights: the base model itself, or an
+        unseeded member (its adapter starts with B = 0) before any update, its clones' first probes included."""
+        if lin is None:
+            return True
+        lin_id, at = self.state(lin, step)
+        return at == 0 and self.lineages[lin_id].seeding == "none"
+
     def committed(self, lin: Lineage) -> bool:
         return lin.status not in ("pending", "new")
 
@@ -193,6 +207,13 @@ class Grid:
                     None if self.texts is None else self.texts[idx], self.sha, self.aliases)
 
 
+def strata(items: pd.DataFrame) -> np.ndarray:
+    """The bootstrap's strata: unit kind (near, far, procedural) within domain. Units themselves are too small in the
+    probe set, where every procedural family has a single instance: resampling within a one-item unit has no variance,
+    and intervals would ignore the noise of those draws."""
+    return (items["unit"] + "/" + items["domain"]).to_numpy()
+
+
 def record_values(r: dict) -> dict[str, float]:
     channel = r["channel"]
     return {"reward": float(r["reward"]), "correct_any": float(r["correct_any"]), "complied": float(r["complied"]),
@@ -267,8 +288,12 @@ def load_eval(run: Run, tag: str, traits=None, keep_texts: bool = False) -> Grid
     content hash) are the same model (a clone at its clone point is its parent's checkpoint): one is kept, a label of
     the original lineage before a clone's, and the others are listed in `aliases`."""
     out = run.dir / "eval" / SUITE / tag
+    if not (out / "params.json").exists():
+        raise SystemExit(f"{out}: no evaluation under this tag")
+    if not (out / "summary.json").exists():  # the engine writes it only once every shard has finished
+        raise SystemExit(f"{out}: the evaluation is incomplete (no summary.json yet)")
     params = read_json(out / "params.json")
-    summary = read_json(out / "summary.json")["adapters"]  # written only once the grid is complete
+    summary = read_json(out / "summary.json")["adapters"]
     records = [r for p in sorted(out.glob("records-*.jsonl.gz")) for r in read_jsonl_gz(p)]
     groups = collections.defaultdict(list)
     for r in records:
@@ -316,20 +341,67 @@ def add_strata(grid: Grid, strata: dict[str, str] | None) -> None:
     grid.items["stratum"] = [strata.get(u) for u in grid.items["uid"]] if strata else None
 
 
-def context_scores(run: Run, table: Path | None = None) -> pd.DataFrame:
-    """A context-score table of the engine (runs/<name>/context_score/<selection>/table.csv; `table`, or the run's
-    only selection): subject, lineage, step, context, domain, responses, tokens, delta_sum, delta_mean, one row per
-    subject, context and domain."""
-    if table is None:
-        found = sorted((run.dir / "context_score").glob("*/table.csv"))
+@dataclass
+class Scores:
+    """A context-score selection as arrays: per subject (base, base:<context>, <lineage>@<step>), context and item,
+    the response's summed log-ratio log p_base(token | context prompt) - log p_base(token | plain prompt), and per
+    subject and item its completion tokens."""
+    dir: Path
+    subjects: list[str]
+    lineage: list[str | None]
+    step: list[int | None]
+    contexts: list[str]
+    uids: list[str]
+    domains: np.ndarray  # per item
+    delta: np.ndarray  # subject x context x item
+    tokens: np.ndarray  # subject x item
+
+
+def selections(run: Run) -> list[Path]:
+    """The run's context-score selections with per-response scores."""
+    return sorted(p.parent for p in (run.dir / "context_score").glob("*/responses.csv"))
+
+
+def context_scores(run: Run, selection: Path | None = None) -> Scores:
+    """The engine's per-response context scores (runs/<name>/context_score/<selection>/responses.csv; `selection`, or
+    the run's only selection). Every subject must have every context and item exactly once, with the same completion
+    tokens under every context, and the sums must reproduce the selection's table.csv."""
+    if selection is None:
+        found = selections(run)
         if len(found) != 1:
-            raise FileNotFoundError(f"{run.dir}/context_score: {len(found)} selections with a table "
-                                    f"({', '.join(p.parent.name for p in found) or 'none'}); name one with --table")
-        table = found[0]
-    t = pd.read_csv(table, dtype={"subject": str, "lineage": str, "context": str, "domain": str})
-    expected = ["subject", "lineage", "step", "context", "domain", "responses", "tokens", "delta_sum", "delta_mean"]
-    if list(t.columns) != expected:
-        raise ValueError(f"{table}: columns {list(t.columns)}, expected {expected}")
-    if not np.allclose(t["delta_sum"] / t["tokens"], t["delta_mean"]):
-        raise ValueError(f"{table}: delta_mean is not delta_sum / tokens")
-    return t
+            raise SystemExit(f"{run.dir}/context_score: {len(found)} selections with responses.csv "
+                             f"({', '.join(p.name for p in found) or 'none'}); run python -m evotaste.evaluate "
+                             "context-score, or name one with --selection")
+        selection = found[0]
+    selection = Path(selection)
+    r = pd.read_csv(selection / "responses.csv", dtype={"subject": str, "lineage": str, "uid": str, "domain": str,
+                                                        "context": str})
+    expected = ["subject", "lineage", "step", "uid", "domain", "context", "tokens", "delta_sum"]
+    if list(r.columns) != expected:
+        raise ValueError(f"{selection}/responses.csv: columns {list(r.columns)}, expected {expected}")
+    subjects = list(dict.fromkeys(r["subject"]))
+    contexts = sorted(r["context"].unique())
+    uids = sorted(r["uid"].unique())
+    si, ci, ui = ({k: i for i, k in enumerate(v)} for v in (subjects, contexts, uids))
+    shape = (len(subjects), len(contexts), len(uids))
+    if len(r) != np.prod(shape) or r.duplicated(["subject", "context", "uid"]).any():
+        raise ValueError(f"{selection}/responses.csv: not every subject has every context and item exactly once")
+    idx = (r["subject"].map(si).to_numpy(), r["context"].map(ci).to_numpy(), r["uid"].map(ui).to_numpy())
+    delta, tokens = np.zeros(shape), np.zeros(shape)
+    delta[idx], tokens[idx] = r["delta_sum"].to_numpy(), r["tokens"].to_numpy()
+    if (tokens != tokens[:, :1, :]).any():
+        raise ValueError(f"{selection}/responses.csv: a response's tokens differ between contexts")
+    domain = r.drop_duplicates("uid").set_index("uid")["domain"]
+    if r.drop_duplicates(["uid", "domain"]).shape[0] != len(uids):
+        raise ValueError(f"{selection}/responses.csv: an item has two domains")
+    table = pd.read_csv(selection / "table.csv", dtype={"subject": str, "context": str, "domain": str})
+    sums = r.groupby(["subject", "context", "domain"])[["tokens", "delta_sum"]].sum()
+    joined = table[["subject", "context", "domain", "tokens", "delta_sum"]].merge(
+        sums.reset_index(), on=["subject", "context", "domain"], suffixes=("", "_r"))
+    if len(joined) != len(sums) or not (np.allclose(joined["delta_sum"], joined["delta_sum_r"], rtol=1e-6, atol=1e-6)
+                                        and (joined["tokens"] == joined["tokens_r"]).all()):
+        raise ValueError(f"{selection}: responses.csv does not reproduce table.csv")
+    first = r.drop_duplicates("subject").set_index("subject")
+    return Scores(selection, subjects, [None if pd.isna(x) else x for x in first.loc[subjects, "lineage"]],
+                  [None if pd.isna(x) else int(x) for x in first.loc[subjects, "step"]], contexts, uids,
+                  domain.loc[uids].to_numpy(), delta, tokens[:, 0, :])

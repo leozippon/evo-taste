@@ -1,12 +1,13 @@
 """Wash-out of seeded contexts: the context index of every probe, the specific index of each seeded member against the
-controls, identification of the member's own context, stances against tactics paired by theme, and recitation.
+controls with its two parts in nats (what the member gained, how far the context moves the teacher), identification
+of the member's own context, stances against tactics paired by theme, and recitation.
 
-    python -m evotaste.analysis.washout runs/<name> [--table runs/<name>/context_score/<selection>/table.csv]
-                                         [--out DIR]
+    python -m evotaste.analysis.washout runs/<name> [--selection runs/<name>/context_score/<selection>] [--out DIR]
 
-Reads the engine's context-score table (python -m evotaste.evaluate context-score; the run's only selection unless
---table names one) and the probe answers (for the jargon share). The contexts are those the table scores. Writes results/<name>/washout/: index.csv, specific.csv, identification.csv, themes.csv, noise.csv,
-jargon.csv and report.txt. Definitions: docs/dev/ANALYSIS_NOTES.md.
+Reads the engine's per-response context scores (python -m evotaste.evaluate context-score; the run's only selection
+unless --selection names one) and the probe answers (for the jargon share). Intervals resample the selection's items
+within unit kinds and domains (data.strata), the same draws for every subject. Writes results/<name>/washout/: index.csv, specific.csv, hits.csv,
+identification.csv, themes.csv, noise.csv, jargon.csv and report.txt. Definitions: docs/dev/ANALYSIS_NOTES.md.
 """
 
 from __future__ import annotations
@@ -25,99 +26,127 @@ from evotaste.analysis.report import num, pct, render, write
 DOMAINS_ALL = "all"
 
 
-def index_table(run: data.Run, t: pd.DataFrame) -> pd.DataFrame:
-    """Per subject, context and domain (and over all domains, token-weighted): S, the mean log-ratio per token, and
-    the index I = (S(subject) - S(base)) / (S(base under the context) - S(base))."""
-    cols = ["responses", "tokens", "delta_sum"]
-    over = t.groupby(["subject", "context"], as_index=False)[cols].sum().assign(domain=DOMAINS_ALL)
-    s = pd.concat([t[["subject", "context", "domain", *cols]], over], ignore_index=True)
-    s["S"] = s["delta_sum"] / s["tokens"]
-    key = s.set_index(["subject", "context", "domain"])["S"]
-    missing = [c for c in sorted(t["context"].unique()) if (f"base:{c}", c, DOMAINS_ALL) not in key.index]
-    if "base" not in key.index.get_level_values(0) or missing:
-        raise ValueError(f"context-score table lacks the base references (base, base:<context> for {missing})")
-    base = key.loc["base"]
-    s["S_base"] = [base[(c, d)] for c, d in zip(s["context"], s["domain"])]
-    s["S_teacher"] = [key[(f"base:{c}", c, d)] for c, d in zip(s["context"], s["domain"])]
-    span = s["S_teacher"] - s["S_base"]
-    s["I"] = np.where(span > 0, (s["S"] - s["S_base"]) / span.where(span > 0), np.nan)
-    lineage = t.drop_duplicates("subject").set_index("subject")["lineage"]
-    step = t.drop_duplicates("subject").set_index("subject")["step"]
-    s.insert(1, "lineage", s["subject"].map(lineage))
-    s.insert(2, "step", s["subject"].map(step))
-    return s.drop(columns=["delta_sum"])
+class Index:
+    """S_j(x), the mean log-ratio per token of context j on subject x's answers, over all items and within each
+    domain, for the point estimate (draw 0) and B item draws (draws 1..B): arrays scope -> draw x subject x context.
+    g = S - S(base); e_j = S_j(base under j) - S_j(base), the context's effect on the teacher; I = g / e, set to NaN
+    for a context and scope where the point estimate of e is not positive."""
+
+    def __init__(self, sc: data.Scores, units: dict[str, str], rng, b: int = stats.B):
+        self.sc = sc
+        kinds = pd.DataFrame({"unit": [units[u.split("/")[0]] for u in sc.uids], "domain": sc.domains})
+        w = np.vstack([np.ones(len(sc.uids)), stats.item_draws(data.strata(kinds), b, rng)])
+        self.scopes = [DOMAINS_ALL] + sorted(set(sc.domains))
+        pos = {s: i for i, s in enumerate(sc.subjects)}
+        missing = [c for c in sc.contexts if f"base:{c}" not in pos]
+        if "base" not in pos or missing:
+            raise ValueError(f"{sc.dir}: no base references (base, base:<context> for {missing})")
+        self.base = pos["base"]
+        teacher = [pos[f"base:{c}"] for c in sc.contexts]
+        self.S, self.g, self.e, self.I = {}, {}, {}, {}
+        for scope in self.scopes:
+            keep = np.ones(len(sc.uids), bool) if scope == DOMAINS_ALL else sc.domains == scope
+            num_ = np.einsum("scn,bn->bsc", sc.delta[:, :, keep], w[:, keep])
+            den = (sc.tokens[:, keep] @ w[:, keep].T).T[:, :, None]
+            s = num_ / den
+            g = s - s[:, self.base:self.base + 1, :]
+            e = s[:, teacher, np.arange(len(sc.contexts))] - s[:, self.base, :]
+            ok = e[0] > 0
+            with np.errstate(invalid="ignore", divide="ignore"):
+                self.I[scope] = np.where(ok, g / np.where(ok, e, 1)[:, None, :], np.nan)
+            self.S[scope], self.g[scope], self.e[scope] = s, g, e
+
+    def table(self) -> pd.DataFrame:
+        rows = []
+        for scope in self.scopes:
+            for si, subject in enumerate(self.sc.subjects):
+                for ci, c in enumerate(self.sc.contexts):
+                    i = self.I[scope][:, si, ci]
+                    rows.append({"subject": subject, "lineage": self.sc.lineage[si], "step": self.sc.step[si],
+                                 "context": c, "domain": scope, "S": self.S[scope][0, si, ci],
+                                 "S_base": self.S[scope][0, self.base, ci], "effect": self.e[scope][0, ci],
+                                 "I": i[0], **dict(zip(("I_lo", "I_hi"), stats.ci(i[1:])))})
+        return pd.DataFrame(rows)
 
 
-def specific_table(run: data.Run, idx: pd.DataFrame) -> pd.DataFrame:
-    """Per seeded member probe and domain: raw = I_c - mean_{j != c} I_j for its own context c, control = the same
-    expression for the controls (placebo and unseeded members) at the same step under the same update rule, specific
-    = raw - control, and the ratio of specific to that of the root lineage's seeded state at step 0. A clone's first
-    probe (a copy of its parent's state) is left out, of members and controls."""
-    members = probes(run, idx)
-    wide = members.pivot_table(index=["subject", "domain"], columns="context", values="I")
-    info = members.drop_duplicates("subject").set_index("subject")[["lineage", "step"]]
-    rows = []
-    for (subject, domain), r in wide.iterrows():
-        lin = run.lineages[info.loc[subject, "lineage"]]
-        rows.append({"subject": subject, "lineage": lin.id, "step": int(info.loc[subject, "step"]), "domain": domain,
-                     "arm": lin.arm, "level": lin.level, "context": lin.context, "theme": lin.theme,
-                     "seeding": lin.seeding, "control_member": lin.control, "root": run.root(lin).id, "I": r})
+def member_probes(run: data.Run, idx: Index) -> list[tuple[int, data.Lineage, int]]:
+    """(subject position, lineage, step) of the scored member probes, without clones' first probes (see
+    data.Run.restart)."""
     out = []
-    for r in rows:
-        c = r["context"]
-        if r["control_member"] or c not in r["I"].index:  # a control, or its context is not scored
-            continue
-        own = lambda x: x[c] - x.drop(c).mean()  # noqa: E731
-        ctrl = [own(q["I"]) for q in rows if q["control_member"] and q["step"] == r["step"]
-                and q["arm"] == r["arm"] and q["domain"] == r["domain"]]
-        raw = own(r["I"])
-        out.append({k: r[k] for k in ("subject", "lineage", "root", "step", "domain", "arm", "level", "context",
-                                      "theme", "seeding")} | {"I_own": r["I"][c], "raw": raw, "controls": len(ctrl),
-                                                              "control": np.mean(ctrl) if ctrl else np.nan,
-                                                              "specific": raw - np.mean(ctrl) if ctrl else np.nan})
-    out = pd.DataFrame(out)
-    if len(out):
-        at0 = out[out["step"] == 0].set_index(["lineage", "domain"])["specific"]
-        out["ratio_to_0"] = [s / at0.get((lin, d), np.nan) for s, lin, d in zip(out["specific"], out["root"],
-                                                                                out["domain"])]
+    for si, (lin_id, step) in enumerate(zip(idx.sc.lineage, idx.sc.step)):
+        if lin_id is not None and not run.restart(run.lineages[lin_id], step):
+            out.append((si, run.lineages[lin_id], step))
     return out
 
 
-def probes(run: data.Run, idx: pd.DataFrame) -> pd.DataFrame:
-    """The index rows of member probes, without clones' first probes (see data.Run.restart)."""
-    m = idx[idx["lineage"].notna()]
-    return m[[not run.restart(run.lineages[lin], int(step)) for lin, step in zip(m["lineage"], m["step"])]]
+def own(i: np.ndarray, c: int) -> np.ndarray:
+    """I_c - mean_{j != c} I_j over the last axis (contexts), per draw."""
+    return i[..., c] - np.nanmean(np.delete(i, c, axis=-1), axis=-1)
 
 
-def candidates(idx: pd.DataFrame) -> list[str]:
+def specific_table(run: data.Run, idx: Index) -> tuple[pd.DataFrame, dict]:
+    """Per seeded member probe and scope: raw = I_c - mean_{j != c} I_j for its own context c; control = the mean of
+    the same for the controls (placebo and unseeded members) at the same step under the same update rule; specific =
+    raw - control; its two parts, effect = e_c (nats per token by which the context moves the teacher) and gain =
+    specific x effect (the member's specific gain in nats per token, so that specific = gain / effect); the plain gain
+    g_c = S_c(member) - S_c(base); and the ratio of specific to the root's at step 0. Point values and intervals; also
+    the specific index's draws by (lineage, step, scope)."""
+    probes = member_probes(run, idx)
+    ctx = {c: i for i, c in enumerate(idx.sc.contexts)}
+    rows, draws = [], {}
+    for scope in idx.scopes:
+        I, g, e = idx.I[scope], idx.g[scope], idx.e[scope]
+        for si, lin, step in probes:
+            if lin.control or lin.context not in ctx:
+                continue
+            c = ctx[lin.context]
+            ctrl = [k for k, kl, ks in probes if kl.control and ks == step and kl.arm == lin.arm]
+            raw = own(I[:, si, :], c)
+            control = np.mean([own(I[:, k, :], c) for k in ctrl], axis=0) if ctrl else np.full_like(raw, np.nan)
+            spec = raw - control
+            draws[(lin.id, step, scope)] = spec
+            values = {"I_own": I[:, si, c], "raw": raw, "control": control, "specific": spec, "effect": e[:, c],
+                      "gain": spec * e[:, c], "plain_gain": g[:, si, c]}
+            row = {"subject": idx.sc.subjects[si], "lineage": lin.id, "root": run.root(lin).id, "step": step,
+                   "domain": scope, "arm": lin.arm, "level": lin.level, "context": lin.context, "theme": lin.theme,
+                   "seeding": lin.seeding, "controls": len(ctrl)}
+            for k, v in values.items():
+                row[k] = v[0]
+                row[f"{k}_lo"], row[f"{k}_hi"] = stats.ci(v[1:])
+            rows.append(row)
+    for row in rows:
+        at0 = draws.get((row["root"], 0, row["domain"]))
+        ratio = draws[(row["lineage"], row["step"], row["domain"])] / at0 if at0 is not None else np.full(1, np.nan)
+        row["ratio_to_0"] = ratio[0]
+        row["ratio_lo"], row["ratio_hi"] = stats.ci(ratio[1:])
+    return pd.DataFrame(rows), draws
+
+
+def candidates(idx: Index) -> list[str]:
     """The contexts a member's own context is ranked among: every scored context but the placebo."""
-    return sorted(c for c in idx["context"].unique() if c != "placebo")
+    return [c for c in idx.sc.contexts if c != "placebo"]
 
 
-def own_context_hits(run: data.Run, idx: pd.DataFrame) -> pd.DataFrame:
+def own_context_hits(run: data.Run, idx: Index) -> pd.DataFrame:
     """Per seeded member probe with controls at the same step and update rule: whether its own context ranks first
-    among the candidates after subtracting the controls' mean index per context (over all domains)."""
-    members = probes(run, idx)
-    members = members[members["domain"] == DOMAINS_ALL]
-    if len(candidates(idx)) < 2:  # a selection of the own context and the placebo cannot rank contexts
-        return pd.DataFrame(columns=["step", "arm", "subject", "lineage", "hit"])
-    wide = members.pivot_table(index="subject", columns="context", values="I")
-    meta = members.drop_duplicates("subject").set_index("subject")
-    lin_of = {s: run.lineages[meta.loc[s, "lineage"]] for s in wide.index}
-    step_of = {s: int(meta.loc[s, "step"]) for s in wide.index}
+    among the candidates after subtracting the controls' mean index per context (over all domains, point values)."""
+    cand = [idx.sc.contexts.index(c) for c in candidates(idx)]
     hits = []
-    for subject, r in wide.iterrows():
-        lin, step = lin_of[subject], step_of[subject]
-        ctrl = [s for s in wide.index if lin_of[s].control and step_of[s] == step and lin_of[s].arm == lin.arm]
-        if lin.control or not ctrl or lin.context not in candidates(idx):
+    probes = member_probes(run, idx)
+    I = idx.I[DOMAINS_ALL][0]
+    for si, lin, step in probes:
+        ctrl = [k for k, kl, ks in probes if kl.control and ks == step and kl.arm == lin.arm]
+        if lin.control or not ctrl or lin.context not in candidates(idx) or len(cand) < 2:
             continue
-        corrected = (r - wide.loc[ctrl].mean())[candidates(idx)]
-        hits.append({"step": step, "arm": lin.arm, "subject": subject, "lineage": lin.id,
-                     "hit": corrected.idxmax() == lin.context})
-    return pd.DataFrame(hits, columns=["step", "arm", "subject", "lineage", "hit"])
+        corrected = (I[si] - I[ctrl].mean(0))[cand]
+        if np.isfinite(corrected).any():
+            top = idx.sc.contexts[cand[int(np.nanargmax(corrected))]]
+            hits.append({"step": step, "arm": lin.arm, "subject": idx.sc.subjects[si], "lineage": lin.id,
+                         "hit": top == lin.context, "top": top})
+    return pd.DataFrame(hits, columns=["step", "arm", "subject", "lineage", "hit", "top"])
 
 
-def identification(idx: pd.DataFrame, hits: pd.DataFrame) -> pd.DataFrame:
+def identification(idx: Index, hits: pd.DataFrame) -> pd.DataFrame:
     """Per step and update rule (and pooled over rules): the identification rate, its Clopper-Pearson interval and the
     exact binomial test against chance (one over the number of candidates)."""
     chance = 1 / len(candidates(idx))
@@ -130,10 +159,10 @@ def identification(idx: pd.DataFrame, hits: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def themes(run: data.Run, spec: pd.DataFrame, rng, b: int = stats.B) -> pd.DataFrame:
-    """Stances against tactics paired by theme, per step, update rule, seeding variant and domain: the difference of
-    specific indices (members of one context averaged), its mean over themes with a bootstrap interval over themes and
-    the exact sign-flip p-value."""
+def themes(spec: pd.DataFrame, draws: dict, rng, b: int = stats.B) -> pd.DataFrame:
+    """Stances against tactics paired by theme, per step, update rule, seeding variant and scope: the difference of
+    specific indices (members of one context averaged), its mean over themes with an interval over items (the
+    measurement) and one over themes (generalisation to other themes), and the exact sign-flip p-value."""
     rows = []
     ok = spec[spec["specific"].notna() & spec["level"].isin(["stance", "tactic"])]
     for key, g in ok.groupby(["step", "arm", "seeding", "domain"]):
@@ -143,38 +172,40 @@ def themes(run: data.Run, spec: pd.DataFrame, rng, b: int = stats.B) -> pd.DataF
         d = (per["stance"] - per["tactic"]).dropna()
         if not len(d):
             continue
-        draws = d.to_numpy()[rng.integers(0, len(d), (b, len(d)))].mean(1)
+        boot = rng.choice(d.to_numpy(), (b, len(d))).mean(1)
+        per_draw = {(t, lv): np.mean([draws[(r.lineage, r.step, r.domain)] for r in g.itertuples()
+                                      if (r.theme, r.level) == (t, lv)], axis=0)
+                    for t in d.index for lv in ("stance", "tactic")}
+        mean_draws = np.mean([per_draw[(t, "stance")] - per_draw[(t, "tactic")] for t in d.index], axis=0)
         rows.append(dict(zip(("step", "arm", "seeding", "domain"), key)) | {
             "themes": len(d), "pairs": " ".join(f"{t}:{v:+.3f}" for t, v in d.items()),
-            "stance_minus_tactic": d.mean(), **dict(zip(("lo", "hi"), stats.ci(draws))),
+            "stance_minus_tactic": d.mean(), **dict(zip(("lo_themes", "hi_themes"), stats.ci(boot))),
+            **dict(zip(("lo_items", "hi_items"), stats.ci(mean_draws[1:]))),
             "p_sign_flip": stats.sign_flip_p(d.to_numpy())})
     return pd.DataFrame(rows)
 
 
-def twin_noise(run: data.Run, idx: pd.DataFrame) -> pd.DataFrame:
-    """The sampling noise of one index value, from probes of one adapter: at a clone point, the parent and each of
-    its clones probe the same checkpoint with their own seeds (a twin at step 0 included). Per domain, over every pair
-    of such probes: noise_I = sqrt(mean over contexts j of (I_j(a) - I_j(b))^2 / 2), and the same for the raw
-    own-context contrast I_c - mean_{j != c} I_j taken over every context c, which is the noise of a raw value."""
-    wide = idx[idx["lineage"].notna()].pivot_table(index=["lineage", "step", "domain"], columns="context", values="I")
-    names = sorted(idx["context"].unique())
+def twin_noise(run: data.Run, idx: Index) -> pd.DataFrame:
+    """The sampling noise of one value, from probes of one checkpoint: at a clone point, the parent and each of its
+    clones probe the same checkpoint with their own seeds (a twin at step 0 included). Per scope, over every pair of
+    such probes: noise_I = sqrt(mean over contexts j of (I_j(a) - I_j(b))^2 / 2), and the same for the raw contrast
+    I_c - mean_{j != c} I_j taken over every context c."""
     groups = {}
-    for lin in run.lineages.values():
-        if lin.parent:
-            groups.setdefault(lin.parent, {lin.parent[0]}).add(lin.id)
+    for si, (lin_id, step) in enumerate(zip(idx.sc.lineage, idx.sc.step)):
+        if lin_id is not None:
+            groups.setdefault(run.state(run.lineages[lin_id], step), []).append(si)
     rows = []
-    for domain in sorted(idx["domain"].unique()):
+    for scope in idx.scopes:
+        I = idx.I[scope][0]
         di, dr, pairs = [], [], 0
-        for (parent, step), lineages in groups.items():
-            have = sorted(x for x in lineages if (x, step, domain) in wide.index)
-            for i, a in enumerate(have):
-                for b in have[i + 1:]:
-                    ia, ib = wide.loc[(a, step, domain), names], wide.loc[(b, step, domain), names]
-                    di += list(ia - ib)
-                    dr += [(ia[c] - ia.drop(c).mean()) - (ib[c] - ib.drop(c).mean()) for c in names]
+        for members in groups.values():
+            for x, a in enumerate(members):
+                for b_ in members[x + 1:]:
+                    di += list(I[a] - I[b_])
+                    dr += [own(I[a], c) - own(I[b_], c) for c in range(I.shape[1])]
                     pairs += 1
-        if pairs:  # contexts without an index in this domain (see index_table) are left out
-            rows.append({"domain": domain, "pairs": pairs, "noise_I": float(np.sqrt(np.nanmean(np.square(di)) / 2)),
+        if pairs:  # contexts without an index in this scope are left out
+            rows.append({"domain": scope, "pairs": pairs, "noise_I": float(np.sqrt(np.nanmean(np.square(di)) / 2)),
                          "noise_raw": float(np.sqrt(np.nanmean(np.square(dr)) / 2))})
     return pd.DataFrame(rows, columns=["domain", "pairs", "noise_I", "noise_raw"])
 
@@ -195,51 +226,57 @@ def jargon_table(run: data.Run) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-NO_ITEM_INTERVALS = ("intervals over items are not available: the context-score table has no per-response rows "
-                     "(see ANALYSIS_NOTES.md); intervals below resample members or themes")
-
-
 def noise_line(noise: pd.DataFrame) -> str:
-    return "sampling noise of one value (SD), from probes of one checkpoint by a parent and its clones: " + (
+    return "noise of one value (SD), from probes of one checkpoint by a parent and its clones: " + (
         ", ".join(f"{r.domain} index {r.noise_I:.3f}, raw {r.noise_raw:.3f} ({r.pairs} pairs)"
                   for r in noise.itertuples()) if len(noise) else "no clone point with two scored probes")
 
 
-def report_lines(run, idx, spec, ident, th, jargon, noise) -> list[str]:
-    base = idx[idx["subject"] == "base"]
-    lines = [f"washout {run.name}: index 0 = base model, 1 = its answers under the context; specific = own-context "
-             "index minus the mean of the other contexts, minus the same for the controls at that step and rule",
-             f"selection: {base.loc[base['domain'] == DOMAINS_ALL, 'responses'].iloc[0]} probe items, contexts "
-             + ", ".join(sorted(idx["context"].unique())), NO_ITEM_INTERVALS, noise_line(noise)]
-    bad = idx[(idx["subject"] == "base") & ~(idx["S_teacher"] > idx["S_base"])]
-    if len(bad):
+def selection_lines(idx: Index) -> list[str]:
+    sc = idx.sc
+    lines = [f"selection {sc.dir.name}: {len(sc.uids)} probe items (" + ", ".join(
+        f"{d} {int((sc.domains == d).sum())}" for d in idx.scopes[1:]) + f"), contexts {', '.join(sc.contexts)}",
+        "[95% intervals resample the items within unit kinds and domains]"]
+    bad = [f"{c}/{s}" for s in idx.scopes for ci, c in enumerate(sc.contexts) if not idx.e[s][0, ci] > 0]
+    if bad:
         lines.append("no index (the context does not make its instructed answers more likely than the plain ones): "
-                     + ", ".join(f"{r.context}/{r.domain}" for r in bad.itertuples()))
+                     + ", ".join(bad))
+    return lines
+
+
+def report_lines(run, res) -> list[str]:
+    idx, spec, ident, th, jargon, noise = (res[k] for k in ("_index", "specific", "identification", "themes",
+                                                           "jargon", "noise"))
+    lines = [f"washout {run.name}: index 0 = base model, 1 = its answers under the context; specific = own-context "
+             "index minus the mean of the other contexts, minus the same for the controls at that step and rule; "
+             "specific = gain / effect, both in nats per token"] + selection_lines(idx) + [noise_line(noise)]
     if len(spec):
         a = spec[spec["domain"] == DOMAINS_ALL].sort_values(["root", "lineage", "step"])
         lines += ["", "specific index over steps (all domains; ratio to the seeded state at step 0)"]
-        lines += render(["probe", "rule", "level", "context", "seeding", "I own", "raw", "control", "specific",
-                         "ratio"],
-                        [[r.subject, r.arm, r.level, r.context, r.seeding, num(r.I_own, digits=3), num(r.raw, digits=3),
-                          num(r.control, digits=3), num(r.specific, digits=3), num(r.ratio_to_0)]
-                         for r in a.itertuples()])
+        lines += render(["probe", "rule", "level", "context", "seeding", "raw", "specific [95%]", "gain [95%]",
+                         "effect [95%]", "ratio"],
+                        [[r.subject, r.arm, r.level, r.context, r.seeding, num(r.raw, digits=3),
+                          num(r.specific, r.specific_lo, r.specific_hi, 3), num(r.gain, r.gain_lo, r.gain_hi, 4),
+                          num(r.effect, r.effect_lo, r.effect_hi, 4), num(r.ratio_to_0)] for r in a.itertuples()])
         cross = spec[spec["seeding"].str.contains(r"\[") & (spec["domain"] != DOMAINS_ALL)]
         if len(cross):
             lines += ["", "cross-domain coherence: specific index by domain for members seeded on some domains only"]
-            lines += render(["probe", "seeding", "domain", "specific"],
-                            [[r.subject, r.seeding, r.domain, num(r.specific, digits=3)] for r in cross.itertuples()])
+            lines += render(["probe", "seeding", "domain", "specific [95%]"],
+                            [[r.subject, r.seeding, r.domain, num(r.specific, r.specific_lo, r.specific_hi, 3)]
+                             for r in cross.itertuples()])
     else:
         lines += ["", "no seeded member with a context score yet"]
     lines += ["", "identification of the own context (rank 1 of the candidates after subtracting the controls)"]
     lines += render(["step", "rule", "members", "identified", "rate [CP 95%]", "chance", "p"],
                     [[r.step, r.arm, r.members, r.identified, f"{pct(r.rate, 0)} [{pct(r.lo, 0)}, {pct(r.hi, 0)}]",
                       pct(r.chance, 0), f"{r.p:.3f}"] for r in ident.itertuples()]) if len(ident) else [
-        "  needs seeded members and controls at the same step"]
+        "  needs seeded members and controls at the same step, and at least two candidate contexts"]
     if len(th):
-        lines += ["", "stance - tactic, paired by theme (specific index; interval resamples themes)"]
-        lines += render(["step", "rule", "seeding", "domain", "themes", "mean [95%]", "sign-flip p"],
-                        [[r.step, r.arm, r.seeding, r.domain, r.themes, num(r.stance_minus_tactic, r.lo, r.hi, 3),
-                          f"{r.p_sign_flip:.3f}"] for r in th.itertuples()])
+        lines += ["", "stance - tactic, paired by theme (specific index; intervals over items and over themes)"]
+        lines += render(["step", "rule", "seeding", "domain", "themes", "mean [items]", "[themes]", "sign-flip p"],
+                        [[r.step, r.arm, r.seeding, r.domain, r.themes,
+                          num(r.stance_minus_tactic, r.lo_items, r.hi_items, 3),
+                          f"[{r.lo_themes:.3f}, {r.hi_themes:.3f}]", f"{r.p_sign_flip:.3f}"] for r in th.itertuples()])
     else:
         lines += ["", "stance - tactic: no theme with both a stance and a tactic member scored at the same step"]
     j = jargon[jargon["with_jargon"] > 0]
@@ -249,25 +286,26 @@ def report_lines(run, idx, spec, ident, th, jargon, noise) -> list[str]:
     return lines
 
 
-def analyse(run: data.Run, rng, table: Path | None = None) -> dict[str, pd.DataFrame]:
-    idx = index_table(run, data.context_scores(run, table))
-    spec = specific_table(run, idx)
+def analyse(run: data.Run, rng, selection: Path | None = None) -> dict:
+    """Every washout table; "_index" holds the Index itself (not written)."""
+    idx = Index(data.context_scores(run, selection), run.units, rng)
+    spec, draws = specific_table(run, idx)
     hits = own_context_hits(run, idx)
-    return {"index": idx, "specific": spec, "hits": hits, "identification": identification(idx, hits),
-            "themes": themes(run, spec, rng), "noise": twin_noise(run, idx), "jargon": jargon_table(run)}
+    return {"_index": idx, "index": idx.table(), "specific": spec, "hits": hits,
+            "identification": identification(idx, hits), "themes": themes(spec, draws, rng),
+            "noise": twin_noise(run, idx), "jargon": jargon_table(run)}
 
 
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("run_dir", type=Path)
-    ap.add_argument("--table", type=Path, help="a context-score table (default: the run's only selection)")
+    ap.add_argument("--selection", type=Path, help="a context-score selection directory (default: the run's only one)")
     ap.add_argument("--out", type=Path)
     args = ap.parse_args(argv)
     run = data.Run(args.run_dir)
-    tables = analyse(run, np.random.default_rng(0), args.table)
-    write(args.out or Path("results") / run.name / "washout", tables,
-          report_lines(run, tables["index"], tables["specific"], tables["identification"], tables["themes"],
-                       tables["jargon"], tables["noise"]))
+    res = analyse(run, np.random.default_rng(0), args.selection)
+    write(args.out or Path("results") / run.name / "washout", {k: v for k, v in res.items() if k[0] != "_"},
+          report_lines(run, res))
 
 
 if __name__ == "__main__":
