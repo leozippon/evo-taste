@@ -1,8 +1,9 @@
-"""The five analysis commands on a run the engine itself wrote (tiny model, stand-in task layer and sampler of
-tests/engine_fakes.py): seeding by opcd and none, a step-0 twin under self-imitation, clones, probes, the context score
-and a selection evaluation with four samples. A change of the engine's record formats breaks these tests rather than
-an analysis. The stand-in sampler ignores the adapter, so every member has the same solve probabilities: the
-evaluation is an exact null for divergence and heritability."""
+"""The analysis commands on a run the engine itself wrote (tiny model, stand-in task layer and sampler of
+tests/engine_fakes.py): seeding by opcd and none, a step-0 twin under self-imitation, clones, probes, the context score,
+a scaled probe, the deviation and cross-likelihood tables, and a selection evaluation with four samples. A change of
+the engine's record formats breaks these tests rather than an analysis. The stand-in evaluation sampler ignores the
+adapter, so every member has the same solve probabilities: the evaluation is an exact null for divergence,
+heritability and the length decomposition."""
 
 import random
 
@@ -14,7 +15,8 @@ from threadpoolctl import threadpool_limits
 
 from evotaste import evaluate, worker
 from evotaste import member as member_module
-from evotaste.analysis import data, divergence, harvest, health, heritability, seeding, washout
+from evotaste.analysis import (arms, data, deviation, distinct, divergence, harvest, health, heritability, length,
+                               scaled, seeding, washout)
 from evotaste.records import read_jsonl
 from evotaste.sampler import Sample
 from tests import engine_fakes
@@ -108,6 +110,11 @@ def run_dir(tmp_path_factory, base_model):
     mp.setattr(evaluate, "Run", lambda d: run)
     mp.setattr(evaluate, "Policy", lambda *a: run.policy)
     evaluate.context_score(run.dir)
+    mp.setattr(evaluate, "start_server", lambda *a: (None, "stand-in"))
+    mp.setattr(evaluate, "Sampler", lambda *a: run.sampler)
+    evaluate.scaled(run.dir, ["st@2"], [2.0], None)
+    evaluate.deviation(run.dir)
+    evaluate.deviation(run.dir, steps=[2], cross=True)
     mp.setattr(evaluate, "Sampler", EvalSampler)
     mp.setattr(evaluate, "check_gold", lambda tasks: None)
     mp.setattr(evaluate, "suite_tasks", lambda *a: [task(f, d, k, j) for f, d, k in UNITS for j in range(10, 50)])
@@ -228,6 +235,95 @@ def test_a_changed_record_format_is_refused(run_dir, tmp_path):
         data.check_families(records, bad, "probe")
     with pytest.raises(KeyError):
         data.build_grid({"x": [{k: v for k, v in r.items() if k != "channel"} for r in records]}, 1, run.units)
+
+
+def test_deviation_reads_the_engine_table_and_its_partial_caches(run_dir, tmp_path):
+    deviation.main([str(run_dir), "--boot", "50", "--out", str(tmp_path)])
+    au = pd.read_csv(tmp_path / "authors.csv")
+    run = data.Run(run_dir)
+    probes = {f"{lin.id}@{s}" for lin in run.lineages.values() for s in run.probe_steps(lin)} | {"st@2x2"}
+    assert set(au["author"]) == probes
+    a = au[au["scope"] == "all"].set_index("author")
+    assert a.loc["un@0", "deviation"] == 0 and a.loc["st-si@0", "deviation"] != 0  # base weights; a seeded member
+    assert ((a["lo"] <= a["deviation"] + 1e-12) & (a["deviation"] <= a["hi"] + 1e-12)).all()
+    tr = pd.read_csv(tmp_path / "trajectory.csv")
+    assert set(tr["rule"]) == {"centered", "centered+si0.5"} and not ((tr["rule"] == "centered+si0.5") & (tr["step"] == 0)).any()
+    assert set(pd.read_csv(tmp_path / "length.csv")["author"]) == probes
+    sel = data.deviation_selection(run)
+    full, partial = data.deviation_table(run, sel)[0], data.deviation_table(run, sel, partial=True)[0]
+    key = ["subject", "uid"]
+    assert full.sort_values(key).reset_index(drop=True)[["tokens", "delta_sum"]].equals(
+        partial.sort_values(key).reset_index(drop=True)[["tokens", "delta_sum"]])
+
+
+def test_distinct_on_the_engine_cross_table(run_dir, tmp_path):
+    distinct.main([str(run_dir), "--step", "2", "--boot", "50", "--perms", "200", "--classifier-items", "6",
+                   "--out", str(tmp_path)])
+    per = pd.read_csv(tmp_path / "members.csv").set_index("member")
+    dev = pd.read_csv(tmp_path / "margins.csv")
+    run = data.Run(run_dir)
+    table = data.deviation_table(run)[0]
+    for m in ("st@2", "st@2x2", "ta-c1@2"):  # the diagonal minus the base row is the deviation
+        rows = table[table["subject"] == m]
+        assert per.loc[m, "deviation"] == pytest.approx(rows["delta_sum"].sum() / rows["tokens"].sum(), abs=1e-6)
+    own = dev[(dev["scope"] == "all") & (dev["scorer"] == "base")]
+    assert set(own["author"]) == set(per.index) and len(per) == 10  # nine members at step 2 and st@2x2
+    ident = pd.read_csv(tmp_path / "identification.csv")
+    assert set(ident["scope"]) == {"all", "math", "code", "logic"} and (ident["chance"] == 0.1).all()
+    clones = pd.read_csv(tmp_path / "clones.csv")  # the self-imitation rule has one family: no unrelated pair
+    assert set(clones["rule"]) == {"all", "centered"}
+    assert clones.loc[clones["rule"] == "centered", "families"].item() == 4  # st (3), ta (2), pl, un
+    assert {"raw", "stripped", "cosmetic_share"} <= set(pd.read_csv(tmp_path / "authorship.csv")["view"])
+
+
+def test_length_decomposition_on_the_exact_null(run_dir, tmp_path):
+    length.main([str(run_dir), "--tag", TAG, "--boot", "50", "--perms", "50", "--classifier-items", "40",
+                 "--out", str(tmp_path)])
+    inter = pd.read_csv(tmp_path / "interaction.csv")
+    models = list(inter.loc[(inter["items_set"] == "all") & (inter["estimator"] == "adjusted"), "model"])
+    assert models[:3] == ["none", "rule", "rule+length"]
+    none = inter[(inter["items_set"] == "all") & (inter["estimator"] == "adjusted") & (inter["model"] == "none")].iloc[0]
+    assert none["var_lo"] < 0 < none["var_hi"]  # every member has the same solve probabilities
+    mem = pd.read_csv(tmp_path / "members.csv")
+    assert set(mem["scope"]) == {"all", "math", "code", "logic"} and len(mem) == 4 * 9
+    assert set(pd.read_csv(tmp_path / "association.csv")["statistic"]) >= {"r_length", "r2_gain"}
+    assert {"raw", "prefix", "stripped_prefix", "length", "length_cue_share"} <= set(
+        pd.read_csv(tmp_path / "authorship.csv")["view"])
+    assert "reading:" in (tmp_path / "report.txt").read_text()
+
+
+def test_scaled_probe_against_its_factor(run_dir, tmp_path):
+    scaled.main([str(run_dir), "--boot", "50", "--out", str(tmp_path)])
+    t = pd.read_csv(tmp_path / "scaled.csv")
+    assert list(t["factor"]) == [0.0, 1.0, 2.0] and set(t["adapter"]) == {"st@2"}
+    assert t.loc[t["factor"] == 1, "accuracy_diff"].item() == 0 and t.loc[t["factor"] == 0, "deviation"].item() == 0
+    assert t["deviation"].notna().all()
+
+
+def test_arms_by_update_rule(run_dir, tmp_path):
+    arms.main([str(run_dir), "--boot", "50", "--classifier-items", "6", "--out", str(tmp_path)])
+    hist = pd.read_csv(tmp_path / "history.csv")
+    assert set(hist["arm"]) == {"centered", "centered+si0.5"} and {"reward", "si_sequences"} <= set(hist["field"])
+    fields = pd.read_csv(tmp_path / "fields.csv")
+    assert not fields.loc[fields["field"].str.startswith("taste"), "present"].any()  # reported as absent
+    assert "absent from the history" not in (tmp_path / "report.txt").read_text()  # not a taste run: not mentioned
+    probes = pd.read_csv(tmp_path / "probes.csv")
+    assert set(probes["step"]) == {0, 1, 2} and set(probes["metric"]) >= {"accuracy", "far", "heldout_complied"}
+    assert len(pd.read_csv(tmp_path / "deviation.csv"))
+    au = pd.read_csv(tmp_path / "authorship.csv")
+    assert {"raw", "stripped"} <= set(au["view"]) and "all" in set(au["arm"])
+
+
+def test_rule_names_name_every_computed_term():
+    from evotaste.config import Amplification, Exaggeration, Practice
+
+    assert data.rule_name(Amplification()) == "centered"
+    assert data.rule_name(Amplification(self_imitation=0.5)) == "centered+si0.5"
+    assert data.rule_name(Amplification(exaggeration=Exaggeration(1.0, 0.01), imitate_within_free=True)) == \
+        "centered+ex1x0.01~free"
+    assert data.rule_name(Amplification(exaggeration=Exaggeration(0.0, 0.5), practice=Practice(0.0, 0.8, 0.25, 4.0))) \
+        == "centered"  # gamma 0 and eta 0: terms the engine skips
+    assert data.rule_name(Amplification(practice=Practice(4.0, 0.8, 0.25, 4.0))) == "centered+pr4"
 
 
 def test_harvest_simulation_finds_no_payoff_in_an_exact_null(run_dir, tmp_path):

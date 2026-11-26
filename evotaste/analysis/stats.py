@@ -104,14 +104,26 @@ def one_class(y: np.ndarray, nonconstant: bool = False) -> np.ndarray:
     return np.where((pooled > 0) & (pooled < 1), 0, -1) if nonconstant else np.zeros(len(pooled), int)
 
 
-def interaction(y: np.ndarray, v: np.ndarray, classes: np.ndarray, w: np.ndarray) -> np.ndarray:
-    """Member-by-item interaction variance within item classes: the mean square of
-    Y[m,i] - Y[m,class] - Y[.,i] + Y[.,class] over the cells of items with class >= 0, on (M - 1)(N_c - 1) degrees of
-    freedom per class, minus the noise it contains. One class of all items is the plain two-way interaction; difficulty
-    classes also remove each member's effect per difficulty class (see ANALYSIS_NOTES.md)."""
+def member_projection(m: int, z: np.ndarray | None = None) -> np.ndarray:
+    """I minus the hat matrix of [1, z] over members: applied to an item's column of solve rates it removes the
+    item's mean over members and, with member covariates z (members x k, e.g. log mean length), the item's own linear
+    dependence on them (an item-specific slope). Symmetric and idempotent, of rank M - 1 - k."""
+    x = np.ones((m, 1)) if z is None else np.column_stack([np.ones(m), np.asarray(z, float).reshape(m, -1)])
+    if np.linalg.matrix_rank(x) < x.shape[1] or x.shape[1] > m - 1:
+        raise ValueError(f"member covariates are collinear or too many for {m} members")
+    q = np.linalg.qr(x)[0]
+    return np.eye(m) - q @ q.T
+
+
+def interaction_parts(y: np.ndarray, v: np.ndarray, classes: np.ndarray, w: np.ndarray,
+                      z: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """(sum of squares minus noise, degrees of freedom) of `interaction`, per row of w, so that estimates on member
+    subsets can be pooled."""
     m = y.shape[0]
-    d = y - y.mean(0)  # removes item effects
-    s, vs = (d ** 2).sum(0), v.sum(0)
+    p = member_projection(m, z)
+    d = p @ y  # removes item effects (and with z each item's slopes on the covariates)
+    s, vs = (d ** 2).sum(0), np.diag(p) @ v  # vs: sum over members of P_mm V[m, i]
+    rank = m - 1 - (0 if z is None else np.asarray(z).reshape(m, -1).shape[1])
     num, den = np.zeros(len(w)), np.zeros(len(w))
     for c in np.unique(classes[classes >= 0]):
         idx = classes == c
@@ -119,9 +131,23 @@ def interaction(y: np.ndarray, v: np.ndarray, classes: np.ndarray, w: np.ndarray
         n = wc.sum(1)
         mean = d[:, idx] @ wc.T / np.maximum(n, 1)  # member x draw: the member's effect in the class
         ok = n >= 2
-        noise = (1 - 1 / m) * (wc @ vs[idx] - (wc ** 2) @ vs[idx] / np.maximum(n, 1))
+        noise = wc @ vs[idx] - (wc ** 2) @ vs[idx] / np.maximum(n, 1)
         num += np.where(ok, wc @ s[idx] - n * (mean ** 2).sum(0) - noise, 0)
-        den += np.where(ok, (m - 1) * (n - 1), 0)
+        den += np.where(ok, rank * (n - 1), 0)
+    return num, den
+
+
+def interaction(y: np.ndarray, v: np.ndarray, classes: np.ndarray, w: np.ndarray,
+                z: np.ndarray | None = None) -> np.ndarray:
+    """Member-by-item interaction variance within item classes: the mean square of
+    Y[m,i] - Y[m,class] - Y[.,i] + Y[.,class] over the cells of items with class >= 0, on (M - 1)(N_c - 1) degrees of
+    freedom per class, minus the noise it contains. One class of all items is the plain two-way interaction; difficulty
+    classes also remove each member's effect per difficulty class (see ANALYSIS_NOTES.md). With member covariates z
+    (members x k) the residual interaction: each item's column is also cleared of its linear dependence on z
+    (member_projection), on (M - 1 - k)(N_c - 1) degrees of freedom. The noise term of a cell is its V times the
+    projection's diagonal, so the estimate stays exactly unbiased for the same projection of the true solve
+    probabilities, whatever they are, provided z does not depend on the samples."""
+    num, den = interaction_parts(y, v, classes, w, z)
     return num / den
 
 

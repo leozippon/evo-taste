@@ -126,6 +126,114 @@ def test_difficulty_classes_keep_ties_together_and_drop_constant_items():
     assert c[0] == -1 and c[3] == -1 and c[1] == c[4] and len(set(c[c >= 0])) == 2
 
 
+def test_residual_interaction_is_the_cross_half_product_of_the_projected_cells():
+    """With member covariates the estimator equals <P x C, P z C> / df averaged over every split of the two samples:
+    unbiased for the projection of the true solve probabilities, and the plain estimator when z is None."""
+    rng = np.random.default_rng(10)
+    x = (rng.random((4, 3, 2)) < 0.5).astype(float)
+    y, v = stats.cells(x)
+    z = np.array([[0.1], [0.7], [0.2], [1.5]])
+    p = stats.member_projection(4, z)
+    ours = stats.interaction(y, v, np.zeros(3, int), stats.ones(3), z)[0]
+    halves = []
+    for flips in itertools.product((0, 1), repeat=12):
+        f = np.array(flips).reshape(4, 3)
+        a, b = np.where(f, x[..., 1], x[..., 0]), np.where(f, x[..., 0], x[..., 1])
+        ca, cb = p @ (a - a.mean(1, keepdims=True)), p @ (b - b.mean(1, keepdims=True))
+        halves.append((ca * cb).sum() / (2 * 2))  # (M - 1 - k)(N - 1) = 2 x 2
+    assert ours == pytest.approx(np.mean(halves), abs=1e-12)
+    assert stats.interaction(y, v, np.zeros(3, int), stats.ones(3))[0] == pytest.approx(
+        stats.interaction(y, v, np.zeros(3, int), stats.ones(3), None)[0])
+    with pytest.raises(ValueError, match="collinear"):
+        stats.member_projection(4, np.c_[z, 2 * z])
+
+
+def test_length_decomposition_on_simulated_truth():
+    """All interaction caused by length (and the token limit): the length part is nearly all of it, the residual is
+    unbiased for its truth, similar-length members interact far less than random bands, and distance follows the
+    length difference. None caused by length: the length part, the band contrast and the association vanish."""
+    rng = np.random.default_rng(11)
+    caused = validate.length_study(rng, 4, 28, 1500, 2, "length", b=60, perms=60)
+    assert caused["length_part"].mean() > 0.85 and caused["length_part_truth"].mean() > 0.85
+    assert abs((caused["residual"] - caused["residual_truth"]).mean()) < 0.15 * caused["interaction"].mean()
+    assert (caused["p_length"] <= 0.05).all() and caused["band_ratio"].max() < 0.6 and caused["r_length"].min() > 0.7
+    none = validate.length_study(rng, 6, 28, 1500, 2, "none", b=60, perms=60)
+    assert abs(none["length_part"].mean()) < 0.03 and abs(none["length_part_truth"].mean()) < 0.02
+    assert abs((none["residual"] - none["residual_truth"]).mean()) < 3 * (none["residual"] - none["residual_truth"]).std()
+    assert 0.9 < none["band_ratio"].mean() < 1.1 and abs(none["r_length"].mean()) < 0.2
+    half = validate.length_study(rng, 3, 28, 1500, 2, "half", b=60, perms=60)
+    assert abs(half["length_part"].mean() - half["length_part_truth"].mean()) < 0.1 and 0.3 < half["length_part"].mean() < 0.7
+
+
+def test_deviation_at_typical_length_recovers_a_planted_line():
+    """An answer's deviation per token = 0.1 + 0.05 log2(tokens / typical) + noise: the intercept is 0.1, whatever the
+    answers' lengths, here all longer than typical."""
+    from types import SimpleNamespace
+
+    from evotaste.analysis import deviation
+
+    rng = np.random.default_rng(12)
+    typical = rng.uniform(300, 900, 400)
+    tokens = typical[None, :] * rng.uniform(1.2, 4.0, (3, 400))
+    per = 0.1 + 0.05 * np.log2(tokens / typical) + rng.normal(0, 0.02, tokens.shape)
+    t = SimpleNamespace(tokens=tokens, delta=per * tokens)
+    a, s = deviation.at_typical(t, typical, stats.ones(400))
+    assert np.allclose(a[:, 0], 0.1, atol=0.01) and np.allclose(s[:, 0], 0.05, atol=0.01)
+
+
+def test_likelihood_margins_are_kl_and_identification_is_chance_for_identical_members():
+    from evotaste.analysis import distinct
+
+    rng = np.random.default_rng(13)
+    errors = []
+    for _ in range(6):
+        df, kl = validate.simulate_cross(rng, 5, 60, spread=0.4)
+        c = distinct.Cross(df)
+        mp = distinct.margins(c, stats.ones(len(c.items)))[..., 0]
+        errors.append((mp - kl)[~np.eye(6, dtype=bool)])
+        assert np.allclose(np.diag(mp), 0)
+    errors = np.concatenate(errors)
+    assert abs(errors.mean()) < 3 * errors.std() / np.sqrt(len(errors)) + 1e-3
+    df, kl = validate.simulate_cross(rng, 4, 50, family=np.zeros(4, int), shared=1.0)  # four copies of one member
+    c = distinct.Cross(df)
+    ident, hit = distinct.identification(c, stats.item_draws(np.zeros(50), 50, rng))
+    assert np.allclose(hit, 0.25) and ident.loc[ident["scope"] == "all", "rate"].item() == pytest.approx(0.25)
+    df, _ = validate.simulate_cross(rng, 4, 50, spread=0.5)  # different members: identified far above chance
+    ident, _ = distinct.identification(distinct.Cross(df), stats.item_draws(np.zeros(50), 50, rng))
+    assert ident.loc[ident["scope"] == "all", "lo"].item() > 0.5
+
+
+def test_clone_pairs_by_likelihood_are_closer_only_when_they_share_a_deviation():
+    from evotaste.analysis import distinct, heritability
+
+    rng = np.random.default_rng(14)
+    fam = np.repeat(np.arange(6), 2)
+    arm = np.zeros(12, int)
+    p = {}
+    for shared in (0.0, 0.6):
+        ps = []
+        for _ in range(8):
+            df, _ = validate.simulate_cross(rng, 12, 40, length=10, spread=0.4, family=fam, shared=shared)
+            mp = distinct.margins(distinct.Cross(df), stats.ones(40))[..., 0][1:, 1:]
+            d = (mp + mp.T) / 2
+            clone, unrelated = heritability.means(d, fam, arm)
+            perm, _ = stats.relabellings(fam, arm, rng, 300)
+            ps.append(stats.perm_p(unrelated - clone, np.array([np.subtract(*heritability.means(d, q, arm)[::-1])
+                                                                for q in perm])))
+        p[shared] = np.array(ps)
+    assert (p[0.0] <= 0.05).mean() <= 0.25 and (p[0.6] <= 0.05).mean() >= 0.75
+
+
+def test_common_share_of_practice_movement():
+    from evotaste.analysis import arms
+
+    rng = np.random.default_rng(15)
+    common = rng.normal(0, 0.3, 9)
+    assert arms.common_share(np.tile(common, (3, 1))) == pytest.approx(1.0)
+    shares = [arms.common_share(rng.normal(0, 0.3, (3, 9))) for _ in range(400)]
+    assert abs(np.mean(shares) - 1 / 3) < 0.03
+
+
 def test_harvest_simulation_retains_a_real_lead_and_finds_none_in_the_null():
     """Members that differ in level keep part of the select-half lead on the test half; identical members keep
     none. Twenty units of 100 items in two domains, 14 members, two samples."""

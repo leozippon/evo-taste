@@ -56,12 +56,13 @@ class Lineage:
     level: str  # placebo | stance | tactic | reference | unseeded
     theme: str | None
     seeding: str  # opcd, opcd[math], imitation, none
-    arm: str  # the update rule: advantage, plus +si<beta> with self-imitation
+    arm: str  # the update rule (rule_name)
     parent: tuple[str, int] | None  # (parent lineage, clone step) of a clone
     steps: int  # amplification steps configured
     status: str  # pending (no state yet) | new | active | done | culled
     step: int  # amplification updates at the last checkpoint
     dir: Path
+    taste: float | None = None  # strength of the taste-shaped reward when the member sets one (pilot E), else None
 
     @property
     def control(self) -> bool:
@@ -69,8 +70,34 @@ class Lineage:
         return self.level in ("placebo", "unseeded")
 
 
+def taste_of(amp: config.Amplification):
+    """The taste-shaped reward's settings (WP-E3), or None; read by name because older engines have no such key."""
+    return getattr(amp, "taste", None)
+
+
 def rule_name(amp: config.Amplification) -> str:
-    return amp.advantage + (f"+si{amp.self_imitation:g}" if amp.self_imitation > 0 else "")
+    """The update rule, naming every term the update actually computes: the advantage, then +si<beta>
+    (self-imitation), +ex<gamma>x<weight> (exaggeration), ~free when the imitation terms take only successes within
+    the free length, +pr<eta> (self-chosen practice; +prb<eta> relative to the base model's pass rate) and
+    +taste<strength>. A term that the engine skips (weight, gamma, eta or strength 0) is not named, so two members
+    with the same name receive the same update."""
+    name = amp.advantage
+    imitation = False
+    if amp.self_imitation > 0:
+        name += f"+si{amp.self_imitation:g}"
+        imitation = True
+    ex = amp.exaggeration
+    if ex is not None and ex.gamma > 0 and ex.weight > 0:
+        name += f"+ex{ex.gamma:g}x{ex.weight:g}"
+        imitation = True
+    if imitation and amp.imitate_within_free:
+        name += "~free"
+    if amp.practice is not None and amp.practice.eta > 0:
+        name += f"+pr{'b' if getattr(amp.practice, 'reference', None) == 'base' else ''}{amp.practice.eta:g}"
+    taste = taste_of(amp)
+    if taste is not None and taste.strength != 0:
+        name += f"+taste{taste.strength:g}"
+    return name
 
 
 class Run:
@@ -81,6 +108,11 @@ class Run:
         self.contexts = Contexts.load(self.cfg.contexts)
         self.units = unit_kinds(self.cfg.suites)
         self.lineages = self._lineages()
+        # finished scaled probes (the engine writes probe_summary.json last): label -> summary
+        self.scaled = {p.parent.name: read_json(p) for p in sorted((self.dir / "scaled").glob("*/probe_summary.json"))}
+        for label, s in self.scaled.items():
+            if label != s["label"] or s["lineage"] not in self.lineages:
+                raise ValueError(f"{self.dir}/scaled/{label}: summary of {s['label']} (lineage {s['lineage']})")
 
     def _lineages(self) -> dict[str, Lineage]:
         out = {}
@@ -95,8 +127,10 @@ class Run:
                 path = self.dir / "members" / lineage_id / "state.json"
                 s = read_json(path) if path.exists() else {"status": "pending", "step": 0, "replaced_by": None}
                 parent = (spec.parent.member, spec.parent.step) if spec.parent else None
+                taste = taste_of(amp)
                 out[lineage_id] = Lineage(lineage_id, context, level, self.contexts.theme.get(context), seed,
-                                          rule_name(amp), parent, amp.steps, s["status"], s["step"], path.parent)
+                                          rule_name(amp), parent, amp.steps, s["status"], s["step"], path.parent,
+                                          None if taste is None else float(taste.strength))
                 lineage_id = s["replaced_by"]
         return out
 
@@ -276,16 +310,24 @@ def build_grid(groups: dict[str, list[dict]], samples: int, units: dict[str, str
     return Grid(labels, items, dict(x), texts)
 
 
-def probe_grid(run: Run, subjects: dict[str, tuple[Lineage | None, int | None]], traits=None) -> Grid:
-    """Probe answers of subjects label -> (lineage, step), or (None, None) for the base model's plain answers; checks
-    that the per-family accuracy reproduces each probe summary the engine wrote."""
+def probe_grid(run: Run, subjects: dict[str, tuple[Lineage | None, int | None]], traits=None,
+               keep_texts: bool = False) -> Grid:
+    """Probe answers of subjects label -> (lineage, step), or (None, None) for the base model's plain answers, and
+    scaled probes (label <lineage>@<step>x<factor>, given as (lineage, step) like the probe they scale); checks that
+    the per-family accuracy reproduces each probe summary the engine wrote."""
     groups = {}
     for label, (lin, step) in subjects.items():
-        groups[label] = run.base_records() if lin is None else run.probe_records(lin, step)
-        summary = (read_json(run.dir / "base" / "probe_summary.json") if lin is None
-                   else run.probe_summaries(lin)[step])
+        if lin is None:
+            groups[label] = run.base_records()
+            summary = read_json(run.dir / "base" / "probe_summary.json")
+        elif label in run.scaled:
+            groups[label] = read_jsonl_gz(run.dir / "scaled" / label / "probe_responses.jsonl.gz")
+            summary = run.scaled[label]
+        else:
+            groups[label] = run.probe_records(lin, step)
+            summary = run.probe_summaries(lin)[step]
         check_families(groups[label], summary["by_family"], f"{label} probe")
-    return build_grid(groups, 1, run.units, traits)
+    return build_grid(groups, 1, run.units, traits, keep_texts)
 
 
 def check_families(records: list[dict], by_family: dict[str, float], what: str) -> None:
@@ -364,6 +406,117 @@ def census_strata(census_dir: str | Path) -> dict[str, str]:
 
 def add_strata(grid: Grid, strata: dict[str, str] | None) -> None:
     grid.items["stratum"] = [strata.get(u) for u in grid.items["uid"]] if strata else None
+
+
+# -- deviation and cross-likelihood (evaluate deviation [--cross]) --------------------------------------------------
+
+DEVIATION_COLUMNS = ["subject", "lineage", "step", "factor", "uid", "domain", "tokens", "delta_sum"]
+CROSS_COLUMNS = ["scorer", "author", "step", "uid", "domain", "tokens", "logprob_sum"]
+
+
+def deviation_selection(run: Run, selection: str | Path | None = None) -> Path:
+    """A selection directory of `evaluate deviation` (runs/<name>/deviation/<N>items-<hash>/): the one named, or the
+    run's only one."""
+    if selection is not None:
+        return Path(selection)
+    found = sorted(p.parent for p in (run.dir / "deviation").glob("*/selection.json"))
+    if len(found) != 1:
+        raise SystemExit(f"{run.dir}/deviation: {len(found)} selections ({', '.join(p.name for p in found) or 'none'}); "
+                         "run python -m evotaste.evaluate deviation, or name one with --selection")
+    return found[0]
+
+
+def author_file(run: Run, label: str) -> Path:
+    """The probe answers that an author label of the likelihood tables stands for: a committed member probe
+    <lineage>@<step> or a finished scaled probe <lineage>@<step>x<factor>."""
+    if label in run.scaled:
+        return run.dir / "scaled" / label / "probe_responses.jsonl.gz"
+    lin, step = run.resolve(label)
+    if step not in run.probe_steps(lin):
+        raise ValueError(f"{label}: not a committed probe of run {run.name}")
+    return lin.dir / "probe_responses" / f"step_{step:06d}.jsonl.gz"
+
+
+def _items_of(run: Run, sel: Path, df: pd.DataFrame, who: str, what: str) -> pd.DataFrame:
+    """Checks that every `who` has every item of selection.json exactly once, in the base model's domains, and adds
+    each item's family and unit kind."""
+    uids = read_json(sel / "selection.json")["uids"]
+    meta = {r["uid"]: (r["family"], r["domain"]) for r in run.base_records()}
+    counts = df.groupby(who)["uid"].agg(["size", "nunique"])
+    if set(df["uid"]) != set(uids) or (counts["size"] != len(uids)).any() or (counts["nunique"] != len(uids)).any():
+        raise ValueError(f"{sel}/{what}: not every {who} has every item of the selection exactly once")
+    if any(meta[u][1] != d for u, d in zip(df["uid"], df["domain"])):
+        raise ValueError(f"{sel}/{what}: an item's domain differs from the base model's probe answers")
+    df["family"] = [meta[u][0] for u in df["uid"]]
+    df["unit"] = [run.units[f] for f in df["family"]]
+    return df
+
+
+def deviation_table(run: Run, selection: str | Path | None = None, partial: bool = False) -> tuple[pd.DataFrame, Path]:
+    """Per-response rows of a deviation selection (columns DEVIATION_COLUMNS plus family and unit): its responses.csv,
+    which the engine writes when the command finishes, or with `partial` its per-author cache files (<label>.json), of
+    a selection still being scored. A cache counts only if it was computed on the author's current committed answers
+    (the SHA-256 of the answers file, the key the engine itself checks besides the adapter's hash: a checkpoint and the
+    probe it answered are committed together, so new answers come with a new file)."""
+    sel = deviation_selection(run, selection)
+    if not partial:
+        if not (sel / "responses.csv").exists():
+            raise SystemExit(f"{sel}: no responses.csv (the deviation command has not finished); --partial reads the "
+                             "per-author results finished so far")
+        df = pd.read_csv(sel / "responses.csv", dtype={"subject": str, "lineage": str, "uid": str, "domain": str})
+        if list(df.columns) != DEVIATION_COLUMNS:
+            raise ValueError(f"{sel}/responses.csv: columns {list(df.columns)}, expected {DEVIATION_COLUMNS}")
+    else:
+        rows, stale = [], []
+        for cache in sorted(sel.glob("*@*.json")):
+            c = read_json(cache)
+            label = cache.name[:-len(".json")]
+            try:
+                current = hashlib.sha256(author_file(run, label).read_bytes()).hexdigest() == c["sha256"]
+            except ValueError:
+                current = False
+            if not current:
+                stale.append(label)
+                continue
+            if {r["subject"] for r in c["responses"]} != {label}:
+                raise ValueError(f"{cache}: rows of another subject")
+            rows += c["responses"]
+        if stale:
+            print(f"{sel}: left out {len(stale)} cache files of answers no longer committed: {', '.join(stale)}")
+        if not rows:
+            raise SystemExit(f"{sel}: no finished per-author results yet")
+        df = pd.DataFrame(rows)
+        if list(df.columns) != DEVIATION_COLUMNS:
+            raise ValueError(f"{sel}: cache columns {list(df.columns)}, expected {DEVIATION_COLUMNS}")
+    df["factor"] = pd.to_numeric(df["factor"])
+    return _items_of(run, sel, df, "subject", "responses"), sel
+
+
+def cross_table(run: Run, step: int, selection: str | Path | None = None) -> tuple[pd.DataFrame, Path]:
+    """cross-<step>.csv of a deviation selection: the summed log-probability of every author's answer to every item
+    under every scorer (base: the base model, as author its plain probe answers). Checks that every scorer has every
+    author's answer to every item once, with the author's completion tokens the same under every scorer."""
+    sel = deviation_selection(run, selection)
+    path = sel / f"cross-{step}.csv"
+    if not path.exists():
+        raise SystemExit(f"{path}: no cross-likelihood table at step {step} (python -m evotaste.evaluate deviation "
+                         f"runs/{run.name} --steps {step} --cross)")
+    df = pd.read_csv(path, dtype={"scorer": str, "author": str, "uid": str, "domain": str})
+    if list(df.columns) != CROSS_COLUMNS:
+        raise ValueError(f"{path}: columns {list(df.columns)}, expected {CROSS_COLUMNS}")
+    if (df["step"] != step).any():
+        raise ValueError(f"{path}: rows of another step")
+    subjects = set(df["scorer"])
+    if set(df["author"]) != subjects or df.duplicated(["scorer", "author", "uid"]).any():
+        raise ValueError(f"{path}: scorers and authors differ, or a (scorer, author, item) appears twice")
+    if (df.groupby(["author", "uid"])["tokens"].nunique() != 1).any() or (
+            df.groupby(["author", "uid"]).size() != len(subjects)).any():
+        raise ValueError(f"{path}: an answer is not scored once by every scorer with the same tokens")
+    _items_of(run, sel, df[df["scorer"] == "base"].copy(), "author", path.name)
+    meta = {r["uid"]: r["family"] for r in run.base_records()}
+    df["family"] = [meta[u] for u in df["uid"]]
+    df["unit"] = [run.units[f] for f in df["family"]]
+    return df, sel
 
 
 @dataclass

@@ -121,16 +121,51 @@ def trait_tables(grid: data.Grid, members: list[str], arm_of: dict, w) -> tuple[
     return pd.DataFrame(rows), pd.DataFrame(spread)
 
 
-def authorship(grid: data.Grid, members: list[str], cap: int, rng) -> pd.DataFrame:
-    """Which member wrote a response: trained on sample 0 of the items of half the units and tested on the other half,
-    both ways; on raw text, on text stripped of layout and notation, and on layout traits alone. Accuracy with a
-    bootstrap interval over test items (all members' answers to an item together); the cosmetic share is
-    (raw - stripped) / (raw - chance), with the same draws."""
+PREFIX = 600  # characters of an answer that the length-free views keep
+
+
+def _text_model():
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.linear_model import LogisticRegression
     from sklearn.pipeline import FeatureUnion, make_pipeline
+
+    return make_pipeline(FeatureUnion([
+        ("w", TfidfVectorizer(token_pattern=r"(?u)\b\w+\b|[^\w\s]+", ngram_range=(1, 2), min_df=2, sublinear_tf=True)),
+        ("c", TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 4), min_df=2, sublinear_tf=True))]),
+        LogisticRegression(max_iter=2000))
+
+
+def _feature_model():
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.pipeline import make_pipeline
     from sklearn.preprocessing import StandardScaler
 
+    return make_pipeline(StandardScaler(), LogisticRegression(max_iter=2000))
+
+
+# What the classifier reads of a response: name -> (features of sample 0 of the subjects' answers to item i, model).
+# raw: the text with digits replaced; stripped: without layout and notation; layout: the layout traits alone;
+# prefix and stripped_prefix: the first PREFIX characters of those, which hide how long the answer is; length: the
+# completion tokens (log) and whether the answer was cut off, alone.
+VIEWS = {
+    "raw": (lambda g, idx, i: [traits.raw_view(t) for t in g.texts[idx, i]], _text_model),
+    "stripped": (lambda g, idx, i: [traits.stripped_view(t) for t in g.texts[idx, i]], _text_model),
+    "layout": (lambda g, idx, i: [[traits.layout_traits(t)[k] for k in traits.LAYOUT] for t in g.texts[idx, i]],
+               _feature_model),
+    "prefix": (lambda g, idx, i: [traits.raw_view(t)[:PREFIX] for t in g.texts[idx, i]], _text_model),
+    "stripped_prefix": (lambda g, idx, i: [traits.stripped_view(t)[:PREFIX] for t in g.texts[idx, i]], _text_model),
+    "length": (lambda g, idx, i: np.c_[np.log(g.x["tokens"][idx, i, 0]), g.x["truncated"][idx, i, 0]],
+               _feature_model),
+}
+
+
+def authorship(grid: data.Grid, members: list[str], cap: int, rng, views=("raw", "stripped", "layout"),
+               contrasts=(("cosmetic_share", "raw", "stripped"),), b: int = stats.B) -> pd.DataFrame:
+    """Which member wrote a response: trained on sample 0 of the items of half the units and tested on the other half,
+    both ways, once per view of the response (VIEWS). Accuracy with a bootstrap interval over test items (all
+    members' answers to an item together); each contrast (name, a, b) is the share (a - b) / (a - chance) of what view
+    a identifies beyond chance that view b loses, with the same draws (cosmetic_share: what stripping layout and
+    notation loses)."""
     idx = [grid.labels.index(m) for m in members]
     units = sorted(grid.items["family"].unique())
     half = np.array([units.index(f) % 2 for f in grid.items["family"]])
@@ -139,39 +174,29 @@ def authorship(grid: data.Grid, members: list[str], cap: int, rng) -> pd.DataFra
         pool = np.flatnonzero(half == h)
         chosen.append(np.sort(rng.choice(pool, min(cap, len(pool)), replace=False)))
     labels = np.array(members)
-
-    def text_model():
-        return make_pipeline(FeatureUnion([
-            ("w", TfidfVectorizer(token_pattern=r"(?u)\b\w+\b|[^\w\s]+", ngram_range=(1, 2), min_df=2,
-                                  sublinear_tf=True)),
-            ("c", TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 4), min_df=2, sublinear_tf=True))]),
-            LogisticRegression(max_iter=2000))
-
-    views = {"raw": (lambda i: [traits.raw_view(t) for t in grid.texts[idx, i]], text_model),
-             "stripped": (lambda i: [traits.stripped_view(t) for t in grid.texts[idx, i]], text_model),
-             "layout": (lambda i: [[traits.layout_traits(t)[k] for k in traits.LAYOUT] for t in grid.texts[idx, i]],
-                        lambda: make_pipeline(StandardScaler(), LogisticRegression(max_iter=2000)))}
     correct = {}
     with threadpool_limits(stats.THREADS):
-        for view, (features, model) in views.items():
+        for view in views:
+            features, model = VIEWS[view]
             hits = np.zeros((len(members), len(grid.items)))
             for train, test in ((chosen[0], chosen[1]), (chosen[1], chosen[0])):
-                fx = [f for i in train for f in features(i)]
+                fx = [f for i in train for f in features(grid, idx, i)]
                 fit = model().fit(fx, np.tile(labels, len(train)))
                 for i in test:
-                    hits[:, i] = fit.predict(features(i)) == labels
+                    hits[:, i] = fit.predict(features(grid, idx, i)) == labels
             correct[view] = hits
     tested = np.concatenate(chosen)
-    draws = rng.choice(tested, (stats.B, len(tested)))
+    draws = rng.choice(tested, (b, len(tested)))
     chance = 1 / len(members)
     acc = {v: (h[:, tested].mean(), h[:, draws].mean((0, 2))) for v, h in correct.items()}
     rows = [{"view": v, "members": len(members), "items": len(tested), "accuracy": a, "chance": chance,
              **dict(zip(("lo", "hi"), stats.ci(d)))} for v, (a, d) in acc.items()]
-    with np.errstate(invalid="ignore", divide="ignore"):
-        share = (acc["raw"][1] - acc["stripped"][1]) / (acc["raw"][1] - chance)
-    rows.append({"view": "cosmetic_share", "members": len(members), "items": len(tested),
-                 "accuracy": (acc["raw"][0] - acc["stripped"][0]) / (acc["raw"][0] - chance), "chance": np.nan,
-                 **dict(zip(("lo", "hi"), stats.ci(share)))})
+    for name, va, vb in contrasts:
+        with np.errstate(invalid="ignore", divide="ignore"):
+            share = (acc[va][1] - acc[vb][1]) / (acc[va][1] - chance)
+        rows.append({"view": name, "members": len(members), "items": len(tested),
+                     "accuracy": (acc[va][0] - acc[vb][0]) / (acc[va][0] - chance), "chance": np.nan,
+                     **dict(zip(("lo", "hi"), stats.ci(share)))})
     return pd.DataFrame(rows)
 
 
