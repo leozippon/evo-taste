@@ -44,11 +44,11 @@ def family_of(run: data.Run, lin: data.Lineage) -> str:
 
 
 def scalar_traits(grid: data.Grid, w: np.ndarray) -> dict[str, np.ndarray]:
-    """Per label (row) and item draw: accuracy and accuracy by domain (means over units, as the engine's), program
-    share, mean length, and the mean of every other counted and layout trait over responses that have it."""
+    """Per label (row) and item draw, on the dataset units of `grid`: accuracy overall and by domain (item means),
+    length (mean and 90th percentile of tokens, share truncated, overall and by domain), and the mean of every other
+    counted and layout trait over responses that have it."""
     m = health.metrics(grid, w)
-    out = {k: m[k] for k in m if k == "accuracy" or k.startswith("domain_")}
-    out["program"], out["tokens"] = m["program_share"], m["tokens"]
+    out = {k: m[k] for k in m if k == "accuracy" or k.startswith("domain_")} | health.length_metrics(grid, w)
     for t in traits.COUNTED + traits.LAYOUT:
         if t in ("tokens", "program"):
             continue
@@ -154,11 +154,17 @@ def analyse(run: data.Run, grid: data.Grid, null: data.Grid | None, rng, table: 
             spec = dict(zip(s["subject"], s["specific"]))
     null_mean = {}
     if null is not None:
-        nl = divergence.null_pairs(null, lambda it: stats.item_draws(data.strata(it), b, rng))
+        nl = divergence.null_pairs(null.real(), lambda it: stats.item_draws(data.strata(it), b, rng))
         null_mean = dict(zip(nl.loc[nl["adapter"] == "mean", "estimator"], nl.loc[nl["adapter"] == "mean", "d2"]))
     icc, reg, dist, pairs, families = [], [], [], [], []
+    proc, grid = grid.procedural(), grid.real()  # headline on the dataset units; the format probe as one trait
     w = stats.item_draws(data.strata(grid.items), b, rng)
     values_all, draws_all = scalar_traits(grid, stats.ones(len(grid.items))), scalar_traits(grid, w)
+    if len(proc.items):
+        every = np.ones(proc.x["reward"].shape, bool)
+        values_all["format_probe"] = health._rate(proc.x["reward"], every, stats.ones(len(proc.items)))
+        draws_all["format_probe"] = health._rate(proc.x["reward"], every,
+                                                 stats.item_draws(data.strata(proc.items), b, rng))
     for step, group in sorted(members_at(run, grid).items()):
         labels = [lab for lab, _ in group]
         fam = np.array([family_of(run, lin) for _, lin in group])
@@ -254,7 +260,8 @@ def report_lines(run, tag, grid, res, null_tag) -> list[str]:
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("run_dir", type=Path)
-    ap.add_argument("--tag", required=True)
+    ap.add_argument("--tag", required=True, help="selection evaluation tag, or several of the same items separated "
+                                                  "by commas (e.g. the clone point's and the clones' final one)")
     ap.add_argument("--null-tag", help="evaluation with >= 4 samples per item whose adapters give the noise floor")
     ap.add_argument("--selection", type=Path, help="a context-score selection for the specific index (default: the "
                                                     "run's only selection, if any)")

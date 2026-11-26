@@ -206,6 +206,20 @@ class Grid:
         return Grid(list(labels), self.items, {k: v[idx] for k, v in self.x.items()},
                     None if self.texts is None else self.texts[idx], self.sha, self.aliases)
 
+    def items_where(self, keep) -> Grid:
+        """The same subjects on the items where `keep` (a mask over items) holds."""
+        keep = np.asarray(keep, bool)
+        return Grid(self.labels, self.items[keep].reset_index(drop=True), {k: v[:, keep] for k, v in self.x.items()},
+                    None if self.texts is None else self.texts[:, keep], self.sha, self.aliases)
+
+    def real(self) -> Grid:
+        """The dataset units: every unit but the procedural format probe."""
+        return self.items_where(self.items["unit"] != "procedural")
+
+    def procedural(self) -> Grid:
+        """The procedural format-probe units (reasoning-gym families, strict scorers)."""
+        return self.items_where(self.items["unit"] == "procedural")
+
 
 def strata(items: pd.DataFrame) -> np.ndarray:
     """The bootstrap's strata: unit kind (near, far, procedural) within domain. Units themselves are too small in the
@@ -284,37 +298,48 @@ def check_families(records: list[dict], by_family: dict[str, float], what: str) 
 
 
 def load_eval(run: Run, tag: str, traits=None, keep_texts: bool = False) -> Grid:
-    """A complete selection evaluation runs/<name>/eval/selection/<tag>/. Labels that name the same adapter (equal
-    content hash) are the same model (a clone at its clone point is its parent's checkpoint): one is kept, a label of
-    the original lineage before a clone's, and the others are listed in `aliases`."""
-    out = run.dir / "eval" / SUITE / tag
-    if not (out / "params.json").exists():
-        raise SystemExit(f"{out}: no evaluation under this tag")
-    if not (out / "summary.json").exists():  # the engine writes it only once every shard has finished
-        raise SystemExit(f"{out}: the evaluation is incomplete (no summary.json yet)")
-    params = read_json(out / "params.json")
-    summary = read_json(out / "summary.json")["adapters"]
-    records = [r for p in sorted(out.glob("records-*.jsonl.gz")) for r in read_jsonl_gz(p)]
-    groups = collections.defaultdict(list)
-    for r in records:
-        if r["suite"] != SUITE:
-            raise ValueError(f"{out}: a record of suite {r['suite']!r}")
-        groups[r["adapter"]].append(r)
-    if set(groups) != set(summary):
-        raise ValueError(f"{out}: the records' labels differ from summary.json's")
+    """A complete selection evaluation runs/<name>/eval/selection/<tag>/, or several (tags separated by commas) of
+    the same items and samples, merged. Labels that name the same adapter (equal content hash) are the same model (a
+    clone at its clone point is its parent's checkpoint): one is kept, a label of the original lineage before a
+    clone's, and the others are listed in `aliases`."""
+    groups, samples = collections.defaultdict(list), set()
+    for t in tag.split(","):
+        out = run.dir / "eval" / SUITE / t
+        if not (out / "params.json").exists():
+            raise SystemExit(f"{out}: no evaluation under this tag")
+        if not (out / "summary.json").exists():  # the engine writes it only once every shard has finished
+            raise SystemExit(f"{out}: the evaluation is incomplete (no summary.json yet)")
+        samples.add(read_json(out / "params.json")["samples"])
+        summary = read_json(out / "summary.json")["adapters"]
+        mine = collections.defaultdict(list)
+        for p in sorted(out.glob("records-*.jsonl.gz")):
+            for r in read_jsonl_gz(p):
+                if r["suite"] != SUITE:
+                    raise ValueError(f"{out}: a record of suite {r['suite']!r}")
+                mine[r["adapter"]].append(r)
+        if set(mine) != set(summary):
+            raise ValueError(f"{out}: the records' labels differ from summary.json's")
+        for label, recs in mine.items():
+            check_families(recs, summary[label]["by_family"], f"{out} {label}")
+            if label in groups:  # in two tags: must be the same adapter, whose answers are then the same draws
+                if {r["adapter_sha256"] for r in recs} != {r["adapter_sha256"] for r in groups[label]}:
+                    raise ValueError(f"{label} is a different adapter in two of the tags {tag}")
+                continue
+            groups[label] = recs
+    if len(samples) != 1:
+        raise SystemExit(f"tags {tag} have different numbers of samples per item: {sorted(samples)}")
     sha, aliases, kept = {}, {}, {}
     for label in sorted(groups, key=lambda a: (a != "base" and run.resolve(a)[0].parent is not None, a)):
         hashes = {r["adapter_sha256"] for r in groups[label]}
         if len(hashes) != 1:
-            raise ValueError(f"{out}: {label} has records of {len(hashes)} adapters")
+            raise ValueError(f"{label} has records of {len(hashes)} adapters")
         h = hashes.pop()
-        check_families(groups[label], summary[label]["by_family"], f"{out} {label}")
         if h is not None and h in kept:
             aliases[label] = kept[h]
             continue
         kept[h] = label
         sha[label] = h
-    grid = build_grid({a: groups[a] for a in sha}, params["samples"], run.units, traits, keep_texts)
+    grid = build_grid({a: groups[a] for a in sha}, samples.pop(), run.units, traits, keep_texts)
     grid.sha, grid.aliases = sha, aliases
     return grid
 

@@ -5,7 +5,8 @@ wrappers; format loss; truncation and length; answer channels; training reward a
 
 Reads every committed probe of every lineage and the base model's probe answers, the training history, and with
 --tag a selection evaluation. --census gives the base model's strata on selection items (its selection part).
-Writes results/<name>/health/: probes.csv, groups.csv, history.csv, eval.csv (with --tag) and report.txt.
+Writes results/<name>/health/: probes.csv, groups.csv, history.csv, training_length.csv, probe_length.csv,
+eval.csv (with --tag) and report.txt.
 Definitions: docs/dev/ANALYSIS_NOTES.md.
 """
 
@@ -64,6 +65,34 @@ def metrics(grid: data.Grid, w: np.ndarray) -> dict[str, np.ndarray]:
     out["program_share"] = _rate(np.nan_to_num(x["program"]), has_channel, w)
     out["direct_accuracy"] = _rate(x["reward"], has_channel & (x["program"] == 0), w)
     out["program_accuracy"] = _rate(x["reward"], has_channel & (x["program"] == 1), w)
+    return out
+
+
+def quantile(x: np.ndarray, w: np.ndarray, q: float) -> np.ndarray:
+    """The q-quantile of each subject's samples x[s, i, k] (NaN ignored), item i weighted by w[d, i]: subject x draw."""
+    out = np.full((x.shape[0], len(w)), np.nan)
+    for s in range(x.shape[0]):
+        vals = x[s].reshape(-1)
+        wt = np.repeat(w, x.shape[2], axis=1) * np.isfinite(vals)
+        order = np.argsort(np.nan_to_num(vals, nan=np.inf))
+        cum = np.cumsum(wt[:, order], axis=1)
+        pos = (cum < q * cum[:, -1:]).sum(1)
+        out[s] = vals[order][np.minimum(pos, len(vals) - 1)]
+    return out
+
+
+def length_metrics(grid: data.Grid, w: np.ndarray) -> dict[str, np.ndarray]:
+    """Length as a trait, overall and by domain: mean and 90th percentile of completion tokens, share truncated."""
+    x, items = grid.x, grid.items
+    out = {}
+    for d in ["all"] + sorted(items["domain"].unique()):
+        keep = np.ones(len(items), bool) if d == "all" else (items["domain"] == d).to_numpy()
+        mask = np.broadcast_to(keep[None, :, None], x["tokens"].shape)
+        sub = np.where(mask, x["tokens"], np.nan)
+        suffix = "" if d == "all" else f"_{d}"
+        out[f"tokens{suffix}"] = _rate(np.nan_to_num(sub), mask, w)
+        out[f"tokens_p90{suffix}"] = quantile(sub, w, 0.9)
+        out[f"truncated{suffix}"] = _rate(x["truncated"], mask, w)
     return out
 
 
@@ -148,6 +177,47 @@ def history_table(run: data.Run) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def training_length(run: data.Run, hist: pd.DataFrame) -> pd.DataFrame:
+    """Per update rule and amplification step, means over the lineages trained at that step: completion tokens,
+    share truncated, reward, and the length deduction of the return (reward - return)."""
+    amp = hist[hist["phase"] == "amp"].copy()
+    if amp.empty:
+        return pd.DataFrame(columns=["rule", "step", "lineages", "tokens", "truncated", "reward", "deduction"])
+    amp["rule"] = [run.lineages[x].arm for x in amp["lineage"]]
+    amp["deduction"] = amp["reward"] - amp["return"]
+    g = amp.groupby(["rule", "step"])
+    return g[["tokens", "truncated", "reward", "deduction"]].mean().join(g.size().rename("lineages")).reset_index()
+
+
+def probe_length(run: data.Run, grid: data.Grid, subjects: dict, ref: list[int], rng,
+                 b: int = stats.B) -> pd.DataFrame:
+    """Per update rule and probe step, means over members (reference draws and clones' first probes left out): mean
+    and 90th percentile of completion tokens, share truncated, and the accuracy lost to truncation, the share of
+    answers truncated weighted by the reference's solve rate on their items (a truncated answer scores 0, and almost
+    none contains a final answer); intervals over items."""
+    w = stats.item_draws(data.strata(grid.items), b, rng)
+    p_ref = grid.x["reward"][ref].mean((0, 2))
+    lost_x = grid.x["truncated"] * p_ref[None, :, None]
+    every = np.ones(grid.x["reward"].shape, bool)
+    vals = {"tokens": grid.x["tokens"], "truncated": grid.x["truncated"], "lost": lost_x, "accuracy": grid.x["reward"]}
+    point = {k: _rate(v, every, stats.ones(len(grid.items))) for k, v in vals.items()}
+    draws = {k: _rate(v, every, w) for k, v in vals.items()}
+    p90 = quantile(grid.x["tokens"], stats.ones(len(grid.items)), 0.9)
+    groups = {}
+    for i, (label, (lin, step)) in enumerate(subjects.items()):
+        if lin is not None and i not in ref and not run.restart(lin, step):
+            groups.setdefault((lin.arm, step), []).append(grid.labels.index(label))
+    rows = []
+    for (rule, step), idx in sorted(groups.items()):
+        row = {"rule": rule, "step": step, "members": len(idx), "tokens_p90": float(p90[idx, 0].mean())}
+        for k in vals:
+            row[k] = float(point[k][idx, 0].mean())
+            row[f"{k}_lo"], row[f"{k}_hi"] = stats.ci(draws[k][idx].mean(0))
+        row["lost_share"] = row["lost"] / (row["accuracy"] + row["lost"]) if row["accuracy"] + row["lost"] else np.nan
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def probe_subjects(run: data.Run) -> dict:
     subjects = {"base": (None, None)}
     for lin in run.lineages.values():
@@ -156,7 +226,7 @@ def probe_subjects(run: data.Run) -> dict:
     return subjects
 
 
-def report_lines(run, subjects, probes, groups, hist, ev, tag, census) -> list[str]:
+def report_lines(run, subjects, probes, groups, hist, ev, tag, census, train_len, probe_len) -> list[str]:
     lines = [f"health {run.name}: {len(subjects) - 1} lineage probes; percentages, [95% bootstrap interval over items]; "
              "differences are member - reference on the same items, the reference being the mean of the probes of the "
              "base weights: " + ", ".join(probes.loc[probes["reference"].fillna(False).astype(bool), "subject"].unique()),
@@ -200,6 +270,24 @@ def report_lines(run, subjects, probes, groups, hist, ev, tag, census) -> list[s
         lines += render(["lineage", "steps", "reward first", "reward last", "groups first", "groups last",
                          "tokens last", "trunc last"], rows)
 
+    if len(train_len):
+        steps = sorted(train_len["step"].unique())
+        show = [t for t in steps if t % 5 == 0 or t == steps[-1]]
+        lines += ["", "training length per update rule (means over lineages at each step): tokens / truncated % / "
+                      "reward % / length deduction of the return (points)"]
+        cell = {(r.rule, r.step): r for r in train_len.itertuples()}
+        rules = list(dict.fromkeys(train_len["rule"]))
+        lines += render(["step"] + rules, [[t] + [f"{cell[(r, t)].tokens:.0f} / {pct(cell[(r, t)].truncated)} / "
+                                                  f"{pct(cell[(r, t)].reward)} / {100 * cell[(r, t)].deduction:.1f}"
+                                                  if (r, t) in cell else "-" for r in rules] for t in show])
+    if len(probe_len):
+        lines += ["", "probe length per update rule: mean and 90th-percentile tokens, truncated %, and accuracy lost to "
+                      "truncation (points, and as a share of accuracy + loss)"]
+        lines += render(["rule", "step", "n", "tokens [95%]", "p90", "truncated [95%]", "lost [95%]", "share"],
+                        [[r.rule, r.step, r.members, f"{r.tokens:.0f} [{r.tokens_lo:.0f}, {r.tokens_hi:.0f}]",
+                          f"{r.tokens_p90:.0f}", pci(r.truncated, r.truncated_lo, r.truncated_hi),
+                          pci(r.lost, r.lost_lo, r.lost_hi), pct(r.lost_share)] for r in probe_len.itertuples()], 1)
+
     if ev is not None:
         cell = {(r.subject, r.metric): r for r in ev.itertuples()}
         has_base = (REFERENCE, "accuracy") in cell
@@ -238,14 +326,16 @@ def main(argv=None) -> None:
     probes.insert(2, "step", [subjects[s][1] if s in subjects else None for s in probes["subject"]])
     groups = group_table(run, grid, subjects, point, draws, ref)
     hist = history_table(run)
-    tables = {"probes": probes, "groups": groups, "history": hist}
+    train_len, probe_len = training_length(run, hist), probe_length(run, grid, subjects, ref, rng)
+    tables = {"probes": probes, "groups": groups, "history": hist, "training_length": train_len,
+              "probe_length": probe_len}
     ev = None
     if args.tag:
         egrid = data.load_eval(run, args.tag)
         data.add_strata(egrid, strata)
         ev = tables["eval"] = table(egrid, *evaluate(egrid, rng), reference_rows(run, egrid.labels, run.resolve))
     write(args.out or Path("results") / run.name / "health", tables,
-          report_lines(run, subjects, probes, groups, hist, ev, args.tag, args.census))
+          report_lines(run, subjects, probes, groups, hist, ev, args.tag, args.census, train_len, probe_len))
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ of the member's own context, stances against tactics paired by theme, and recita
 Reads the engine's per-response context scores (python -m evotaste.evaluate context-score; the run's only selection
 unless --selection names one) and the probe answers (for the jargon share). Intervals resample the selection's items
 within unit kinds and domains (data.strata), the same draws for every subject. Writes results/<name>/washout/: index.csv, specific.csv, hits.csv,
-identification.csv, themes.csv, noise.csv, jargon.csv and report.txt. Definitions: docs/dev/ANALYSIS_NOTES.md.
+identification.csv, themes.csv, noise.csv, rules.csv, jargon.csv and report.txt. Definitions: docs/dev/ANALYSIS_NOTES.md.
 """
 
 from __future__ import annotations
@@ -187,27 +187,59 @@ def themes(spec: pd.DataFrame, draws: dict, rng, b: int = stats.B) -> pd.DataFra
 
 def twin_noise(run: data.Run, idx: Index) -> pd.DataFrame:
     """The sampling noise of one value, from probes of one checkpoint: at a clone point, the parent and each of its
-    clones probe the same checkpoint with their own seeds (a twin at step 0 included). Per scope, over every pair of
-    such probes: noise_I = sqrt(mean over contexts j of (I_j(a) - I_j(b))^2 / 2), and the same for the raw contrast
-    I_c - mean_{j != c} I_j taken over every context c."""
+    clones probe the same checkpoint with their own seeds (step-0 twins included). Per step of the shared checkpoint
+    and scope, over every pair of such probes: noise_I = sqrt(mean over contexts j of (I_j(a) - I_j(b))^2 / 2), and
+    the same for the raw contrast I_c - mean_{j != c} I_j taken over every context c."""
     groups = {}
     for si, (lin_id, step) in enumerate(zip(idx.sc.lineage, idx.sc.step)):
         if lin_id is not None:
             groups.setdefault(run.state(run.lineages[lin_id], step), []).append(si)
     rows = []
-    for scope in idx.scopes:
-        I = idx.I[scope][0]
-        di, dr, pairs = [], [], 0
-        for members in groups.values():
-            for x, a in enumerate(members):
-                for b_ in members[x + 1:]:
-                    di += list(I[a] - I[b_])
-                    dr += [own(I[a], c) - own(I[b_], c) for c in range(I.shape[1])]
-                    pairs += 1
-        if pairs:  # contexts without an index in this scope are left out
-            rows.append({"domain": scope, "pairs": pairs, "noise_I": float(np.sqrt(np.nanmean(np.square(di)) / 2)),
-                         "noise_raw": float(np.sqrt(np.nanmean(np.square(dr)) / 2))})
-    return pd.DataFrame(rows, columns=["domain", "pairs", "noise_I", "noise_raw"])
+    for at in sorted({st for _, st in groups}):
+        for scope in idx.scopes:
+            I = idx.I[scope][0]
+            di, dr, pairs = [], [], 0
+            for (_, st), members in groups.items():
+                if st != at:
+                    continue
+                for x, a in enumerate(members):
+                    for b_ in members[x + 1:]:
+                        di += list(I[a] - I[b_])
+                        dr += [own(I[a], c) - own(I[b_], c) for c in range(I.shape[1])]
+                        pairs += 1
+            if pairs:  # contexts without an index in this scope are left out
+                rows.append({"step": at, "domain": scope, "pairs": pairs,
+                             "noise_I": float(np.sqrt(np.nanmean(np.square(di)) / 2)),
+                             "noise_raw": float(np.sqrt(np.nanmean(np.square(dr)) / 2))})
+    return pd.DataFrame(rows, columns=["step", "domain", "pairs", "noise_I", "noise_raw"])
+
+
+def rules_table(run: data.Run, spec: pd.DataFrame, draws: dict) -> pd.DataFrame:
+    """Between update rules: per seeded state (root) trained from step 0 under both rules (the root itself or its
+    step-0 twins), the difference of specific indices at each step and scope with an item interval; and per step,
+    scope and level the mean over roots, with an item interval and the exact sign-flip p-value over roots."""
+    rules = sorted(spec["arm"].unique())
+    if len(rules) != 2:
+        return pd.DataFrame()
+    a, b_ = rules
+    rows = []
+    trained = spec[spec["step"] > 0]
+    for (root, step, scope), g in trained.groupby(["root", "step", "domain"]):
+        by = {r.arm: r for r in g.itertuples() if run.state(run.lineages[r.lineage], 0) == (root, 0)}
+        if set(by) != {a, b_}:
+            continue
+        d = draws[(by[a].lineage, step, scope)] - draws[(by[b_].lineage, step, scope)]
+        rows.append({"what": "root", "root": root, "level": by[a].level, "step": step, "domain": scope,
+                     "roots": 1, "difference": d[0], **dict(zip(("lo", "hi"), stats.ci(d[1:]))), "_d": d})
+    per = pd.DataFrame(rows)
+    out = [r for r in rows]
+    if len(per):
+        for (level, step, scope), g in per.groupby(["level", "step", "domain"]):
+            d = np.mean(list(g["_d"]), axis=0)
+            out.append({"what": "mean", "root": "", "level": level, "step": step, "domain": scope,
+                        "roots": len(g), "difference": d[0], **dict(zip(("lo", "hi"), stats.ci(d[1:]))),
+                        "p_sign_flip": stats.sign_flip_p(g["difference"].to_numpy())})
+    return pd.DataFrame(out).drop(columns="_d").assign(rules=f"{a} - {b_}")
 
 
 def jargon_table(run: data.Run) -> pd.DataFrame:
@@ -228,7 +260,7 @@ def jargon_table(run: data.Run) -> pd.DataFrame:
 
 def noise_line(noise: pd.DataFrame) -> str:
     return "noise of one value (SD), from probes of one checkpoint by a parent and its clones: " + (
-        ", ".join(f"{r.domain} index {r.noise_I:.3f}, raw {r.noise_raw:.3f} ({r.pairs} pairs)"
+        "; ".join(f"step {r.step} {r.domain}: index {r.noise_I:.3f}, raw {r.noise_raw:.3f} ({r.pairs} pairs)"
                   for r in noise.itertuples()) if len(noise) else "no clone point with two scored probes")
 
 
@@ -245,8 +277,8 @@ def selection_lines(idx: Index) -> list[str]:
 
 
 def report_lines(run, res) -> list[str]:
-    idx, spec, ident, th, jargon, noise = (res[k] for k in ("_index", "specific", "identification", "themes",
-                                                           "jargon", "noise"))
+    idx, spec, ident, th, jargon, noise, rules = (res[k] for k in ("_index", "specific", "identification", "themes",
+                                                                  "jargon", "noise", "rules"))
     lines = [f"washout {run.name}: index 0 = base model, 1 = its answers under the context; specific = own-context "
              "index minus the mean of the other contexts, minus the same for the controls at that step and rule; "
              "specific = gain / effect, both in nats per token"] + selection_lines(idx) + [noise_line(noise)]
@@ -257,7 +289,7 @@ def report_lines(run, res) -> list[str]:
                          "effect [95%]", "ratio"],
                         [[r.subject, r.arm, r.level, r.context, r.seeding, num(r.raw, digits=3),
                           num(r.specific, r.specific_lo, r.specific_hi, 3), num(r.gain, r.gain_lo, r.gain_hi, 4),
-                          num(r.effect, r.effect_lo, r.effect_hi, 4), num(r.ratio_to_0)] for r in a.itertuples()])
+                          num(r.effect, r.effect_lo, r.effect_hi, 4), ratio(r, a)] for r in a.itertuples()])
         cross = spec[spec["seeding"].str.contains(r"\[") & (spec["domain"] != DOMAINS_ALL)]
         if len(cross):
             lines += ["", "cross-domain coherence: specific index by domain for members seeded on some domains only"]
@@ -279,11 +311,26 @@ def report_lines(run, res) -> list[str]:
                           f"[{r.lo_themes:.3f}, {r.hi_themes:.3f}]", f"{r.p_sign_flip:.3f}"] for r in th.itertuples()])
     else:
         lines += ["", "stance - tactic: no theme with both a stance and a tactic member scored at the same step"]
-    j = jargon[jargon["with_jargon"] > 0]
-    lines += ["", f"jargon: {int(jargon['with_jargon'].sum())} of {int(jargon['responses'].sum())} probe answers "
-                  "contain a listed term" + ("" if not len(j) else ": " + ", ".join(
-                      f"{r.subject} {r.with_jargon}" for r in j.itertuples()))]
+    if len(rules):
+        m = rules[(rules["what"] == "mean") & (rules["domain"] == DOMAINS_ALL)]
+        lines += ["", f"update rules, {rules['rules'].iloc[0]}: specific index, mean over seeded states trained under "
+                      "both (interval over items; sign-flip p over states)"]
+        lines += render(["step", "level", "states", "difference [95%]", "sign-flip p"],
+                        [[r.step, r.level, r.roots, num(r.difference, r.lo, r.hi, 3), f"{r.p_sign_flip:.3f}"]
+                         for r in m.itertuples()], 2)
+    base = jargon.loc[jargon["subject"] == "base", "share"].iloc[0]
+    members = jargon[jargon["lineage"].notna()]
+    top = members.nlargest(3, "share")
+    lines += ["", f"jargon: {pct(members['with_jargon'].sum() / members['responses'].sum())}% of member probe answers "
+                  f"contain a listed term (base model {pct(base)}%); highest: "
+                  + ", ".join(f"{r.subject} {pct(r.share)}%" for r in top.itertuples())]
     return lines
+
+
+def ratio(r, a: pd.DataFrame) -> str:
+    """The ratio to step 0, shown only when the root's step-0 specific index is clearly non-zero."""
+    at0 = a[(a["lineage"] == r.root) & (a["step"] == 0)]
+    return num(r.ratio_to_0) if len(at0) and at0["specific_lo"].iloc[0] > 0 else "-"
 
 
 def analyse(run: data.Run, rng, selection: Path | None = None) -> dict:
@@ -293,7 +340,7 @@ def analyse(run: data.Run, rng, selection: Path | None = None) -> dict:
     hits = own_context_hits(run, idx)
     return {"_index": idx, "index": idx.table(), "specific": spec, "hits": hits,
             "identification": identification(idx, hits), "themes": themes(spec, draws, rng),
-            "noise": twin_noise(run, idx), "jargon": jargon_table(run)}
+            "noise": twin_noise(run, idx), "rules": rules_table(run, spec, draws), "jargon": jargon_table(run)}
 
 
 def main(argv=None) -> None:

@@ -6,9 +6,10 @@ functional distances, domain and source profiles, counted traits, the real-data 
 
 Members are the evaluated labels at one step (default: the step with the most labels), base excluded. The null is
 every adapter of --null-tag (default: the main tag when it has four or more samples) with its samples split into two
-halves: two copies of one adapter, whose true distance is zero. Writes results/<name>/divergence/: interaction.csv,
-distances.csv, profile.csv, traits.csv, trait_spread.csv, null.csv, authorship.csv and report.txt. Definitions and
-validation: docs/dev/ANALYSIS_NOTES.md.
+halves: two copies of one adapter, whose true distance is zero. The headline estimators read the dataset units; the
+procedural format probe enters only the format table. Writes results/<name>/divergence/: interaction.csv,
+distances.csv, profile.csv, traits.csv, trait_spread.csv, null.csv, authorship.csv, format.csv, length.csv and
+report.txt. Definitions and validation: docs/dev/ANALYSIS_NOTES.md.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ import numpy as np
 import pandas as pd
 from threadpoolctl import threadpool_limits
 
-from evotaste.analysis import data, stats, traits
+from evotaste.analysis import data, health, stats, traits
 from evotaste.analysis.report import num, pci, pct, render, write
 
 PP2 = 1e4  # variance in percentage points squared
@@ -174,7 +175,50 @@ def authorship(grid: data.Grid, members: list[str], cap: int, rng) -> pd.DataFra
     return pd.DataFrame(rows)
 
 
+def format_table(grid: data.Grid, members: list[str], rng) -> pd.DataFrame:
+    """Per member, on the dataset units and on the procedural format probe: strict accuracy (`reward`), tolerant
+    correctness (`correct_any`, any known answer wrapper), compliance with the wrapper asked for, and the gap
+    correct_any - reward, each with an item-bootstrap interval."""
+    rows = []
+    for part, sub in (("dataset", grid.real()), ("procedural", grid.procedural())):
+        if not len(sub.items):
+            continue
+        sub = sub.take(members)
+        w = stats.item_draws(data.strata(sub.items), stats.B, rng)
+        every = np.ones(sub.x["reward"].shape, bool)
+        vals = {k: (health._rate(sub.x[k], every, stats.ones(len(sub.items))), health._rate(sub.x[k], every, w))
+                for k in ("reward", "correct_any", "complied")}
+        vals["gap"] = tuple(vals["correct_any"][i] - vals["reward"][i] for i in (0, 1))
+        for j, m in enumerate(members):
+            rows.append({"member": m, "part": part, "items": len(sub.items), **{
+                k2: v for k, (p0, pb) in vals.items() for k2, v in
+                ((k, p0[j, 0]), (f"{k}_lo", stats.ci(pb[j])[0]), (f"{k}_hi", stats.ci(pb[j])[1]))}})
+    return pd.DataFrame(rows)
+
+
+def length_table(grid: data.Grid, members: list[str], rng) -> pd.DataFrame:
+    """Per member and domain of the dataset units: mean and 90th percentile of completion tokens and the share
+    truncated, with item-bootstrap intervals."""
+    sub = grid.real().take(members)
+    w = stats.item_draws(data.strata(sub.items), stats.B, rng)
+    point, draws = health.length_metrics(sub, stats.ones(len(sub.items))), health.length_metrics(sub, w)
+    rows = []
+    for j, m in enumerate(members):
+        for d in ["all"] + sorted(sub.items["domain"].unique()):
+            suffix = "" if d == "all" else f"_{d}"
+            row = {"member": m, "domain": d}
+            for k in ("tokens", "tokens_p90", "truncated"):
+                row[k] = point[k + suffix][j, 0]
+                row[f"{k}_lo"], row[f"{k}_hi"] = stats.ci(draws[k + suffix][j])
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def analyse(run: data.Run, grid: data.Grid, members: list[str], null: data.Grid | None, cap: int, rng) -> dict:
+    """Every divergence table. The headline estimators read the dataset units only; the procedural format probe,
+    which tests answer notation as much as content, enters the format table."""
+    whole, grid = grid, grid.real()
+    null = null.real() if null is not None else None
     stats.need_samples(grid.x["reward"], "divergence")
     arm_of = {m: run.resolve(m)[0].arm for m in members}
     idx = [grid.labels.index(m) for m in members]
@@ -224,12 +268,16 @@ def analyse(run: data.Run, grid: data.Grid, members: list[str], null: data.Grid 
            "trait_spread": spread}
     out["null"] = null_pairs(null, w_of) if null is not None else pd.DataFrame()
     out["authorship"] = authorship(grid, members, cap, rng) if cap > 0 and grid.texts is not None else pd.DataFrame()
+    out["format"], out["length"] = format_table(whole, members, rng), length_table(whole, members, rng)
     return out
 
 
 def report_lines(run, tag, members, grid, res, null_tag) -> list[str]:
-    lines = [f"divergence {run.name}, selection {tag}: {len(members)} members x {len(grid.items)} items x "
-             f"{grid.samples} samples; SDs in percentage points [95% bootstrap over items, within units]"]
+    real = grid.real()
+    lines = [f"divergence {run.name}, selection {tag}: {len(members)} members x {len(real.items)} items of "
+             f"{real.items['family'].nunique()} dataset units x {grid.samples} samples (the "
+             f"{len(grid.items) - len(real.items)} items of the procedural format probe only in the format table); "
+             "SDs in percentage points [95% bootstrap over items]"]
     if grid.aliases:
         lines.append("same adapter under several labels (kept the first): "
                      + ", ".join(f"{a} = {b}" for a, b in grid.aliases.items()))
@@ -275,6 +323,23 @@ def report_lines(run, tag, members, grid, res, null_tag) -> list[str]:
         lines += ["", "authorship (train on half the units, test on the others, both ways)"]
         lines += [f"  {r.view}: {pci(r.accuracy, r.lo, r.hi)}" + (f" (chance {pct(r.chance)})" if r.view != "cosmetic_share"
                                                                    else "") for r in au.itertuples()]
+    f = res["format"]
+    if len(f):
+        wide = {(r.member, r.part): r for r in f.itertuples()}
+        parts = list(dict.fromkeys(f["part"]))
+        lines += ["", "answer format: strict accuracy, correct_any (any known wrapper) and their gap, on the dataset "
+                      "units and on the procedural format probe; compliance with the wrapper asked for"]
+        lines += render(["member"] + [f"{p} {k}" for p in parts for k in ("strict", "gap [95%]", "complied")],
+                        [[m] + [x for p in parts for x in (
+                            pct(wide[(m, p)].reward), pci(wide[(m, p)].gap, wide[(m, p)].gap_lo, wide[(m, p)].gap_hi),
+                            pct(wide[(m, p)].complied))] for m in members])
+    ln = res["length"]
+    if len(ln):
+        doms = list(dict.fromkeys(ln["domain"]))
+        cell = {(r.member, r.domain): r for r in ln.itertuples()}
+        lines += ["", "length on the dataset units: mean / 90th percentile of completion tokens, share truncated (%)"]
+        lines += render(["member"] + doms, [[m] + [f"{cell[(m, d)].tokens:.0f} / {cell[(m, d)].tokens_p90:.0f} / "
+                                                   f"{pct(cell[(m, d)].truncated)}" for d in doms] for m in members])
     return lines
 
 

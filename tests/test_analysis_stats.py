@@ -124,3 +124,26 @@ def test_difficulty_classes_keep_ties_together_and_drop_constant_items():
     y = np.array([[0, 0.5, 0.5, 1, 0.5, 0.25], [0, 0.5, 0.0, 1, 1, 0.25]])
     c = stats.difficulty_classes(y, n=2)
     assert c[0] == -1 and c[3] == -1 and c[1] == c[4] and len(set(c[c >= 0])) == 2
+
+
+def test_harvest_simulation_retains_a_real_lead_and_finds_none_in_the_null():
+    """Members that differ in level keep part of the select-half lead on the test half; identical members keep
+    none. Twenty units of 100 items in two domains, 14 members, two samples."""
+    import pandas as pd
+
+    from evotaste.analysis import harvest
+
+    items = pd.DataFrame({"family": [f"u{i // 100}" for i in range(2000)], "unit": "far",
+                          "domain": ["math" if i < 1000 else "logic" for i in range(2000)]})
+    rng = np.random.default_rng(8)
+    out = {}
+    for case, level in (("null", 0.0), ("level", 0.3)):
+        _, x = validate.simulate(rng, 14, 2000, 2, 0.0, level)
+        y, _ = stats.cells(x)
+        sim = harvest.simulate(y, items, {"all": list(range(14))}, 40, rng)
+        out[case] = harvest.summarise(sim).set_index(["mode", "statistic"])
+    for mode in ("units", "items"):
+        null, real = out["null"].loc[mode], out["level"].loc[mode]
+        assert null.loc["test_lead_top1", "lo"] < 0 < null.loc["test_lead_top1", "hi"]
+        assert real.loc["test_lead_top1", "lo"] > 0 and real.loc["retained_top1", "value"] > 0.5
+        assert real.loc["best_of_14", "value"] > real.loc["best_of_2", "value"] > 0

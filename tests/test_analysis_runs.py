@@ -14,7 +14,7 @@ from threadpoolctl import threadpool_limits
 
 from evotaste import evaluate, worker
 from evotaste import member as member_module
-from evotaste.analysis import data, divergence, health, heritability, seeding, washout
+from evotaste.analysis import data, divergence, harvest, health, heritability, seeding, washout
 from evotaste.records import read_jsonl
 from evotaste.sampler import Sample
 from tests import engine_fakes
@@ -130,6 +130,10 @@ def test_health_reads_every_probe_against_the_pooled_base_weights(run_dir, tmp_p
     assert np.isnan(acc.loc["un@0", "diff"]) and acc.loc["st@0", "diff"] == pytest.approx(
         acc.loc["st@0", "value"] - ref["value"])
     assert {"far", "near", "procedural", "heldout_complied", "program_share"} <= set(probes["metric"])
+    train = pd.read_csv(tmp_path / "training_length.csv")
+    assert set(train["rule"]) == {"centered", "centered+si0.5"} and (train["deduction"] >= 0).all()
+    plen = pd.read_csv(tmp_path / "probe_length.csv")
+    assert (plen["lost"] <= plen["truncated"] + 1e-12).all() and set(plen["step"]) == {0, 1, 2}
     hist = pd.read_csv(tmp_path / "history.csv")
     assert set(hist.loc[hist["phase"] == "seed", "lineage"]) == {"st", "ta", "pl"}
     ev = pd.read_csv(tmp_path / "eval.csv")
@@ -149,7 +153,10 @@ def test_washout_and_seeding(run_dir, tmp_path):
     assert {"st", "ta", "st-si", "st-c1", "st-c2", "ta-c1", "st-si-c1"} == set(spec["lineage"])  # not the controls
     assert not ((spec["lineage"] == "st-c1") & (spec["step"] == 1)).any()  # a clone's first probe is its parent's
     assert spec.loc[(spec["lineage"] == "st") & (spec["step"] == 0), "controls"].max() == 2  # pl@0 and un@0
-    assert len(pd.read_csv(tmp_path / "w" / "noise.csv")) > 0  # from the twin st-si
+    noise = pd.read_csv(tmp_path / "w" / "noise.csv")
+    assert set(noise["step"]) == {0, 1}  # st@0 with its twin st-si@0; the clone points at step 1
+    rules = pd.read_csv(tmp_path / "w" / "rules.csv")  # st (centered) against its step-0 twin st-si
+    assert set(rules.loc[rules["what"] == "root", "root"]) == {"st"} and set(rules["step"]) == {1, 2}
     ok = spec.dropna(subset=["specific"])
     assert np.allclose(ok["gain"], ok["specific"] * ok["effect"])  # specific = gain / effect
     assert ((ok["specific_lo"] <= ok["specific"]) & (ok["specific"] <= ok["specific_hi"])).all()
@@ -175,6 +182,11 @@ def test_divergence_finds_nothing_in_an_exact_null(run_dir, tmp_path):
     assert ((mean["lo"] < 0) & (mean["hi"] > 0)).all()
     au = pd.read_csv(tmp_path / "authorship.csv")
     assert set(au["view"]) == {"raw", "stripped", "layout", "cosmetic_share"}
+    assert row["items"] <= 200  # the headline reads the dataset units only, not the procedural unit gcd
+    fmt = pd.read_csv(tmp_path / "format.csv")
+    assert set(fmt["part"]) == {"dataset", "procedural"} and np.allclose(fmt["gap"], fmt["correct_any"] - fmt["reward"])
+    length = pd.read_csv(tmp_path / "length.csv")
+    assert set(length["domain"]) == {"all", "math", "code", "logic"} and (length["tokens_p90"] >= length["tokens"] - 8).all()
     assert "st-si@0 = st@0" in (tmp_path / "report.txt").read_text()
 
 
@@ -198,6 +210,14 @@ def test_heritability_families(run_dir, tmp_path):
                                ("st-si@2", "st-si-c1@2")]}
 
 
+def test_tags_of_the_same_items_merge(run_dir):
+    run = data.Run(run_dir)
+    one, two = data.load_eval(run, TAG), data.load_eval(run, f"{TAG},{TAG}")
+    assert one.labels == two.labels and np.array_equal(one.x["reward"], two.x["reward"])
+    with pytest.raises(SystemExit, match="no evaluation"):
+        data.load_eval(run, f"{TAG},missing")
+
+
 def test_a_changed_record_format_is_refused(run_dir, tmp_path):
     run = data.Run(run_dir)
     lin = run.lineages["un"]
@@ -208,3 +228,15 @@ def test_a_changed_record_format_is_refused(run_dir, tmp_path):
         data.check_families(records, bad, "probe")
     with pytest.raises(KeyError):
         data.build_grid({"x": [{k: v for k, v in r.items() if k != "channel"} for r in records]}, 1, run.units)
+
+
+def test_harvest_simulation_finds_no_payoff_in_an_exact_null(run_dir, tmp_path):
+    harvest.main([str(run_dir), "--tag", TAG, "--splits", "40", "--out", str(tmp_path)])
+    summary = pd.read_csv(tmp_path / "summary.csv").set_index(["mode", "members", "statistic"])
+    for mode in ("units", "items"):
+        lead = summary.loc[(mode, "all", "test_lead_top1")]
+        assert lead["lo"] < 0 < lead["hi"]  # selecting on one half buys nothing on the other
+        assert summary.loc[(mode, "all", "select_lead_top1"), "value"] > 0
+        assert summary.loc[(mode, "all", "best_of_1"), "value"] == pytest.approx(0, abs=1e-12)
+    rel = pd.read_csv(tmp_path / "reliability.csv").set_index("members")
+    assert rel.loc["all", "m"] == 9 and rel.loc["all", "between_lo"] < 0 < rel.loc["all", "between_hi"]
