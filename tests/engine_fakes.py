@@ -122,6 +122,15 @@ class FakeSampler:
         if member in self.current:
             del self.versions[self.current.pop(member)]
 
+    def load_existing(self, label, path):
+        self.counter += 1
+        name = f"{label}@{self.counter}"
+        self.versions[name] = MemberWeights(self.policy.load_adapter(path))
+        return name
+
+    def close(self):
+        pass
+
     def generate(self, requests):
         self.requests += requests
         out = []

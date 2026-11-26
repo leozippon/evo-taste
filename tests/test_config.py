@@ -31,6 +31,7 @@ def test_defaults_are_the_pilot_defaults():
     assert seeding.max_tokens == 4096
     assert (amp.prompts, amp.rollouts, amp.lr, amp.max_tokens) == (64, 4, 1e-4, 4096)
     assert (amp.length.free, amp.length.slope, amp.advantage, amp.self_imitation) == (2048, 0.25, "centered", 0.0)
+    assert (amp.exaggeration, amp.practice, amp.imitate_within_free) == (None, None, False)  # pilot C's update
     assert cfg.probes.every == 15 and cfg.probes.max_tokens == 4096 and culling.enabled
     assert (cfg.lora.rank, cfg.lora.alpha) == (32, 64)
 
@@ -92,6 +93,21 @@ def test_clone_chains_inherit_along_the_chain():
     ([{"id": "a", "seed": 1}, {"id": "a", "seed": 2}], {"seeding": {"method": "none"}}, "unique"),
     ([{"id": "a@1", "seed": 1}], {"seeding": {"method": "none"}}, "letters"),
     ([{"id": "a", "seed": 1, "context": "refute"}], {"clonable_steps": [-1]}, "clonable_steps"),
+    ([{"id": "a", "seed": 1, "context": "refute"}], {"amplification": {"exaggeration": {"gamma": 1.0}}},
+     "missing required keys"),
+    ([{"id": "a", "seed": 1, "context": "refute"}], {"amplification": {"exaggeration": {"gamma": -1, "weight": 1}}},
+     "exaggeration"),
+    ([{"id": "a", "seed": 1, "context": "refute"}], {"amplification": {"exaggeration": {"gamma": 1, "weight": -1}}},
+     "exaggeration"),
+    ([{"id": "a", "seed": 1, "context": "refute"}], {"amplification": {"exaggeration": {"gamma": 1, "weight": 1,
+                                                                                       "beta": 1}}}, "unknown keys"),
+    ([{"id": "a", "seed": 1, "context": "refute"}], {"amplification": {"imitate_within_free": "yes"}}, "expected bool"),
+    *[([{"id": "a", "seed": 1, "context": "refute"}],
+       {"amplification": {"practice": {"eta": 4.0, "decay": 0.8, "floor": 0.25, "ceiling": 4.0, **bad}}}, "practice")
+      for bad in ({"eta": -1}, {"decay": 1.0}, {"decay": -0.1}, {"floor": 0}, {"floor": 1.5, "ceiling": 2},
+                  {"ceiling": 0.5})],
+    ([{"id": "a", "seed": 1, "context": "refute"}], {"amplification": {"practice": {"eta": 4.0, "decay": 0.8}}},
+     "missing required keys"),
     # D1 of the 2026-11-25 audit: any shared seed, between seeded members, clones of different parents or points
     ([{"id": "a", "seed": 7, "context": "refute"}, {"id": "b", "seed": 7, "context": "verify"},
       {"id": "t1", "seed": 9, "parent": {"member": "a", "step": 0}},
@@ -121,6 +137,54 @@ PARENT = {"id": "p", "seed": 1, "context": "refute"}
 def test_clone_refusals(clone, match):
     with pytest.raises(ValueError, match=match):
         parse([PARENT, {"id": "c", "seed": 2, **clone}])
+
+
+PRACTICE = {"eta": 4.0, "decay": 0.8, "floor": 0.25, "ceiling": 4.0}
+
+
+def test_amplification_mechanisms_per_member():
+    cfg = parse([{"id": "a", "seed": 1, "context": "refute", "overrides": {"amplification": {
+                  "exaggeration": {"gamma": 1, "weight": 0.5}, "practice": PRACTICE}}},
+                 {"id": "b", "seed": 2, "context": "refute", "overrides": {"amplification": {"practice": {"eta": 0.0}}}}],
+                amplification={"imitate_within_free": True, "practice": PRACTICE})
+    a, b = (cfg.settings(m)[1] for m in cfg.members)
+    assert a.exaggeration == config.Exaggeration(1.0, 0.5) and a.practice == config.Practice(4.0, 0.8, 0.25, 4.0)
+    assert b.exaggeration is None and b.practice == config.Practice(0.0, 0.8, 0.25, 4.0)  # merged key by key
+    assert a.imitate_within_free and b.imitate_within_free
+
+
+def test_a_clone_keeps_its_parents_practice_after_step_0():
+    parent = {"id": "p", "seed": 1, "context": "refute", "overrides": {"amplification": {"practice": PRACTICE}}}
+    changed = {"amplification": {"practice": {**PRACTICE, "eta": 2.0}}}
+    with pytest.raises(ValueError, match="practice settings"):
+        parse([parent, {"id": "c", "seed": 2, "parent": {"member": "p", "step": 10}, "overrides": changed}])
+    with pytest.raises(ValueError, match="practice settings"):  # nor start practising on a record it does not have
+        parse([{**parent, "overrides": {}}, {"id": "c", "seed": 2, "parent": {"member": "p", "step": 10},
+                                             "overrides": {"amplification": {"practice": PRACTICE}}}])
+    cfg = parse([parent, {"id": "c", "seed": 2, "parent": {"member": "p", "step": 0}, "overrides": changed},
+                 {"id": "k", "seed": 3, "parent": {"member": "p", "step": 10},
+                  "overrides": {"amplification": {"exaggeration": {"gamma": 1, "weight": 1}}}}])
+    assert cfg.settings(cfg.members[1])[1].practice.eta == 2.0  # at step 0 nothing has been recorded yet
+    assert cfg.settings(cfg.members[2])[1].practice == cfg.settings(cfg.members[0])[1].practice
+
+
+def test_pilot_c_and_d_configs():
+    c = config.load(ROOT / "configs" / "run" / "pilot-c.yaml")  # resumable: no new key, pilot C's update
+    assert all((a.exaggeration, a.practice, a.imitate_within_free) == (None, None, False)
+               for _, a, _ in map(c.settings, c.members))
+    d = config.load(ROOT / "configs" / "run" / "pilot-d.yaml")
+    arms = {}
+    for m in d.members:
+        seeding, amp, _ = d.settings(m)
+        assert seeding.method == "none" and m.context is None and m.parent is None and amp.imitate_within_free
+        assert (amp.steps, amp.prompts, amp.rollouts, amp.self_imitation) == (45, 48, 4, 0.0)
+        arms.setdefault(m.id.split("-")[0], set()).add((amp.exaggeration, amp.practice))
+    ex, pr = config.Exaggeration(1.0, 0.5), config.Practice(4.0, 0.8, 0.25, 4.0)
+    assert arms == {"adv": {(None, None)}, "exag": {(ex, None)}, "prac": {(None, pr)}, "both": {(ex, pr)}}
+    assert len(d.members) == 16 and d.clonable_steps == (45,) and not d.culling.enabled
+    assert {m.seed for m in d.members}.isdisjoint(m.seed for m in c.members)
+    assert (d.seed, d.strata, d.lora, d.seeding, d.probes, d.trainer) == (
+        c.seed, c.strata, c.lora, c.seeding, c.probes, c.trainer)  # forkable from pilot C, same training prompts
 
 
 def test_training_needs_the_pinned_strata_table():

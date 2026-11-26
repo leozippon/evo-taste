@@ -591,6 +591,22 @@ def _round_half_up(x: Fraction) -> int:
     return math.floor(x + Fraction(1, 2))
 
 
+def train_cell(task: Task) -> str:
+    """The training-stream pool (source and stratum) a training task was drawn from, as `_Mix` names its cells."""
+    return f"{task.family}/{task.stratum}"
+
+
+def _systematic(quotas: list[float], n: int, u: float) -> list[int]:
+    """n split into integers by cutting the cumulative quotas (which sum to n) at u, u + 1, ..., u + n - 1: each
+    count, and the total of any run of adjacent cells, is the floor or the ceiling of its quota, and with u uniform on
+    [0, 1) its expectation is the quota."""
+    edges, total = [0], 0.0
+    for q in quotas[:-1]:
+        total += q
+        edges.append(min(math.floor(total + u), n))
+    return [b - a for a, b in zip(edges, edges[1:] + [n])]
+
+
 def _apportion(shares: list[Fraction], n: int, carry: list[Fraction], rng: random.Random) -> list[int]:
     """n split by shares (summing to 1) with the carried remainders of earlier calls: largest remainder, ties in a
     seeded order. Updates `carry`, so that cumulative counts stay within one of their shares."""
@@ -702,6 +718,21 @@ class Streams:
         self._train = _Mix(f"train/{self.run_seed}", cells)
         return self._train
 
+    @functools.cached_property
+    def _source_weights(self) -> dict[str, Fraction]:
+        out: dict[str, Fraction] = {}
+        mix = self._train_mix()
+        for name, w in zip(mix.names, mix.weights):
+            source = name.split("/")[0]
+            out[source] = out.get(source, Fraction(0)) + w
+        return out
+
+    @property
+    def source_shares(self) -> dict[str, float]:
+        """Each training source's share of a shared batch: its domain's share split equally among the domain's
+        sources."""
+        return {s: float(w) for s, w in self._source_weights.items()}
+
     def train_batch(self, step: int, prompts: int) -> list[Task]:
         """The prompts of training step `step`, the same for every member with this batch size: the domain, source
         and stratum mix of the spec, and VARIANT_SHARE of the non-code prompts under a training-variant wrapper."""
@@ -718,6 +749,36 @@ class Streams:
             drawn[i] = rewrap(drawn[i], rng.choice(TRAIN_WRAPPERS))
         rng.shuffle(drawn)
         return drawn
+
+    def member_batch(self, step: int, prompts: int, shares: dict[str, float], drawn: dict[str, int]) -> list[Task]:
+        """A member's own batch at training step `step` (self-chosen practice). Source s receives `shares[s]` of the
+        prompts, split among its stratum pools in the stream's proportions; the counts are cut from the cumulative
+        expected counts at one seeded offset per step (`_systematic`), so that every pool's and every source's count
+        is the floor or the ceiling of its expectation and equals it on average. Each pool is walked in the stream's
+        own permutations, continuing after the `drawn[cell]` items (cells as `train_cell` names them) that the member
+        took from it in earlier batches: without replacement until the pool is exhausted, and only from the train
+        part. VARIANT_SHARE of the non-code prompts (on average; the floor or the ceiling) carry a training-variant
+        wrapper. A pure function of (run seed, step, prompts, shares, drawn): the offset, the wrapper choices and the
+        order are seeded by the step alone, so members with equal shares and draws get equal batches."""
+        from evotaste.verify import TRAIN_WRAPPERS
+
+        mix = self._train_mix()
+        weights = self._source_weights
+        if set(shares) != set(weights) or min(shares.values()) < 0 or abs(sum(shares.values()) - 1) > 1e-9:
+            raise ValueError(f"shares must give every training source {sorted(weights)} a share >= 0, summing to 1")
+        if not set(drawn) <= set(mix.names):
+            raise ValueError(f"unknown training cells {sorted(set(drawn) - set(mix.names))}")
+        sources = [name.split("/")[0] for name in mix.names]
+        quotas = [prompts * shares[s] * float(w / weights[s]) for s, w in zip(sources, mix.weights)]
+        rng = random.Random(stable_seed(mix.key, "member", prompts, step))
+        counts = _systematic(quotas, prompts, rng.random())
+        batch = [mix._item(c, drawn.get(name, 0) + j) for c, (name, n) in enumerate(zip(mix.names, counts))
+                 for j in range(n)]
+        slots = [i for i, t in enumerate(batch) if t.domain != "code"]
+        for i in rng.sample(slots, math.floor(VARIANT_SHARE * len(slots) + Fraction(rng.random()))):
+            batch[i] = rewrap(batch[i], rng.choice(TRAIN_WRAPPERS))
+        rng.shuffle(batch)
+        return batch
 
     def seed_batch(self, i: int, n: int, domains: tuple[str, ...] | None = None) -> list[Task]:
         """Prompts of seeding update i: the stream's domain shares (restricted to `domains`), equal shares for the

@@ -1,0 +1,53 @@
+# Pilot D, amplification mechanisms (docs/design/amplification.md, "Pilot D"): four arms of four unseeded lineages
+# that differ only by seed, 45 steps of 48 problems x 4 attempts. Arms: relative-only (adv), exaggerated
+# self-imitation (exag), self-chosen practice (prac), and both (both). Imitation terms use only successful answers
+# within the free length. The two unseeded self-imitation members of pilot C are the fifth reference: the same run
+# seed gives the relative-only arm exactly pilot C's training prompts. Clone pairs for the arm that deviates most are
+# appended after step 45 has been looked at (clonable_steps keeps the state, practice record included).
+# Forked from runs/pilot-c (`worker fork`) to share its base model's probe answers: model, seed, lora, seeding and
+# probes sections are identical to configs/run/pilot-c.yaml; every member overrides seeding to none.
+name: pilot-d
+model: Qwen/Qwen3-1.7B
+seed: 2026
+contexts: configs/contexts.yaml
+strata: {path: results/census/census-r2/strata.tsv, sha256: "1291ab8ea23b92030d178bfa844cc6125308a4bd9a0b6b20b46c884b1844b31c"}
+lora: {rank: 32, alpha: 64}
+seeding:
+  method: opcd
+  steps: 40
+  batch: 64
+  lr: 1.0e-4
+  max_tokens: 4096
+amplification:
+  steps: 45
+  prompts: 48
+  rollouts: 4
+  max_tokens: 4096
+  lr: 1.0e-4
+  length: {free: 2048, slope: 0.25}
+  advantage: centered
+  self_imitation: 0.0
+  imitate_within_free: true
+probes:
+  every: 15
+  max_tokens: 4096
+culling:
+  enabled: false
+clonable_steps: [45]
+members:
+  - {id: adv-1, seed: 601, overrides: {seeding: {method: none}}}
+  - {id: adv-2, seed: 602, overrides: {seeding: {method: none}}}
+  - {id: adv-3, seed: 603, overrides: {seeding: {method: none}}}
+  - {id: adv-4, seed: 604, overrides: {seeding: {method: none}}}
+  - {id: exag-1, seed: 611, overrides: {seeding: {method: none}, amplification: {exaggeration: {gamma: 1.0, weight: 0.5}}}}
+  - {id: exag-2, seed: 612, overrides: {seeding: {method: none}, amplification: {exaggeration: {gamma: 1.0, weight: 0.5}}}}
+  - {id: exag-3, seed: 613, overrides: {seeding: {method: none}, amplification: {exaggeration: {gamma: 1.0, weight: 0.5}}}}
+  - {id: exag-4, seed: 614, overrides: {seeding: {method: none}, amplification: {exaggeration: {gamma: 1.0, weight: 0.5}}}}
+  - {id: prac-1, seed: 621, overrides: {seeding: {method: none}, amplification: {practice: {eta: 4.0, decay: 0.8, floor: 0.25, ceiling: 4.0}}}}
+  - {id: prac-2, seed: 622, overrides: {seeding: {method: none}, amplification: {practice: {eta: 4.0, decay: 0.8, floor: 0.25, ceiling: 4.0}}}}
+  - {id: prac-3, seed: 623, overrides: {seeding: {method: none}, amplification: {practice: {eta: 4.0, decay: 0.8, floor: 0.25, ceiling: 4.0}}}}
+  - {id: prac-4, seed: 624, overrides: {seeding: {method: none}, amplification: {practice: {eta: 4.0, decay: 0.8, floor: 0.25, ceiling: 4.0}}}}
+  - {id: both-1, seed: 631, overrides: {seeding: {method: none}, amplification: {exaggeration: {gamma: 1.0, weight: 0.5}, practice: {eta: 4.0, decay: 0.8, floor: 0.25, ceiling: 4.0}}}}
+  - {id: both-2, seed: 632, overrides: {seeding: {method: none}, amplification: {exaggeration: {gamma: 1.0, weight: 0.5}, practice: {eta: 4.0, decay: 0.8, floor: 0.25, ceiling: 4.0}}}}
+  - {id: both-3, seed: 633, overrides: {seeding: {method: none}, amplification: {exaggeration: {gamma: 1.0, weight: 0.5}, practice: {eta: 4.0, decay: 0.8, floor: 0.25, ceiling: 4.0}}}}
+  - {id: both-4, seed: 634, overrides: {seeding: {method: none}, amplification: {exaggeration: {gamma: 1.0, weight: 0.5}, practice: {eta: 4.0, decay: 0.8, floor: 0.25, ceiling: 4.0}}}}

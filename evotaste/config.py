@@ -69,6 +69,24 @@ class Length:
 
 
 @dataclass(frozen=True)
+class Exaggeration:
+    """Exaggerated self-imitation: weight x the token-mean KL(q || member) over the eligible rollouts, with the fixed
+    target q = softmax(l_m + gamma (l_m - l_b)) from the member's and the base model's logits."""
+    gamma: float
+    weight: float
+
+
+@dataclass(frozen=True)
+class Practice:
+    """Self-chosen practice: source s gets default_s exp(eta (r_s - mean r)) of the batch, within floor..ceiling x
+    default_s, where r_s is the member's moving average (decay `decay`) of its training reward on s."""
+    eta: float
+    decay: float
+    floor: float
+    ceiling: float
+
+
+@dataclass(frozen=True)
 class Amplification:
     steps: int = 60
     prompts: int = 64
@@ -77,7 +95,12 @@ class Amplification:
     lr: float = 1e-4
     length: Length = field(default_factory=Length)
     advantage: str = "centered"  # centered: (return - mean) / 0.5; standardized: (return - mean) / std (Round 1)
-    self_imitation: float = 0.0  # beta: weight of the token-mean NLL of the batch's rollouts with reward 1
+    self_imitation: float = 0.0  # beta: weight of the token-mean NLL of the eligible rollouts
+    exaggeration: Exaggeration | None = None
+    # eligible for the imitation terms: reward 1 and, if true, at most length.free completion tokens (pilot C: any
+    # rollout with reward 1)
+    imitate_within_free: bool = False
+    practice: Practice | None = None  # None: the run's shared stream
 
 
 @dataclass(frozen=True)
@@ -243,6 +266,12 @@ def _check_settings(where: str, seeding: Seeding, amp: Amplification, culling: C
         raise ValueError(f"{where}: amplification.advantage must be one of {ADVANTAGES}")
     if amp.self_imitation < 0:
         raise ValueError(f"{where}: amplification.self_imitation must be >= 0")
+    ex, pr = amp.exaggeration, amp.practice
+    if ex is not None and min(ex.gamma, ex.weight) < 0:
+        raise ValueError(f"{where}: amplification.exaggeration needs gamma >= 0 and weight >= 0")
+    if pr is not None and not (pr.eta >= 0 and 0 <= pr.decay < 1 and 0 < pr.floor <= 1 <= pr.ceiling):
+        raise ValueError(f"{where}: amplification.practice needs eta >= 0, 0 <= decay < 1 and "
+                         "0 < floor <= 1 <= ceiling")
 
 
 def parse(data: dict, context_names) -> RunConfig:
@@ -298,6 +327,9 @@ def _check_clone(cfg: RunConfig, m: MemberSpec) -> None:
     if not start <= m.parent.step <= end or m.parent.step >= amp.steps:
         raise ValueError(f"{where}: parent.step {m.parent.step} must be within the parent's course ({start}..{end}) "
                          f"and below the clone's amplification.steps ({amp.steps})")
+    if m.parent.step > 0 and amp.practice != cfg.settings(parent)[1].practice:
+        raise ValueError(f"{where}: a clone after step 0 continues its parent's practice record and must keep its "
+                         "practice settings")
 
 
 def load_contexts(path: str | Path) -> dict[str, str]:

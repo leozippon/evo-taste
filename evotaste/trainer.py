@@ -6,8 +6,8 @@ mask that lets each completion see the prompt and itself only (shared-prefix reu
 (prompt, completion) pair is its own row and plain causal attention is used. Output projections are applied only at
 the positions that predict completion tokens, in chunks that are recomputed in the backward pass, so full-vocabulary
 fp32 logits never exist for whole sequences. On GPU the LoRA matmuls run in bf16 under autocast, as in vLLM; the fp32
-LoRA tensors are the optimizer's master copy. The frozen base model (the distillation teacher and the context score's
-reference) is the same network with the adapter disabled.
+LoRA tensors are the optimizer's master copy. The frozen base model (the distillation teacher, the reference of the
+exaggeration target, of the context score and of the deviation) is the same network with the adapter disabled.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ import gc
 import hashlib
 import math
 import os
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass
@@ -41,7 +42,7 @@ class Sequence:
     prompt: list[int]
     completion: list[int]  # sampled token ids, including the end-of-turn token when generation stopped
     weight: float = 1.0  # advantage
-    imitate: bool = False  # in the self-imitation term (an amplification rollout with reward 1)
+    imitate: bool = False  # eligible for the imitation terms (self-imitation, exaggeration): a successful rollout
 
 
 @dataclass
@@ -155,14 +156,34 @@ def _chunk_kl(student: torch.Tensor, teacher: torch.Tensor, weight: torch.Tensor
     return (s.exp() * (s - t)).sum(-1)
 
 
+def _chunk_exaggeration(member: torch.Tensor, base: torch.Tensor, weight: torch.Tensor, gamma: float) -> torch.Tensor:
+    logits = (member @ weight.T).float()
+    with torch.no_grad():  # the target is fixed: no gradient through the member's or the base model's logits
+        target = (logits + gamma * (logits - (base @ weight.T).float())).log_softmax(-1)
+    return (target.exp() * (target - logits.log_softmax(-1))).sum(-1)
+
+
+def _over_chunks(fn, a: torch.Tensor, b: torch.Tensor, *args) -> torch.Tensor:
+    """fn on KL_CHUNK positions of the hidden states a and b at a time, each chunk recomputed in the backward pass
+    when grad is enabled, so that its fp32 [chunk, vocabulary] tensors never exist for more than one chunk."""
+    out = []
+    for s in range(0, len(a), KL_CHUNK):
+        chunk = (a[s:s + KL_CHUNK], b[s:s + KL_CHUNK], *args)
+        out.append(checkpoint(fn, *chunk, use_reentrant=False) if torch.is_grad_enabled() else fn(*chunk))
+    return torch.cat(out)
+
+
 def reverse_kl(student: torch.Tensor, teacher: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     """Per position, KL(softmax(student @ W.T) || softmax(teacher @ W.T)) over the full vocabulary, from hidden
-    states; KL_CHUNK positions at a time, each chunk recomputed in the backward pass when grad is enabled."""
-    out = []
-    for s in range(0, len(student), KL_CHUNK):
-        args = (student[s:s + KL_CHUNK], teacher[s:s + KL_CHUNK], weight)
-        out.append(checkpoint(_chunk_kl, *args, use_reentrant=False) if torch.is_grad_enabled() else _chunk_kl(*args))
-    return torch.cat(out)
+    states."""
+    return _over_chunks(_chunk_kl, student, teacher, weight)
+
+
+def exaggeration_kl(member: torch.Tensor, base: torch.Tensor, weight: torch.Tensor, gamma: float) -> torch.Tensor:
+    """Per position, KL(q || softmax(l_m)) over the full vocabulary with l_m = member @ W.T, l_b = base @ W.T and the
+    fixed target q = softmax(l_m + gamma (l_m - l_b)), computed without gradient: the gradient with respect to l_m is
+    softmax(l_m) - q, which moves the member further along its own deviation from the base model."""
+    return _over_chunks(_chunk_exaggeration, member, base, weight, gamma)
 
 
 def _to_cpu(obj):
@@ -290,10 +311,10 @@ class Policy:
         return out
 
     @torch.no_grad()
-    def logprobs(self, member: MemberWeights, seqs: list[Sequence]) -> list[torch.Tensor]:
+    def logprobs(self, member: MemberWeights, seqs: list[Sequence], token_budget: int | None = None) -> list[torch.Tensor]:
         """Per-token log-probabilities (CPU, fp32) of each sequence's completion under the member's weights."""
         self._activate(member)
-        return self._logprobs(seqs)
+        return self._logprobs(seqs, token_budget)
 
     @torch.no_grad()
     def base_logprobs(self, seqs: list[Sequence], token_budget: int | None = None) -> list[torch.Tensor]:
@@ -327,47 +348,73 @@ class Policy:
                 if self.device.type == "cuda" else {})
         return {"grad_norm": float(grad_norm), **peak}
 
-    def update(self, member: MemberWeights, seqs: list[Sequence], lr: float, self_imitation: float = 0.0) -> dict:
-        """One AdamW step on
+    def update(self, member: MemberWeights, seqs: list[Sequence], lr: float, self_imitation: float = 0.0,
+               exaggeration=None) -> dict:
+        """One AdamW step on the sum of three terms, each normalised by its own token count:
 
             -sum_{i: w_i != 0} w_i sum_t log pi(y_it) / sum_{i: w_i != 0} |y_i|
-            + beta * (-sum_{i imitated} sum_t log pi(y_it) / sum_{i imitated} |y_i|)
+            + beta * (-sum_{i eligible} sum_t log pi(y_it) / sum_{i eligible} |y_i|)
+            + weight * sum_{i eligible} sum_t KL(q_it || pi(. | x_i, y_i<t)) / sum_{i eligible} |y_i|
 
-        with beta = self_imitation. With beta = 0 the imitation flags are ignored and the computation is exactly the
-        advantage-only update. Updates `member` in place (LoRA tensors and optimizer state); without any sequence in
-        either term nothing changes.
+        with beta = self_imitation, `exaggeration` (config.Exaggeration or None) giving gamma and weight, eligible the
+        sequences flagged `imitate`, and q_it = softmax(l_m + gamma (l_m - l_b)) the fixed exaggerated target from the
+        member's logits l_m and the base model's l_b (adapter disabled, no gradient) on the same prompt and completion.
+        A term whose weight is 0 (or exaggeration with gamma 0, whose target is the member itself) is not computed at
+        all, so the update is then exactly the one without it. Updates `member` in place (LoRA tensors and optimizer
+        state); without any sequence in any term nothing changes.
         """
         t0 = time.perf_counter()
-        active = [s for s in seqs if s.weight != 0.0 or (self_imitation > 0 and s.imitate)]
+        si_on = self_imitation > 0
+        ex_on = exaggeration is not None and exaggeration.gamma != 0 and exaggeration.weight != 0
+        active = [s for s in seqs if s.weight != 0.0 or ((si_on or ex_on) and s.imitate)]
+        eligible = [s.imitate for s in active]
         adv_tokens = sum(len(s.completion) for s in active if s.weight != 0.0)
-        imitated = [s for s in active if self_imitation > 0 and s.imitate]
-        si_tokens = sum(len(s.completion) for s in imitated)
+        imitated_tokens = sum(len(s.completion) for s, e in zip(active, eligible) if e)
         stats = {"sequences": len(active), "tokens": sum(len(s.completion) for s in active),
-                 "si_sequences": len(imitated), "si_tokens": si_tokens}
+                 "adv_sequences": sum(s.weight != 0.0 for s in active), "adv_tokens": adv_tokens}
+        for name, on in (("si", si_on), ("ex", ex_on)):
+            stats.update({f"{name}_sequences": sum(eligible) if on else 0, f"{name}_tokens": imitated_tokens if on else 0})
         if not active:
-            return {"loss": 0.0, "adv_loss": 0.0, "si_loss": 0.0, "grad_norm": 0.0, **stats, "micro_batches": 0,
-                    "update_s": 0.0}
+            return {"loss": 0.0, "adv_loss": 0.0, "si_loss": 0.0, "ex_loss": 0.0, "grad_norm": 0.0, **stats,
+                    "micro_batches": 0, "update_s": 0.0}
         opt = self._optimizer(member, lr)
         batches = self._batches(active)
-        adv_sum, si_sum = 0.0, 0.0
+        adv_sum = si_sum = ex_sum = 0.0
         for batch in batches:
+            mine = [i for row in batch for i, _, _ in row.spans if eligible[i]] if ex_on else []
+            if mine:  # the base model on the very same rows first (same ids, positions and mask); only the hidden
+                # states that predict eligible completion tokens are kept
+                with torch.no_grad(), self.model.disable_adapter():
+                    base_all = by_sequence(batch, self._hidden(batch)[0])
+                    base_hidden = torch.cat([base_all[i] for i in mine])
+                    del base_all
+            hidden, targets = self._hidden(batch)
+            lp = head_logprobs(hidden, self.head_weight, targets)
             adv = si = torch.zeros((), device=self.device)
-            for row, lp in zip(batch, self._forward(batch)):
-                for i, a, b in row.spans:
-                    if active[i].weight != 0.0:
-                        adv = adv - active[i].weight * lp[a:b].sum()
-                    if imitated and active[i].imitate:
-                        si = si - lp[a:b].sum()
+            for i, seq_lp in by_sequence(batch, lp).items():
+                if active[i].weight != 0.0:
+                    adv = adv - active[i].weight * seq_lp.sum()
+                if si_on and eligible[i]:
+                    si = si - seq_lp.sum()
             loss = adv / adv_tokens if adv_tokens else adv
             adv_sum += loss.item()
-            if imitated:
-                si = si / si_tokens
+            if si_on and imitated_tokens:
+                si = si / imitated_tokens
                 si_sum += si.item()
                 loss = loss + self_imitation * si
+            if mine:
+                member_hidden = by_sequence(batch, hidden)
+                kl = exaggeration_kl(torch.cat([member_hidden[i] for i in mine]), base_hidden, self.head_weight,
+                                     exaggeration.gamma)
+                ex = kl.sum() / imitated_tokens
+                ex_sum += ex.item()
+                loss = loss + exaggeration.weight * ex
             loss.backward()
         out = self._step(member, opt)
-        return {"loss": adv_sum + self_imitation * si_sum, "adv_loss": adv_sum, "si_loss": si_sum, **out, **stats,
-                "micro_batches": len(batches), "update_s": round(time.perf_counter() - t0, 3)}
+        ex_weight = exaggeration.weight if ex_on else 0.0
+        return {"loss": adv_sum + self_imitation * si_sum + ex_weight * ex_sum, "adv_loss": adv_sum, "si_loss": si_sum,
+                "ex_loss": ex_sum, **out, **stats, "micro_batches": len(batches),
+                "update_s": round(time.perf_counter() - t0, 3)}
 
     def distill(self, member: MemberWeights, seqs: list[Sequence], teacher_prompts: list[list[int]],
                 lr: float) -> dict:
@@ -412,6 +459,20 @@ def gpu_processes() -> str:
 
 def load_optimizer(path: Path) -> dict | None:
     return torch.load(path, map_location="cpu", weights_only=True) if path.exists() else None
+
+
+def scale_adapter(src: str | Path, dst: str | Path, factor: float) -> None:
+    """Write to `dst` the adapter of `src` with its update to the base model multiplied by `factor`: every LoRA B
+    tensor times the factor, the A tensors and adapter_config.json unchanged, so that (alpha / r) B A becomes factor
+    times itself and nothing else differs."""
+    src, dst = Path(src), Path(dst)
+    tensors = load_file(src / "adapter_model.safetensors")
+    other = [n for n in tensors if ".lora_A." not in n and ".lora_B." not in n]
+    if other or not any(".lora_B." in n for n in tensors):
+        raise ValueError(f"{src}: expected LoRA A and B tensors only, found also {other[:3]}")
+    dst.mkdir(parents=True, exist_ok=False)
+    save_file({n: t * factor if ".lora_B." in n else t for n, t in tensors.items()}, dst / "adapter_model.safetensors")
+    shutil.copyfile(src / "adapter_config.json", dst / "adapter_config.json")
 
 
 def adapter_sha256(path: str | Path) -> str:

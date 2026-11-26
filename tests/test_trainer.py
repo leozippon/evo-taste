@@ -1,5 +1,5 @@
-"""Returns, advantages, the group update with self-imitation, row packing, base log-probabilities and the reverse-KL
-distillation update, on a tiny random Qwen3 model."""
+"""Returns, advantages, the group update with self-imitation and exaggeration, row packing, base log-probabilities,
+the reverse-KL distillation update and scaled adapters, on a tiny random Qwen3 model."""
 
 import copy
 import random
@@ -7,7 +7,7 @@ import random
 import pytest
 import torch
 
-from evotaste import trainer
+from evotaste import config, trainer
 from evotaste.trainer import Sequence, advantages, build_rows, length_returns
 from tests.conftest import make_policy, random_groups
 
@@ -148,6 +148,155 @@ def test_self_imitation_raises_a_success_that_has_no_advantage(base_model):
     stats = policy.update(member, seqs, lr=1e-3, self_imitation=0.5)  # an all-success group: advantages are zero
     assert stats["sequences"] == 2 and stats["si_tokens"] == 5 and stats["adv_loss"] == 0.0
     assert all(a > b for a, b in zip(_seq_logprobs(policy, member, seqs), before))
+
+
+# -- exaggerated self-imitation -----------------------------------------------------------------------------------
+
+EX = config.Exaggeration(gamma=1.5, weight=0.7)
+
+
+def _full_logits(model, s):
+    return model(input_ids=torch.tensor([s.prompt + s.completion])).logits[0, len(s.prompt) - 1:-1].float()
+
+
+def _reference_exaggeration(policy, member, seqs, base_model, gamma, reverse=False):
+    """sum over eligible completion positions of KL(q || member) / their tokens, q = softmax(l_m + gamma (l_m - l_b))
+    with l_m, l_b detached, by ordinary full forwards; the base model is the separate, never wrapped one. With
+    `reverse`, the other direction KL(member || q), for contrast. The member must be active (_reference_grads)."""
+    total, tokens = 0.0, sum(len(s.completion) for s in seqs if s.imitate)
+    for s in [s for s in seqs if s.imitate]:
+        with torch.no_grad():
+            lb = _full_logits(base_model, s)
+        lm = _full_logits(policy.model, s)
+        q = (lm.detach() + gamma * (lm.detach() - lb)).log_softmax(-1)
+        p = lm.log_softmax(-1)
+        total = total + ((p.exp() * (p - q)) if reverse else (q.exp() * (q - p))).sum()
+    return total / tokens
+
+
+def test_exaggeration_is_the_kl_from_the_fixed_target_to_the_member_on_eligible_rollouts(base_model, monkeypatch):
+    policy = make_policy(base_model, token_budget=40)
+    member = policy.new_member(seed=21, b_std=0.1)
+    seqs, beta = _flagged(seed=4), 0.5  # eligible and not, with and without advantage, several micro-batches
+    adv = [s for s in seqs if s.weight != 0.0]
+    eligible = [s for s in seqs if s.imitate]
+
+    def loss_fn(lp):
+        a = -sum(s.weight * lp(s) for s in adv) / sum(len(s.completion) for s in adv)
+        si = -sum(lp(s) for s in eligible) / sum(len(s.completion) for s in eligible)
+        return a + beta * si + EX.weight * _reference_exaggeration(policy, member, seqs, base_model, EX.gamma)
+    ref_loss, ref = _reference_grads(policy, member, loss_fn)
+    chunks = []
+    real = trainer._chunk_exaggeration
+    monkeypatch.setattr(trainer, "_chunk_exaggeration", lambda m, b, w, g: chunks.append(len(m)) or real(m, b, w, g))
+    monkeypatch.setattr(trainer, "KL_CHUNK", 4)
+    stats, ours = _engine_grads(policy, member, monkeypatch, lambda: policy.update(member, seqs, 1e-3, beta, EX))
+    assert stats["loss"] == pytest.approx(ref_loss, rel=1e-5) and stats["ex_loss"] > 0 and max(chunks) <= 4
+    assert (stats["adv_sequences"], stats["ex_sequences"], stats["si_sequences"]) == (len(adv), len(eligible),
+                                                                                      len(eligible))
+    assert stats["ex_tokens"] == sum(len(s.completion) for s in eligible) and stats["micro_batches"] > 1
+    for name in ref:
+        torch.testing.assert_close(ours[name], ref[name], rtol=1e-4, atol=1e-7)
+    _, reverse = _reference_grads(policy, member, lambda lp: _reference_exaggeration(
+        policy, member, seqs, base_model, EX.gamma, reverse=True))
+    _, forward = _reference_grads(policy, member, lambda lp: _reference_exaggeration(
+        policy, member, seqs, base_model, EX.gamma))
+    assert max(float((reverse[n] - forward[n]).abs().max()) for n in ref) > 1e-3 * max(
+        float(forward[n].abs().max()) for n in ref)  # the direction matters, and the engine's is KL(q || member)
+
+
+def test_exaggeration_base_pass_is_adapter_free_on_the_same_rows(base_model, monkeypatch):
+    """Per micro-batch with an eligible rollout, the base pass runs first, without gradient and with every LoRA layer
+    disabled, on exactly the rows (prompt and completion ids, positions) of the member's pass; a micro-batch without
+    one has no base pass."""
+    policy = make_policy(base_model, token_budget=30)
+    lora_layer = policy.model.base_model.model.model.layers[0].self_attn.q_proj
+    calls = []
+    real = policy._hidden
+    monkeypatch.setattr(policy, "_hidden", lambda rows: calls.append(
+        (torch.is_grad_enabled(), lora_layer.disable_adapters, [(r.ids, r.pos, r.src) for r in rows])) or real(rows))
+    seqs = random_groups(n_prompts=4, k=3, seed=5)
+    for i, s in enumerate(seqs):
+        s.imitate = i < 3  # the first prompt's rollouts only
+    stats = policy.update(policy.new_member(seed=1, b_std=0.1), seqs, 1e-3, 0.0, EX)
+    with_base = [k for k in range(len(calls) - 1) if not calls[k][0]]
+    assert stats["micro_batches"] == len(calls) - len(with_base) > len(with_base) >= 1
+    for k in with_base:
+        assert calls[k][:2] == (False, True) and calls[k + 1][:2] == (True, False) and calls[k][2] == calls[k + 1][2]
+    assert all(c[:2] == (True, False) for k, c in enumerate(calls) if k not in with_base)
+
+
+def _assert_same_update(a, b):
+    for name in a.lora:
+        assert torch.equal(a.lora[name], b.lora[name]), name
+    for (_, x), (_, y) in zip(sorted(a.optimizer["state"].items()), sorted(b.optimizer["state"].items())):
+        assert torch.equal(x["exp_avg"], y["exp_avg"]) and torch.equal(x["exp_avg_sq"], y["exp_avg_sq"])
+
+
+def test_exaggeration_vanishes_at_gamma_zero_and_for_a_member_equal_to_the_base(base_model):
+    policy = make_policy(base_model, token_budget=40)
+    start = policy.new_member(seed=22, b_std=0.05)
+    policy.update(start, random_groups(seed=1), lr=1e-3)  # with optimizer state
+    flagged = _flagged(seed=6)
+    without = copy.deepcopy(start)
+    plain = policy.update(without, flagged, 1e-3, 0.5)
+    for ex in (config.Exaggeration(0.0, 0.7), config.Exaggeration(1.0, 0.0)):  # bit-identical to no term at all
+        other = copy.deepcopy(start)
+        stats = policy.update(other, flagged, 1e-3, 0.5, ex)
+        assert stats["loss"] == plain["loss"] and stats["ex_sequences"] == 0
+        _assert_same_update(other, without)
+    # the function itself: at gamma 0 the target is the member, the KL is 0 and so is its gradient
+    hidden = torch.randn(10, 48, requires_grad=True)
+    kl = trainer.exaggeration_kl(hidden, torch.randn(10, 48), policy.head_weight.detach(), 0.0)
+    kl.sum().backward()
+    assert torch.equal(kl, torch.zeros(10)) and float(hidden.grad.abs().max()) < 1e-6
+    # a member that is the base model (B = 0) feels no push, whatever gamma
+    seqs = [Sequence(s.prompt, s.completion, 0.0, imitate=True) for s in random_groups(seed=7)]
+    stats = policy.update(policy.new_member(seed=2), seqs, 1e-3, 0.0, config.Exaggeration(4.0, 1.0))
+    assert stats["ex_loss"] == 0.0 and stats["grad_norm"] < 1e-6 and stats["ex_sequences"] == len(seqs)
+
+
+def test_exaggeration_moves_the_member_away_from_the_base(base_model):
+    policy = make_policy(base_model)
+    member = policy.new_member(seed=23, b_std=0.05)
+    seqs = [Sequence(s.prompt, s.completion, 0.0, imitate=True) for s in random_groups(seed=8)]
+
+    @torch.no_grad()
+    def kl_from_base():  # mean over completion positions of KL(member || base)
+        policy._activate(member)
+        kls = []
+        for s in seqs:
+            p, b = _full_logits(policy.model, s).log_softmax(-1), _full_logits(base_model, s).log_softmax(-1)
+            kls.append((p.exp() * (p - b)).sum(-1))
+        return float(torch.cat(kls).mean())
+    kls = [kl_from_base()]
+    for _ in range(4):
+        policy.update(member, seqs, 3e-3, 0.0, config.Exaggeration(1.0, 1.0))
+        kls.append(kl_from_base())
+    assert all(b > a for a, b in zip(kls, kls[1:])) and kls[-1] > 2 * kls[0], kls
+
+
+def test_scaled_adapter_changes_only_the_size_of_the_update(base_model, tmp_path):
+    policy = make_policy(base_model)
+    member = policy.new_member(seed=24, b_std=0.1)
+    policy.save_adapter(member, tmp_path / "a")
+    trainer.scale_adapter(tmp_path / "a", tmp_path / "a2", 2.0)
+    assert (tmp_path / "a" / "adapter_config.json").read_bytes() == (tmp_path / "a2" / "adapter_config.json").read_bytes()
+    scaled = policy.load_adapter(tmp_path / "a2")
+    for name, t in member.lora.items():
+        assert torch.equal(scaled[name], t * 2.0 if ".lora_B." in name else t), name
+    layer = policy.model.base_model.model.model.layers[1].mlp.down_proj
+    x = torch.randn(3, layer.in_features)
+    with torch.no_grad():
+        outs = []
+        for lora in (member.lora, scaled):
+            policy._activate(type(member)(lora))
+            outs.append(layer(x))
+        with policy.model.disable_adapter():
+            base = layer(x)
+    torch.testing.assert_close(outs[1] - base, 2.0 * (outs[0] - base), rtol=1e-5, atol=1e-6)
+    with pytest.raises(FileExistsError):
+        trainer.scale_adapter(tmp_path / "a", tmp_path / "a2", 1.5)
 
 
 def test_rows_respect_the_token_budget():

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import math
 import random
 import shutil
 import time
@@ -23,7 +24,7 @@ from evotaste import config
 from evotaste.records import (append_jsonl, filter_jsonl, now, read_json, read_jsonl, read_jsonl_gz, write_json,
                               write_jsonl_gz)
 from evotaste.sampler import Request, Sample
-from evotaste.tasks import Streams, Suites, Task, load_strata, prompt_ids, score_many, stable_seed
+from evotaste.tasks import Streams, Suites, Task, load_strata, prompt_ids, score_many, stable_seed, train_cell
 from evotaste.trainer import MemberWeights, Sequence, advantages, gpu_processes, length_returns, load_optimizer
 
 log = logging.getLogger(__name__)
@@ -37,6 +38,41 @@ OOM_ATTEMPTS = 10
 OOM_WAIT_S = 100
 CHECK_TOKEN_MEAN_ABS_MAX = 0.04
 CHECK_SEQ_ABS_PER_TOKEN_MAX = 0.015
+# Self-chosen practice: every source's moving average before the member's first reward on it. Near the base model's
+# expected training reward per source (0.40-0.49 by the census), so that a source's average does not depend on how
+# often it has been observed.
+PRACTICE_START = 0.5
+
+
+def practice_shares(defaults: dict[str, float], averages: dict[str, float], settings: config.Practice) -> dict:
+    """Source s's share of a member's batch: default_s exp(eta (r_s - mean_s r)), clipped to floor..ceiling x
+    default_s and renormalised. Clipping and renormalisation are solved jointly (the shares are clip(c x_s, lo_s,
+    hi_s) with c such that they sum to 1), so that the final shares respect both bounds; a clip followed by a plain
+    renormalisation could leave them."""
+    names = list(defaults)
+    mean = sum(averages[s] for s in names) / len(names)
+    x = [defaults[s] * math.exp(settings.eta * (averages[s] - mean)) for s in names]
+    lo = [settings.floor * defaults[s] for s in names]
+    hi = [settings.ceiling * defaults[s] for s in names]
+
+    def total(c):
+        return sum(min(max(c * v, a), b) for v, a, b in zip(x, lo, hi))
+    # total(c) is continuous, nondecreasing and linear between the knots; total(0) = sum(lo) <= 1 <= sum(hi)
+    prev = 0.0
+    for knot in sorted({a / v for v, a in zip(x, lo)} | {b / v for v, b in zip(x, hi)}):
+        if total(knot) >= 1:
+            break
+        prev = knot
+    low, high = total(prev), total(knot)
+    c = knot if high == low else prev + (1 - low) * (knot - prev) / (high - low)
+    return {s: min(max(c * v, a), b) for s, v, a, b in zip(names, x, lo, hi)}
+
+
+@dataclass
+class PracticeRecord:
+    """A practising member's own record, saved with every checkpoint (practice.json) and inherited by its clones."""
+    averages: dict[str, float]  # source -> moving average of the member's training reward on it
+    drawn: dict[str, int]  # training-stream cell -> items the member has drawn from it in its own batches
 
 
 def check_sample(lengths: list[int], rollouts: int, min_tokens: int, min_rollouts: int) -> list[int]:
@@ -241,6 +277,7 @@ class Member:
         # checkpoints this lineage keeps with optimizer state, for the clones that start from it now or later
         self.clone_points = run.cfg.clone_points(lin.id) if lin.generation == 0 else set()
         self.weights: MemberWeights | None = None
+        self.practice: PracticeRecord | None = None  # with amplification.practice only
         self.version: str | None = None  # adapter version currently served for this member
 
     def __repr__(self):
@@ -280,15 +317,40 @@ class Member:
         ckpt = self.checkpoint_dir(s)
         history = ancestry_history(self.run, self.lin.id, s)  # a clone's updates before its start are its parents'
         self.weights = load_checkpoint(self.run.policy, ckpt, history, s, self.lin.id)
+        self.practice = self.load_practice(ckpt, s)
         log.info("%s resumed from %s", self.lin.id, ckpt)
 
     def checkpoint_dir(self, step: int) -> Path:
         return self.dir / "checkpoints" / f"step_{step:06d}"
 
+    # -- self-chosen practice ------------------------------------------------------------------------------------
+    def new_practice(self) -> PracticeRecord | None:
+        """Equal averages for every training source, nothing drawn; None for a member that does not practise."""
+        if self.amp.practice is None:
+            return None
+        return PracticeRecord({s: PRACTICE_START for s in self.run.streams.source_shares}, {})
+
+    def load_practice(self, ckpt: Path, step: int) -> PracticeRecord | None:
+        """The practice record saved with a checkpoint (this lineage's, or a clone's parent's). A checkpoint without
+        one is the start of practice only at step 0 (after seeding); later it is refused, like a lost optimizer
+        state."""
+        if self.amp.practice is None:
+            return None
+        if (ckpt / "practice.json").exists():
+            return PracticeRecord(**read_json(ckpt / "practice.json"))
+        if step > 0:
+            raise RuntimeError(f"{ckpt}: practice.json is missing, but {self.lin.id} practises and starts at step "
+                               f"{step}")
+        return self.new_practice()
+
+    def practice_shares(self) -> dict[str, float]:
+        return practice_shares(self.run.streams.source_shares, self.practice.averages, self.amp.practice)
+
     # -- seeding -------------------------------------------------------------------------------------------------
     def begin_seeding(self) -> None:
         """Fresh LoRA tensors from the lineage seed (B = 0: the member starts as the base model)."""
         self.weights = self.run.policy.new_member(self.lin.seed)
+        self.practice = self.new_practice()
 
     @property
     def seeding_steps(self) -> int:
@@ -370,11 +432,12 @@ class Member:
         return ckpt
 
     def start_clone(self, ckpt: Path) -> None:
-        """The parent's weights and optimizer state at the clone point, and its step counter. The clone commits its
-        own copy of that checkpoint with its first probe."""
+        """The parent's weights, optimizer state and practice record at the clone point, and its step counter. The
+        clone commits its own copy of that checkpoint with its first probe."""
         p = self.lin.parent
         history = ancestry_history(self.run, p["lineage"], p["step"])
         self.weights = load_checkpoint(self.run.policy, ckpt, history, p["step"], p["lineage"])
+        self.practice = self.load_practice(ckpt, p["step"])
         self.lin.step = p["step"]
         log.info("%s cloned from %s at step %d", self.lin.id, p["lineage"], p["step"])
 
@@ -391,7 +454,13 @@ class Member:
 
     # -- amplification --------------------------------------------------------------------------------------------
     def step_tasks(self) -> list[Task]:
-        return self.run.streams.train_batch(self.lin.step, self.amp.prompts)
+        """The run's shared batch of this step, or with practice (eta > 0) the member's own batch: proportions from
+        its averages, items continuing its own walk through the stream's pools."""
+        p = self.amp.practice
+        if p is None or p.eta == 0:
+            return self.run.streams.train_batch(self.lin.step, self.amp.prompts)
+        return self.run.streams.member_batch(self.lin.step, self.amp.prompts, self.practice_shares(),
+                                             self.practice.drawn)
 
     def rollout_requests(self, tasks: list[Task]) -> list[Request]:
         return [Request(self.version, self.run.prompt(t.question), self.amp.rollouts, self.amp.max_tokens,
@@ -412,7 +481,9 @@ class Member:
             groups += any(w != 0.0 for w in weights)
             prompt = self.run.prompt(task.question)
             for k, (s, r, g, w) in enumerate(zip(group, recs, returns, weights)):
-                seqs.append(Sequence(prompt, s.token_ids, w, imitate=r["reward"] == 1.0))
+                eligible = r["reward"] == 1.0 and (not amp.imitate_within_free
+                                                   or r["completion_tokens"] <= amp.length.free)
+                seqs.append(Sequence(prompt, s.token_ids, w, imitate=eligible))
                 sampler_lps.append(s.token_logprobs)
                 records.append({"step": t, "prompt": j, "k": k, **r, "return": g, "weight": w})
         score_s = time.perf_counter() - t0
@@ -421,20 +492,30 @@ class Member:
                              lambda: self.consistency_check(seqs, sampler_lps, amp.rollouts))
         check_s = time.perf_counter() - t0
         stats = retry_on_oom(policy, f"{self.lin.id} step {t} update",
-                             lambda: policy.update(self.weights, seqs, amp.lr, amp.self_imitation))
+                             lambda: policy.update(self.weights, seqs, amp.lr, amp.self_imitation, amp.exaggeration))
         publish = self.publish()
         t0 = time.perf_counter()
         write_jsonl_gz(self.dir / "rollouts" / f"step_{t:06d}.jsonl.gz", records)
         by_family: dict[str, list[float]] = {}
         for r in records:
             by_family.setdefault(r["family"], []).append(r["reward"])
+        reward_by_family = {f: _mean(v) for f, v in sorted(by_family.items())}  # training families are sources
+        practice = {}
+        if self.practice is not None:  # the shares this batch was drawn with (default ones at eta 0), then update
+            practice = {"practice": {"shares": self.practice_shares(), "averages": dict(self.practice.averages)}}
+            decay = amp.practice.decay
+            for source, reward in reward_by_family.items():
+                self.practice.averages[source] = decay * self.practice.averages[source] + (1 - decay) * reward
+            if amp.practice.eta != 0:
+                for task in tasks:
+                    self.practice.drawn[train_cell(task)] = self.practice.drawn.get(train_cell(task), 0) + 1
         append_jsonl(self.dir / "history.jsonl", {
             "phase": "amp", "step": t, "time": now(), "version": self.version,
             "reward": _mean(r["reward"] for r in records), "return": _mean(r["return"] for r in records),
-            "reward_by_family": {f: _mean(v) for f, v in sorted(by_family.items())},
+            "reward_by_family": reward_by_family,
             "completion_tokens": _mean(r["completion_tokens"] for r in records),
             "complied": _mean(r["complied"] for r in records), "truncated": _mean(r["truncated"] for r in records),
-            "groups": groups, "prompts": len(tasks), **stats, "check": check,
+            "groups": groups, "prompts": len(tasks), **stats, "check": check, **practice,
             "timing": {"generate_s": round(generate_s, 3), "batch_members": batch_members,
                        "score_s": round(score_s, 3), "check_s": round(check_s, 3), "update_s": stats["update_s"],
                        "publish_s": round(sum(publish.values()), 3), "publish": publish,
@@ -556,6 +637,8 @@ class Member:
         self.run.policy.save_adapter(self.weights, tmp)  # fp32: exact resume
         if self.weights.optimizer is not None:
             torch.save(self.weights.optimizer, tmp / "optimizer.pt")
+        if self.practice is not None:  # JSON floats round-trip exactly
+            write_json(tmp / "practice.json", dataclasses.asdict(self.practice))
         shutil.rmtree(final, ignore_errors=True)  # a redone step after a crash
         tmp.rename(final)
 

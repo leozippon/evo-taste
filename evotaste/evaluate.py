@@ -1,16 +1,19 @@
-"""Final evaluation of adapters (or the base model) on a suite, the harvest manifest, the blind guard, and the
-context score.
+"""Final evaluation of adapters (or the base model) on a suite, the harvest manifest, the blind guard, the context
+score, probes of scaled adapters, and the likelihood measures of deviation and distinctness.
 
   python -m evotaste.evaluate run runs/<name> --suite selection --adapters base,m00,m01 --per-family 50 [--per-source 500]
   python -m evotaste.evaluate harvest runs/<name> --tag n50x1
   python -m evotaste.evaluate context-score runs/<name> [--items 120] [--contexts a,b] [--members m00] [--steps 0,45]
+  python -m evotaste.evaluate scaled runs/<name> --adapters m00@45,m01@45 --factors 1.5,2
+  python -m evotaste.evaluate deviation runs/<name> [--items 120] [--members m00,m01@45x2] [--steps 45] [--cross]
 
 Suites: the task layer's evaluation sets, selection and the vault blind2 (dataset items and procedural instances).
 Adapters: `base`, a lineage id (its last checkpoint), `<lineage>@<step>` or `population@<step>`. `--shard i/n`
 splits the (adapter, item) jobs across GPUs; every shard writes its own record file and the summary covers all files
 of the tag. A blind vault is opened only through `blind_guard`, which needs a committed, unmodified harvest manifest
 listing every trained adapter with its content hash (also for the base model alone) and appends to the blind ledger
-before anything is generated. The context score needs no vLLM: it runs the frozen base model on the visible GPU.
+before anything is generated. The context score and the deviation need no vLLM: they run the trainer's model on the
+visible GPU.
 """
 
 from __future__ import annotations
@@ -22,15 +25,16 @@ import io
 import json
 import logging
 import random
+import shutil
 import subprocess
 import time
 from pathlib import Path
 
-from evotaste.member import Run, load_lineage, response_records
+from evotaste.member import Run, load_lineage, probe_requests, response_records, summarize_probe
 from evotaste.records import atomic_write, now, read_json, read_jsonl_gz, write_json, write_jsonl_gz
 from evotaste.sampler import Request, Sampler
 from evotaste.tasks import VAULT, BlindReceipt, check_gold, fixed_tasks, stable_seed
-from evotaste.trainer import Policy, Sequence, adapter_sha256
+from evotaste.trainer import MemberWeights, Policy, Sequence, adapter_sha256, scale_adapter
 from evotaste.worker import (apply_server, logged, revision, server_options, server_overrides, setup_logging,
                              start_server)
 
@@ -387,14 +391,10 @@ def score_subjects(run: Run, contexts: list[str]) -> list[tuple[str, str | None,
     return out
 
 
-def score_selection(run: Run, base_records: list[dict], items: int | None, contexts: list[str] | None) -> dict:
-    """The probe positions and contexts a context score uses, and the selection's name. With `items`, the positions
-    are a domain-stratified sample of the probe set (proportional shares, largest remainders, a seeded draw within
-    each domain), the same for every subject; without, or with at least the probe set's size, all positions."""
-    contexts = sorted(run.contexts if contexts is None else contexts)
-    unknown = sorted(set(contexts) - set(run.contexts))
-    if unknown or not contexts:
-        raise SystemExit(f"--contexts: unknown or none {unknown} (contexts of the run: {sorted(run.contexts)})")
+def probe_positions(base_records: list[dict], items: int | None) -> tuple[list[int], list[str]]:
+    """The probe positions (and their uids) that the context score and the deviation score. With `items`, a
+    domain-stratified sample of the probe set (proportional shares, largest remainders, a seeded draw within each
+    domain), the same for every subject and both commands; without, or with at least the probe set's size, all."""
     n = len(base_records)
     if items is None or items >= n:
         positions = list(range(n))
@@ -412,7 +412,17 @@ def score_selection(run: Run, base_records: list[dict], items: int | None, conte
                            for i in random.Random(stable_seed("context-score", items, d)).sample(v, take[d]))
     uids = [base_records[i]["uid"] for i in positions]
     if len(set(uids)) != len(uids):
-        raise RuntimeError("the probe set repeats a uid; per-response context scores would be ambiguous")
+        raise RuntimeError("the probe set repeats a uid; per-response scores would be ambiguous")
+    return positions, uids
+
+
+def score_selection(run: Run, base_records: list[dict], items: int | None, contexts: list[str] | None) -> dict:
+    """The probe positions and contexts a context score uses, and the selection's name."""
+    contexts = sorted(run.contexts if contexts is None else contexts)
+    unknown = sorted(set(contexts) - set(run.contexts))
+    if unknown or not contexts:
+        raise SystemExit(f"--contexts: unknown or none {unknown} (contexts of the run: {sorted(run.contexts)})")
+    positions, uids = probe_positions(base_records, items)
     key = hashlib.sha256(json.dumps({"positions": positions, "contexts": contexts}).encode()).hexdigest()[:10]
     return {"name": f"{len(positions)}items-{len(contexts)}contexts-{key}", "positions": positions,
             "uids": uids, "contexts": contexts}
@@ -470,10 +480,7 @@ def context_score(run_dir: Path, items: int | None = None, contexts: list[str] |
         if lineage is not None and ((lineages is not None and lineage not in lineages)
                                     or (steps is not None and step not in steps)):
             continue
-        records = read_jsonl_gz(path)
-        picked = [records[i] for i in selection["positions"]]
-        if [r["uid"] for r in picked] != selection["uids"]:
-            raise RuntimeError(f"{path}: the answers are not in the order of the base model's probe answers")
+        picked = _picked(path, selection["positions"], selection["uids"])
         if policy is None:
             policy = Policy(run.cfg.model, run.cfg.lora, run.cfg.trainer)
         t0 = time.perf_counter()
@@ -489,13 +496,221 @@ def context_score(run_dir: Path, items: int | None = None, contexts: list[str] |
         responses += subject_responses
         log.info("context score of %s: %d responses x %d prompts in %.0f s", subject, len(picked),
                  1 + len(selection["contexts"]), seconds)
-    for name, columns, table in (("table.csv", SCORE_COLUMNS, rows), ("responses.csv", RESPONSE_COLUMNS, responses)):
-        text = io.StringIO()
-        writer = csv.DictWriter(text, fieldnames=columns)
-        writer.writeheader()
-        writer.writerows(table)
-        atomic_write(out / name, text.getvalue().encode())
-        log.info("wrote %s (%d rows)", out / name, len(table))
+    _csv(out / "table.csv", SCORE_COLUMNS, rows)
+    _csv(out / "responses.csv", RESPONSE_COLUMNS, responses)
+
+
+def _csv(path: Path, columns, rows) -> None:
+    text = io.StringIO()
+    writer = csv.DictWriter(text, fieldnames=columns)
+    writer.writeheader()
+    writer.writerows(rows)
+    atomic_write(path, text.getvalue().encode())
+    log.info("wrote %s (%d rows)", path, len(rows))
+
+
+# -- scaled adapters -----------------------------------------------------------------------------------------------
+
+def scaled_label(lineage: str, step: int, factor: float) -> str:
+    """`<lineage>@<step>x<factor>`: the probe of a lineage's step-`step` adapter with its update scaled by factor."""
+    return f"{lineage}@{step}x{factor:g}"
+
+
+def scaled(run_dir: Path, specs: list[str], factors: list[float], attach: str | None,
+           server: dict | None = None) -> None:
+    """For each adapter `<lineage>@<step>` and factor, the adapter whose update to the base model is multiplied by the
+    factor (trainer.scale_adapter) answers the run's probe set once, with the seeds of that lineage's own probe at that
+    step; the answers are scored and stored like a probe in runs/<name>/scaled/<label>/ (probe_responses.jsonl.gz,
+    the scaled adapter, and probe_summary.json, written last). Nothing of the run's members changes; labels done
+    before are skipped."""
+    run = Run(run_dir)
+    apply_server(run, server)
+    if not factors or min(factors) <= 0 or any(float(f"{f:g}") != f for f in factors):
+        raise SystemExit("--factors must be positive numbers with at most 6 significant digits")
+    jobs = []
+    for spec in specs:
+        lineage, sep, step = spec.partition("@")
+        lin = load_lineage(run, lineage) if sep and step.isdigit() else None
+        if lin is None or lin.status == "new" or int(step) > lin.step:
+            raise SystemExit(f"{spec}: name a committed checkpoint as <lineage>@<step>")
+        src = resolve_adapter(run, spec)
+        for factor in factors:
+            label = scaled_label(lineage, int(step), factor)
+            out = run.dir / "scaled" / label
+            if (out / "probe_summary.json").exists():
+                log.info("%s was probed before; skipped", label)
+            elif label not in [j[0] for j in jobs]:
+                jobs.append((label, lin, int(step), factor, src, out))
+    if not jobs:
+        return
+    run.check_probe_set()
+    for label, _, _, factor, src, out in jobs:
+        shutil.rmtree(out, ignore_errors=True)  # an unfinished earlier attempt
+        scale_adapter(src, out / "adapter", factor)
+    server, url = start_server(run, attach, "scaled")
+    sampler = None
+    try:
+        if server:
+            server.wait_ready()
+            url = server.url
+        sampler = Sampler(url, run.cfg.model, run.cfg.name)
+        requests, spans = [], []
+        for label, lin, step, _, _, out in jobs:
+            reqs = probe_requests(sampler.load_existing(label, out / "adapter"), run.probe_tasks, run.prompt,
+                                  run.cfg.probes.max_tokens, lin.seed, step)
+            spans.append((len(requests), len(requests) + len(reqs)))
+            requests += reqs
+        t0 = time.perf_counter()
+        samples = sampler.generate(requests)
+        log.info("scaled probes of %d adapters: %.0f s of generation", len(jobs), time.perf_counter() - t0)
+    finally:
+        if sampler:
+            sampler.close()
+        if server:
+            server.stop()
+    for (label, lin, step, factor, src, out), (a, b) in zip(jobs, spans):
+        records = [{"step": step, "factor": factor, **r} for r in response_records(
+            [(t, g[0]) for t, g in zip(run.probe_tasks, samples[a:b])], token_ids=True)]
+        write_jsonl_gz(out / "probe_responses.jsonl.gz", records)
+        summary = {"label": label, "lineage": lin.id, "step": step, "factor": factor, "time": now(),
+                   "source": str(src), "source_sha256": adapter_sha256(src),
+                   "adapter_sha256": adapter_sha256(out / "adapter"), **summarize_probe(records)}
+        write_json(out / "probe_summary.json", summary)
+        log.info("%s: accuracy %.3f, complied %.3f, mean length %.0f", label, summary["accuracy"],
+                 summary["complied"], summary["completion_tokens"])
+
+
+# -- deviation and cross-likelihood --------------------------------------------------------------------------------
+
+DEVIATION_COLUMNS = ("subject", "lineage", "step", "factor", "uid", "domain", "tokens", "delta_sum")
+CROSS_COLUMNS = ("scorer", "author", "step", "uid", "domain", "tokens", "logprob_sum")
+
+
+def probe_authors(run: Run) -> list[dict]:
+    """Stored probes and the adapters that wrote them: every committed probe of every lineage (`<lineage>@<step>`,
+    its checkpoint at that step) and every finished scaled probe (`<lineage>@<step>x<factor>`, its scaled adapter)."""
+    out = [{"label": subject, "lineage": lineage, "step": step, "factor": None, "responses": path,
+            "adapter": path.parents[1] / "checkpoints" / f"step_{step:06d}"}
+           for subject, lineage, step, path in score_subjects(run, []) if lineage is not None]
+    for summary in sorted((run.dir / "scaled").glob("*/probe_summary.json")):
+        s = read_json(summary)
+        out.append({"label": s["label"], "lineage": s["lineage"], "step": s["step"], "factor": s["factor"],
+                    "responses": summary.parent / "probe_responses.jsonl.gz", "adapter": summary.parent / "adapter"})
+    return out
+
+
+def _picked(path: Path, positions: list[int], uids: list[str]) -> list[dict]:
+    records = read_jsonl_gz(path)
+    picked = [records[i] for i in positions]
+    if [r["uid"] for r in picked] != uids:
+        raise RuntimeError(f"{path}: the answers are not in the order of the base model's probe answers")
+    return picked
+
+
+def deviation(run_dir: Path, items: int | None = None, names: list[str] | None = None, steps: list[int] | None = None,
+              cross: bool = False) -> None:
+    """Likelihood measures on stored probe answers (the selection of `probe_positions`, the same items as the context
+    score for the same --items). Without `cross`: per response of every selected author, its completion tokens and
+    the sum over them of log p_author - log p_base, where the author is the adapter that wrote the response (a
+    lineage's checkpoint at the probe's step, or a scaled adapter); written to responses.csv. With `cross`, for one
+    step: every selected adapter at that step and the base model score every one's responses (the base model's plain
+    probe answers included), giving the summed log-probability per (scorer, author, item) in cross-<step>.csv. Authors
+    are selected by lineage id or label (`names`) and by step; scaled probes count as their lineage's at their step.
+    Results are cached per subject (or per scorer and author), keyed by the SHA-256 of the responses file and the
+    scoring adapter's content hash, in runs/<name>/deviation/<N>items-<hash>/."""
+    run = Run(run_dir)
+    base_path = run.dir / "base" / "probe_responses.jsonl.gz"
+    positions, uids = probe_positions(read_jsonl_gz(base_path), items)
+    key = hashlib.sha256(json.dumps({"positions": positions}).encode()).hexdigest()[:10]
+    out = run.dir / "deviation" / f"{len(positions)}items-{key}"
+    selection = {"positions": positions, "uids": uids}
+    if (out / "selection.json").exists() and read_json(out / "selection.json") != selection:
+        raise SystemExit(f"{out}: selection.json describes another selection")
+    write_json(out / "selection.json", selection)
+    budget = SCORE_BUDGET_FACTOR * run.cfg.trainer.token_budget
+    authors = probe_authors(run)
+
+    def chosen(a):
+        return ((names is None or a["lineage"] in names or a["label"] in names)
+                and (steps is None or a["step"] in steps))
+    policy = None
+
+    def scores(adapter: Path | None, seqs: list[Sequence]) -> list:
+        nonlocal policy
+        if policy is None:
+            policy = Policy(run.cfg.model, run.cfg.lora, run.cfg.trainer)
+        if adapter is None:
+            return policy.base_logprobs(seqs, budget)
+        return policy.logprobs(MemberWeights(policy.load_adapter(adapter)), seqs, budget)
+
+    def sequences(records):
+        return [Sequence(run.prompt(r["question"]), r["token_ids"]) for r in records]
+
+    if not cross:
+        rows = []
+        for a in authors:
+            cache = out / f"{a['label']}.json"
+            digest = hashlib.sha256(a["responses"].read_bytes()).hexdigest()
+            cached = read_json(cache) if cache.exists() else None
+            if cached is None or cached["sha256"] != digest:
+                cached = None
+                if not chosen(a):
+                    continue
+            ident = {"sha256": digest, "adapter_sha256": adapter_sha256(a["adapter"])}
+            if cached and cached["adapter_sha256"] == ident["adapter_sha256"]:
+                rows += cached["responses"]
+                continue
+            if not chosen(a):
+                continue
+            t0 = time.perf_counter()
+            picked = _picked(a["responses"], positions, uids)
+            seqs = sequences(picked)
+            mine, base = scores(a["adapter"], seqs), scores(None, seqs)
+            responses = [{"subject": a["label"], "lineage": a["lineage"], "step": a["step"], "factor": a["factor"],
+                          "uid": r["uid"], "domain": r["domain"], "tokens": len(m), "delta_sum": float((m - b).sum())}
+                         for r, m, b in zip(picked, mine, base)]
+            seconds = round(time.perf_counter() - t0, 1)
+            write_json(cache, {"time": now(), "file": str(a["responses"]), **ident, "seconds": seconds,
+                               "responses": responses})
+            rows += responses
+            tokens = sum(x["tokens"] for x in responses)
+            log.info("deviation of %s: %.4f nats per token over %d responses (%d tokens) in %.0f s", a["label"],
+                     sum(x["delta_sum"] for x in responses) / tokens, len(responses), tokens, seconds)
+        _csv(out / "responses.csv", DEVIATION_COLUMNS, rows)
+        return
+
+    if steps is None or len(steps) != 1:
+        raise SystemExit("--cross scores the adapters of one step: give exactly one --steps value")
+    step = steps[0]
+    subjects = [{"label": "base", "responses": base_path, "adapter": None}] + [
+        a for a in authors if a["step"] == step and chosen(a)]
+    digests = {s["label"]: hashlib.sha256(s["responses"].read_bytes()).hexdigest() for s in subjects}
+    picked = {s["label"]: _picked(s["responses"], positions, uids) for s in subjects}
+    rows = []
+    for scorer in subjects:
+        scorer_hash = "base" if scorer["adapter"] is None else adapter_sha256(scorer["adapter"])
+        pending = []
+        for author in subjects:
+            cache = out / f"cross-{step}" / f"{scorer['label']}--{author['label']}.json"
+            cached = read_json(cache) if cache.exists() else None
+            if cached and (cached["sha256"], cached["adapter_sha256"]) == (digests[author["label"]], scorer_hash):
+                rows += cached["responses"]
+            else:
+                pending.append((author, cache))
+        if not pending:
+            continue
+        t0 = time.perf_counter()
+        lps = iter(scores(scorer["adapter"], [s for author, _ in pending for s in sequences(picked[author["label"]])]))
+        for author, cache in pending:
+            responses = [{"scorer": scorer["label"], "author": author["label"], "step": step, "uid": r["uid"],
+                          "domain": r["domain"], "tokens": len(lp), "logprob_sum": float(lp.sum())}
+                         for r, lp in zip(picked[author["label"]], lps)]
+            write_json(cache, {"time": now(), "file": str(author["responses"]), "sha256": digests[author["label"]],
+                               "adapter_sha256": scorer_hash, "responses": responses})
+            rows += responses
+        log.info("cross-likelihood: %s scored %d authors in %.0f s", scorer["label"], len(pending),
+                 time.perf_counter() - t0)
+    _csv(out / f"cross-{step}.csv", CROSS_COLUMNS, rows)
 
 
 def _names(text: str | None) -> list[str] | None:
@@ -533,15 +748,37 @@ def main(argv=None) -> None:
     c.add_argument("--contexts", help="comma-separated contexts (default: every context of the run)")
     c.add_argument("--members", help="comma-separated lineage ids to score (default: all; the base references always)")
     c.add_argument("--steps", help="comma-separated probe steps to score (default: all)")
+    s = sub.add_parser("scaled", help="probe adapters whose update to the base model is scaled by factors")
+    s.add_argument("run_dir", type=Path)
+    s.add_argument("--adapters", required=True, help="comma-separated <lineage>@<step>")
+    s.add_argument("--factors", required=True, help="comma-separated factors, e.g. 1.5,2,3")
+    s.add_argument("--attach", help="URL of a running vLLM server of the run's model (development)")
+    server_options(s)
+    d = sub.add_parser("deviation", help="log p_author - log p_base of stored probe answers, or with --cross every "
+                                         "adapter's log-probability of every adapter's answers at one step")
+    d.add_argument("run_dir", type=Path)
+    d.add_argument("--items", type=int, help="the context score's domain-stratified sample of this many probe items "
+                                              "(default: all)")
+    d.add_argument("--members", help="comma-separated lineage ids or labels (default: all, scaled probes included)")
+    d.add_argument("--steps", help="comma-separated probe steps (default: all; --cross needs exactly one)")
+    d.add_argument("--cross", action="store_true", help="every selected adapter and the base model score every one's "
+                                                        "answers")
     args = ap.parse_args(argv)
+    steps = [int(x) for x in _names(args.steps)] if getattr(args, "steps", None) else None
     if args.cmd == "run":
         setup_logging(args.run_dir.name, f"eval-{args.suite}")
         logged(evaluate, args.run_dir, args.suite, _names(args.adapters), args.per_family,
                args.samples, args.shard, args.tag, args.attach, args.per_source, server_overrides(args))
     elif args.cmd == "context-score":
         setup_logging(args.run_dir.name, "context-score")
-        logged(context_score, args.run_dir, args.items, _names(args.contexts), _names(args.members),
-               [int(x) for x in _names(args.steps)] if args.steps else None)
+        logged(context_score, args.run_dir, args.items, _names(args.contexts), _names(args.members), steps)
+    elif args.cmd == "scaled":
+        setup_logging(args.run_dir.name, "scaled")
+        logged(scaled, args.run_dir, _names(args.adapters), [float(x) for x in _names(args.factors)], args.attach,
+               server_overrides(args))
+    elif args.cmd == "deviation":
+        setup_logging(args.run_dir.name, "deviation")
+        logged(deviation, args.run_dir, args.items, _names(args.members), steps, args.cross)
     else:
         harvest(args.run_dir, args.tag, args.step)
 
