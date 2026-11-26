@@ -76,6 +76,15 @@ The engine now has exaggerated self-imitation, self-chosen practice, a scaled-ad
 - The real-data null for the member-by-problem interaction, the base model against itself on four samples, reads −131 pp² (interval −398 to +157) against 197 pp² measured between members: consistent with zero, though imprecise with a single model.
 - The last four interrupted clones of pilot C finished their five steps; seven clone pairs are complete at step 90, and five more stopped at step 60 to 70.
 
+## Length is not the divergence, 15:20
+
+- **Length and truncation account for about 9% of the member-by-problem interaction** in pilot C at step 45 (interval 6.8 to 12.0%; the null gives 0.5%): the interaction SD goes from 14.0 to 13.2 points once each problem's dependence on answer length, truncation and update rule is removed. The share is 6% on logic, 14% on math and about a quarter on code, and it is the same on the 1,103 items that no member's answer was cut off on. Members of similar length differ among themselves 0.95 times as much as random groups. On simulated data the method attributes 97% when length causes all of the interaction and nothing when it causes none.
+- **Members are not recognised by verbosity.** Answer length alone identifies the author 6.9% of the time (chance 3.6%); the first 600 characters of an answer still give 48.6% against 55.9% for the whole. Hiding length costs 14% of the classifier's accuracy above chance, and stripping layout and notation another 18%.
+- **Deviation from the base model grows steadily under plain training.** In nats per token on a member's own probe answers: 0.13 at step 45 and 0.17 at step 90 under the relative-only rule; 0.14 and 0.25 with self-imitation; across members at step 45 from 0.06 to 0.28, unrelated to answer length. Longer answers dilute a member's deviation rather than carry it.
+- In the five-step check, the source shares of two practising members moved together 87 to 94% (independent movement would give 50%).
+
+So the starting point for amplification is better than assumed: independent members already move away from the base model and from each other in which problems they solve, mostly not through length or presentation. What is not yet known is whether those differences are inherited by a member's continuations; the likelihood test on the clone pairs is running.
+
 ## In progress
 
 - Pilot D to step 45 (about 20:00); the engine and analysis work for selective amplification; pilot E.
