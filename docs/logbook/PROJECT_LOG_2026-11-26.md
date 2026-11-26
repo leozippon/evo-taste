@@ -85,7 +85,15 @@ The engine now has exaggerated self-imitation, self-chosen practice, a scaled-ad
 
 So the starting point for amplification is better than assumed: independent members already move away from the base model and from each other in which problems they solve, mostly not through length or presentation. What is not yet known is whether those differences are inherited by a member's continuations; the likelihood test on the clone pairs is running.
 
+## Selective amplification built; what its score favours, 16:10
+
+- The taste-shaped reward is in the engine, with the reversed sign as control and exact vanishing at strength zero. In a five-step check on three clones of one member, the shaping contributed about a third as much advantage as correctness and did not grow.
+- **Its score is partly brevity and phrasing.** Among correct answers to one problem the score falls with length (correlation −0.47 with log length, about a fifth of its variance), because a member's deviation is diluted over a longer answer; layout features add little; and in contrasting pairs the two answers share the method and differ in how they open and how much of the problem they restate. The mechanism is therefore expected to amplify presentation and to shorten answers, and its reverse to lengthen them.
+- Pilot E was cut to one card: two pilot C members at step 45 (`unseeded-adv`, `relations-adv`), each cloned into own direction, neutral and reversed sign, 45 further steps, done by tomorrow morning. It answers what 45 steps of this pressure amplify.
+- **The clones' solve profiles are being measured**: the fourteen clones that reached step 90 are evaluated on the 1,840 real-data selection items, so that the heritability of which problems a member solves can be read directly, next to the likelihood-based test.
+- **Next mechanism, in development**: a member revisits the hard problems it has itself solved but not mastered, against a control that revisits equally hard, equally familiar problems regardless of its own successes. It acts on which problems a member can solve and never on how an answer is written.
+
 ## In progress
 
-- Pilot D to step 45 (about 20:00); the engine and analysis work for selective amplification; pilot E.
-- How much of the member-by-problem interaction is explained by answer length and truncation.
+- Pilot D (two cards, step 45 at about 20:00), pilot E (one card, overnight), the clones' evaluation and likelihood scoring (one card).
+- Engine work for consolidating one's own frontier, then pilot F.
