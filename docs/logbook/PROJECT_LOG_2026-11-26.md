@@ -1,0 +1,46 @@
+# Project log — 2026-11-26
+
+## Amplification pilot (pilot C), steps 0 to 45
+
+Twenty-eight members: twelve seeded states and two unseeded controls, each cloned at step 0 into the relative-only rule and into the rule with self-imitation of the member's own successes; 45 steps of 48 problems × 4 attempts. All finished between 22:45 and 03:45. Reading below is from the in-run probes (one sample per item, about 360 items) and from context scores on 80 probe items; the two-sample evaluation of 3,520 selection items was still running when this was written.
+
+### Training
+
+- Training reward rose from about 0.44 to about 0.52 in both rules. About half the problems of a step have attempts with different rewards throughout.
+- **Answers lengthen again.** Mean answer length in training went from about 600 tokens to between 500 and 1,600 depending on the member. Under self-imitation six of fourteen members exceed 1,000 tokens and 5 to 9% of their answers are cut off at 4,096; under the relative-only rule the unseeded members are the long ones. The slope from 2,048 tokens does not hold length back, and self-imitation works against it, because it imitates a success whatever its length. The accuracy lost to cut-off answers is estimated at about one point under self-imitation.
+- Probes at step 45 against the base weights: +6 to +8 points on frontier items in both rules, +1 to +2 on unseen sources (not distinguishable from zero), no loss on mastered items or on held-out answer formats — except for the unseeded members, which lose 4.5 points on mastered items and 9 on held-out formats. Every member that went through distillation, the neutral context included, keeps both.
+
+### Wash-out of the seeded contexts
+
+How much of its context a member carries, on the scale where 0 is the base model and 1 the teacher's instructed answers, with the drift common to all contexts and the controls' drift removed. Noise of one value is about 0.03.
+
+| Context | Level | After seeding | Step 45, relative only | Step 45, with self-imitation |
+|---|---|---|---|---|
+| `ground_up` | stance | 0.31 | 0.33 | 0.17 |
+| `relations` | stance | 0.27 | 0.28 | 0.14 |
+| `parsimony` | stance | 0.36 | 0.30 | 0.19 |
+| `observe` | stance | 0.25 | 0.19 | 0.14 |
+| `refute` | stance | 0.33 | 0.16 | 0.13 |
+| `verify` | tactic | 0.09 | 0.09 | 0.03 |
+| `small_case` | tactic | 0.07 | 0.11 | 0.00 |
+| `direct` | tactic | 0.19 | −0.03 | 0.05 |
+| `define` | tactic | 0.14 | −0.09 | −0.18 |
+| `map` | tactic | −0.11 | −0.31 | −0.03 |
+| `procedure` | reference | −0.08 | −0.02 | −0.02 |
+
+- **Seeded stances are not washed out by the relative-only rule.** All five are still clearly present after 45 steps, at 49 to 106% of their strength after seeding; three rose in the first 30 steps before settling. In Round 1 every seeded habit but one was gone within tens of steps.
+- **In every one of the five themes the stance outlasts its tactic**, under both rules (difference at step 45: 0.30 under the relative-only rule, 0.18 with self-imitation; interval over themes 0.13 to 0.47). Five themes cannot give a p-value below 0.06, and they give 0.06.
+- **But the level of abstraction is probably not the operative variable.** The two tactics that are gone by step 30, `direct` and `define`, are the two contexts that lower the base model's accuracy (0.44 and 0.47 against 0.50 for the neutral context). The two tactics that do not lower it, `verify` and `small_case` (0.52, 0.53), persist as well as the stances, at the modest level at which they were absorbed. In absolute terms every persisting context carries about 0.01 nats per token, stance or tactic. The simplest reading is Round 1's conclusion made sharper: the reward removes within 30 steps what costs it, and leaves the rest alone. Stances survive because they are small, general and harmless, not because they are abstract; the design has no harmful stance to test the converse.
+- **Self-imitation erodes seeded contexts** instead of amplifying them: the stances are at about half their strength by step 45 (difference to the relative-only rule 0.10, interval over items 0.07 to 0.14), and the helpful tactics are gone. A member's own context is identified in 4 of 11 members under the relative-only rule at step 45 and in 1 of 11 with self-imitation (chance 1 in 11). What self-imitation amplifies is length.
+- No recitation: 0.7% of answers contain a listed term, as for the base model.
+
+## Operations
+
+- Another project of the same owner needs cards; its session asked for an estimate and was given one, later revised by an hour. No further wave of this project is started on cards as they empty, and the last four clones in the pilot config (the neutral-context and unseeded members under the relative-only rule) were withdrawn before starting, leaving twelve clone pairs.
+- The step-45 evaluation was sized on the base model's answer length. Trained members write about twice as much, and half of its 3,520 items are the procedural format-probe units, which were meant to be a small side measurement. It takes about seven hours instead of three.
+
+## In progress
+
+- The step-45 evaluation; from it, how much members differ in which problems they solve, and a harvest simulation inside the selection suite (rank on half the unseen sources, test on the other half).
+- Twelve clone pairs from step 45 to step 90 for the heritability test.
+- The two imitation-seeded members under both rules, as one strongly absorbed tactic for the wash-out comparison.
