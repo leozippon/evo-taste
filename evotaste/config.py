@@ -17,6 +17,7 @@ import yaml
 ROLES = ("member", "baseline")
 SEEDING_METHODS = ("opcd", "imitation", "none")
 ADVANTAGES = ("centered", "standardized")
+PRACTICE_REFERENCES = (None, "base")
 _ID = re.compile(r"^[A-Za-z0-9_-]+$")  # '~' and '@' are reserved for lineage and adapter-version names
 
 
@@ -79,11 +80,22 @@ class Exaggeration:
 @dataclass(frozen=True)
 class Practice:
     """Self-chosen practice: source s gets default_s exp(eta (r_s - mean r)) of the batch, within floor..ceiling x
-    default_s, where r_s is the member's moving average (decay `decay`) of its training reward on s."""
+    default_s, where r_s is the member's moving average (decay `decay`) of its training reward on s; with reference
+    `base`, of that reward minus the base model's census pass rate on the same items."""
     eta: float
     decay: float
     floor: float
     ceiling: float
+    reference: str | None = None  # None: the member's own reward; "base": its gain over the base model's pass rate
+
+
+@dataclass(frozen=True)
+class Taste:
+    """Taste-shaped reward: the reward of a correct, eligible rollout times 1 + strength x z, where z is its
+    characteristic score (log p_member - log p_base per completion token) relative to the other eligible rollouts of
+    its group, standardised over the step and clipped to +-clip. strength may be negative (toward the base model)."""
+    strength: float
+    clip: float = 2.0
 
 
 @dataclass(frozen=True)
@@ -101,6 +113,7 @@ class Amplification:
     # rollout with reward 1)
     imitate_within_free: bool = False
     practice: Practice | None = None  # None: the run's shared stream
+    taste: Taste | None = None  # None (or strength 0): rewards as scored
 
 
 @dataclass(frozen=True)
@@ -266,12 +279,17 @@ def _check_settings(where: str, seeding: Seeding, amp: Amplification, culling: C
         raise ValueError(f"{where}: amplification.advantage must be one of {ADVANTAGES}")
     if amp.self_imitation < 0:
         raise ValueError(f"{where}: amplification.self_imitation must be >= 0")
-    ex, pr = amp.exaggeration, amp.practice
+    ex, pr, ta = amp.exaggeration, amp.practice, amp.taste
     if ex is not None and min(ex.gamma, ex.weight) < 0:
         raise ValueError(f"{where}: amplification.exaggeration needs gamma >= 0 and weight >= 0")
     if pr is not None and not (pr.eta >= 0 and 0 <= pr.decay < 1 and 0 < pr.floor <= 1 <= pr.ceiling):
         raise ValueError(f"{where}: amplification.practice needs eta >= 0, 0 <= decay < 1 and "
                          "0 < floor <= 1 <= ceiling")
+    if pr is not None and pr.reference not in PRACTICE_REFERENCES:
+        raise ValueError(f"{where}: amplification.practice.reference must be null (the member's own reward) or base")
+    # a correct answer must keep a positive reward, above a wrong one's: factors 1 +- strength x clip stay above 0
+    if ta is not None and not (ta.clip > 0 and abs(ta.strength) * ta.clip < 1):
+        raise ValueError(f"{where}: amplification.taste needs clip > 0 and |strength| x clip < 1")
 
 
 def parse(data: dict, context_names) -> RunConfig:

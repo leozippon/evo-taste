@@ -573,18 +573,28 @@ def stratum_of(passes: int, samples: int) -> str:
     return "mastered" if passes >= samples - 1 else "sweet"
 
 
-def load_strata(path: str | Path, sha256: str) -> dict[str, str]:
-    """uid -> stratum from a census strata table (lines `uid<TAB>passes<TAB>samples`), refused unless its SHA-256
-    is the pinned one."""
+def _strata_rows(path: str | Path, sha256: str) -> list[tuple[str, int, int]]:
+    """(uid, passes, samples) of a census strata table (lines `uid<TAB>passes<TAB>samples` after a header), refused
+    unless its SHA-256 is the pinned one."""
     data = Path(path).read_bytes()
     digest = hashlib.sha256(data).hexdigest()
     if digest != sha256:
         raise ValueError(f"{path}: SHA-256 {digest} is not the pinned {sha256}")
-    out = {}
+    rows = []
     for line in data.decode().splitlines()[1:]:
         uid, passes, samples = line.split("\t")
-        out[uid] = stratum_of(int(passes), int(samples))
-    return out
+        rows.append((uid, int(passes), int(samples)))
+    return rows
+
+
+def load_strata(path: str | Path, sha256: str) -> dict[str, str]:
+    """uid -> stratum from a census strata table, refused unless its SHA-256 is the pinned one."""
+    return {uid: stratum_of(passes, samples) for uid, passes, samples in _strata_rows(path, sha256)}
+
+
+def load_pass_rates(path: str | Path, sha256: str) -> dict[str, float]:
+    """uid -> the base model's census pass rate (passes / samples), from the same pinned table."""
+    return {uid: passes / samples for uid, passes, samples in _strata_rows(path, sha256)}
 
 
 def _round_half_up(x: Fraction) -> int:

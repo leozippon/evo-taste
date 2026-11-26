@@ -17,6 +17,7 @@ import hashlib
 import math
 import os
 import shutil
+import statistics
 import subprocess
 import time
 from dataclasses import dataclass
@@ -73,6 +74,37 @@ def advantages(returns: list[float], rule: str) -> list[float]:
         std = math.sqrt(sum((r - mean) ** 2 for r in returns) / len(returns))
         return [(r - mean) / (std + 1e-6) for r in returns]
     raise ValueError(f"unknown advantage rule {rule!r}")
+
+
+TASTE_MIN_SHAPED = 8  # a step with fewer rollouts in groups of two or more eligible ones is not shaped
+
+
+def taste_factors(scores: list[list[float | None]], strength: float, clip: float) -> tuple[list[list[float]], dict]:
+    """Reward factors of the taste-shaped reward for one step. scores[j][k] is the characteristic score of rollout k of
+    prompt j if it is eligible (correct, and within the free length where that is required), else None.
+
+    In each group with at least two eligible rollouts, d = s - the group's mean s over them (exactly 0 when their scores
+    are equal, so that rounding cannot pass for a difference); sigma is the population standard deviation of all such d
+    in the step; an eligible rollout's factor is 1 + strength x clip(d / sigma, -clip, clip). Every other rollout keeps
+    1, and so does every rollout of a step with fewer than TASTE_MIN_SHAPED such d or with sigma = 0. The z-values do
+    not depend on `strength`, so -strength mirrors the factors around 1. Returns the factors and {shaped, groups, sigma,
+    skipped} (`skipped`: why the step was not shaped, else None)."""
+    d = {}
+    for j, group in enumerate(scores):
+        eligible = [(k, s) for k, s in enumerate(group) if s is not None]
+        if len(eligible) >= 2:
+            same = len({s for _, s in eligible}) == 1
+            mean = sum(s for _, s in eligible) / len(eligible)
+            d.update({(j, k): 0.0 if same else s - mean for k, s in eligible})
+    factors = [[1.0] * len(group) for group in scores]
+    sigma = statistics.pstdev(list(d.values())) if d else 0.0
+    if len(d) < TASTE_MIN_SHAPED or sigma == 0:
+        why = (f"{len(d)} rollouts in groups with two or more eligible, fewer than {TASTE_MIN_SHAPED}"
+               if len(d) < TASTE_MIN_SHAPED else "the scores do not vary within groups")
+        return factors, {"shaped": 0, "groups": 0, "sigma": sigma if d else None, "skipped": why}
+    for (j, k), x in d.items():
+        factors[j][k] = 1.0 + strength * min(max(x / sigma, -clip), clip)
+    return factors, {"shaped": len(d), "groups": len({j for j, _ in d}), "sigma": sigma, "skipped": None}
 
 
 @dataclass

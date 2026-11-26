@@ -98,7 +98,7 @@ def test_members_without_practice_or_with_eta_zero_see_the_shared_prompts(finish
 def test_practice_follows_the_members_own_record(finished):
     run, settings = finished, finished.cfg.settings(finished.cfg.member("prac"))[1].practice
     lines = history(run, "prac")
-    averages = {s: PRACTICE_START for s in run.streams.source_shares}
+    averages = {s: PRACTICE_START[None] for s in run.streams.source_shares}
     drawn = {}
     for line in lines:
         assert line["practice"]["averages"] == averages  # bit-exact: the same float operations, in order

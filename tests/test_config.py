@@ -1,5 +1,6 @@
 """Run-config schema: defaults, the effective settings of members and clones, and every refusal."""
 
+import dataclasses
 from pathlib import Path
 
 import pytest
@@ -108,6 +109,13 @@ def test_clone_chains_inherit_along_the_chain():
                   {"ceiling": 0.5})],
     ([{"id": "a", "seed": 1, "context": "refute"}], {"amplification": {"practice": {"eta": 4.0, "decay": 0.8}}},
      "missing required keys"),
+    ([{"id": "a", "seed": 1, "context": "refute"}], {"amplification": {"practice": {
+        "eta": 4.0, "decay": 0.8, "floor": 0.25, "ceiling": 4.0, "reference": "member"}}}, "practice.reference"),
+    *[([{"id": "a", "seed": 1, "context": "refute"}], {"amplification": {"taste": bad}}, match)
+      for bad, match in (({"clip": 2.0}, "missing required keys"), ({"strength": 0.25, "clip": 0}, "taste needs"),
+                         ({"strength": 0.5}, "taste needs"), ({"strength": -0.25, "clip": 4}, "taste needs"),
+                         ({"strength": float("nan")}, "taste needs"), ({"strength": "high"}, "expected a number"),
+                         ({"strength": 0.25, "sign": 1}, "unknown keys"), (0.25, "expected a mapping"))],
     # D1 of the 2026-11-25 audit: any shared seed, between seeded members, clones of different parents or points
     ([{"id": "a", "seed": 7, "context": "refute"}, {"id": "b", "seed": 7, "context": "verify"},
       {"id": "t1", "seed": 9, "parent": {"member": "a", "step": 0}},
@@ -153,6 +161,21 @@ def test_amplification_mechanisms_per_member():
     assert a.imitate_within_free and b.imitate_within_free
 
 
+def test_taste_and_base_referenced_practice():
+    """Pilot E's layout: one parent cloned into the three signs of the taste-shaped reward; nothing else differs."""
+    variants = {"own": 0.25, "neu": 0.0, "rev": -0.25}
+    cfg = parse([PARENT] + [{"id": f"p-{v}", "seed": 10 + i, "parent": {"member": "p", "step": 45},
+                             "overrides": {"amplification": {"steps": 90, "taste": {"strength": s}}}}
+                            for i, (v, s) in enumerate(variants.items())],
+                amplification={"practice": {**PRACTICE, "reference": "base"}})
+    parent, *clones = (cfg.settings(m)[1] for m in cfg.members)
+    assert parent.taste is None and [c.taste for c in clones] == [config.Taste(s, 2.0) for s in variants.values()]
+    assert {dataclasses.replace(c, taste=None) for c in clones} == {dataclasses.replace(parent, steps=90)}
+    assert parent.practice == config.Practice(4.0, 0.8, 0.25, 4.0, "base")
+    plain = parse([PARENT], amplification={"practice": PRACTICE})
+    assert plain.settings(plain.members[0])[1].practice.reference is None  # WP-E2's rule by default
+
+
 def test_a_clone_keeps_its_parents_practice_after_step_0():
     parent = {"id": "p", "seed": 1, "context": "refute", "overrides": {"amplification": {"practice": PRACTICE}}}
     changed = {"amplification": {"practice": {**PRACTICE, "eta": 2.0}}}
@@ -172,11 +195,24 @@ def test_pilot_c_and_d_configs():
     c = config.load(ROOT / "configs" / "run" / "pilot-c.yaml")  # resumable: no new key, pilot C's update
     assert all((a.exaggeration, a.practice, a.imitate_within_free) == (None, None, False)
                for _, a, _ in map(c.settings, c.members))
+    pilot_e = {}  # parent -> arm -> settings
+    for m in c.members:
+        if m.id.rsplit("-", 1)[-1] in ("own", "neu", "rev"):
+            pilot_e.setdefault(m.parent, {})[m.id.rsplit("-", 1)[-1]] = c.settings(m)[1]
+        else:
+            assert c.settings(m)[1].taste is None
+    assert sorted(p.member for p in pilot_e) == ["placebo-adv", "relations-adv", "unseeded-adv", "unseeded-b-adv"]
+    for parent, arms in pilot_e.items():
+        assert parent.step == 45 and {arm: a.taste for arm, a in arms.items()} == {
+            "own": config.Taste(0.25), "neu": config.Taste(0.0), "rev": config.Taste(-0.25)}
+        rule = dataclasses.replace(c.settings(c.member(parent.member))[1], steps=90)
+        assert all(dataclasses.replace(a, taste=None) == rule for a in arms.values())  # nothing else differs
     d = config.load(ROOT / "configs" / "run" / "pilot-d.yaml")
     arms = {}
     for m in d.members:
         seeding, amp, _ = d.settings(m)
         assert seeding.method == "none" and m.context is None and m.parent is None and amp.imitate_within_free
+        assert amp.taste is None and (amp.practice is None or amp.practice.reference is None)
         assert (amp.steps, amp.prompts, amp.rollouts, amp.self_imitation) == (45, 48, 4, 0.0)
         arms.setdefault(m.id.split("-")[0], set()).add((amp.exaggeration, amp.practice))
     ex, pr = config.Exaggeration(1.0, 0.01), config.Practice(4.0, 0.8, 0.25, 4.0)  # weight: see the config

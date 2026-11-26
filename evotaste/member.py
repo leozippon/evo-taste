@@ -13,6 +13,7 @@ import logging
 import math
 import random
 import shutil
+import statistics
 import time
 from dataclasses import dataclass, field
 from functools import cached_property, lru_cache
@@ -24,9 +25,10 @@ from evotaste import config
 from evotaste.records import (append_jsonl, filter_jsonl, now, read_json, read_jsonl, read_jsonl_gz, write_json,
                               write_jsonl_gz)
 from evotaste.sampler import Request, Sample
-from evotaste.tasks import (Streams, Suites, Task, load_strata, probe_set, prompt_ids, score_many, stable_seed,
-                            train_cell)
-from evotaste.trainer import MemberWeights, Sequence, advantages, gpu_processes, length_returns, load_optimizer
+from evotaste.tasks import (Streams, Suites, Task, load_pass_rates, load_strata, probe_set, prompt_ids, score_many,
+                            stable_seed, train_cell)
+from evotaste.trainer import (MemberWeights, Sequence, advantages, gpu_processes, length_returns, load_optimizer,
+                              taste_factors)
 
 log = logging.getLogger(__name__)
 
@@ -41,8 +43,8 @@ CHECK_TOKEN_MEAN_ABS_MAX = 0.04
 CHECK_SEQ_ABS_PER_TOKEN_MAX = 0.015
 # Self-chosen practice: every source's moving average before the member's first reward on it. Near the base model's
 # expected training reward per source (0.40-0.49 by the census), so that a source's average does not depend on how
-# often it has been observed.
-PRACTICE_START = 0.5
+# often it has been observed; relative to the base model (reference `base`) the expected gain at the start, 0.
+PRACTICE_START = {None: 0.5, "base": 0.0}
 
 
 def practice_shares(defaults: dict[str, float], averages: dict[str, float], settings: config.Practice) -> dict:
@@ -143,6 +145,11 @@ class Run:
     def streams(self) -> Streams:
         strata = self.cfg.strata and load_strata(self.cfg.strata.path, self.cfg.strata.sha256)
         return Streams(self.suites, self.cfg.seed, strata=strata, version=stream_version(self.dir))
+
+    @cached_property
+    def base_pass_rates(self) -> dict[str, float]:
+        """uid -> the base model's census pass rate on a training item (the pinned strata table)."""
+        return load_pass_rates(self.cfg.strata.path, self.cfg.strata.sha256)
 
     @cached_property
     def probe_tasks(self) -> list[Task]:
@@ -338,7 +345,8 @@ class Member:
         """Equal averages for every training source, nothing drawn; None for a member that does not practise."""
         if self.amp.practice is None:
             return None
-        return PracticeRecord({s: PRACTICE_START for s in self.run.streams.source_shares}, {})
+        start = PRACTICE_START[self.amp.practice.reference]
+        return PracticeRecord({s: start for s in self.run.streams.source_shares}, {})
 
     def load_practice(self, ckpt: Path, step: int) -> PracticeRecord | None:
         """The practice record saved with a checkpoint (this lineage's, or a clone's parent's). A checkpoint without
@@ -480,27 +488,44 @@ class Member:
         """One group update on this step's rollouts; then publish, record, and advance the step counter."""
         t, policy, amp = self.lin.step, self.run.policy, self.amp
         t0 = time.perf_counter()
-        seqs, sampler_lps, records = [], [], []
-        groups = 0
+        seqs, sampler_lps, groups_records = [], [], []
         flat = response_records([(task, s) for task, group in zip(tasks, samples) for s in group])
-        for j, (task, group) in enumerate(zip(tasks, samples)):
+        for task, group in zip(tasks, samples):
             recs, flat = flat[:len(group)], flat[len(group):]
-            returns = length_returns([r["reward"] for r in recs], [r["completion_tokens"] for r in recs],
-                                     amp.max_tokens, amp.length.free, amp.length.slope)
-            weights = advantages(returns, amp.advantage)
-            groups += any(w != 0.0 for w in weights)
+            groups_records.append(recs)
             prompt = self.run.prompt(task.question)
-            for k, (s, r, g, w) in enumerate(zip(group, recs, returns, weights)):
+            for s, r in zip(group, recs):  # eligible for the imitation terms and the taste-shaped reward
                 eligible = r["reward"] == 1.0 and (not amp.imitate_within_free
                                                    or r["completion_tokens"] <= amp.length.free)
-                seqs.append(Sequence(prompt, s.token_ids, w, imitate=eligible))
+                seqs.append(Sequence(prompt, s.token_ids, 0.0, imitate=eligible))  # weights follow below
                 sampler_lps.append(s.token_logprobs)
-                records.append({"step": t, "prompt": j, "k": k, **r, "return": g, "weight": w})
         score_s = time.perf_counter() - t0
         t0 = time.perf_counter()
         check = retry_on_oom(policy, f"{self.lin.id} step {t} check",
                              lambda: self.consistency_check(seqs, sampler_lps, amp.rollouts))
         check_s = time.perf_counter() - t0
+        rewards = [[r["reward"] for r in recs] for recs in groups_records]
+        taste, taste_of, factors = {}, None, None
+        if amp.taste is not None and amp.taste.strength != 0:  # strength 0: nothing is computed
+            taste_of, factors, taste_stats = self.taste_shaping(seqs, groups_records, sampler_lps)
+            taste = {"taste": taste_stats}
+        records, groups, i = [], 0, 0
+        for j, recs in enumerate(groups_records):
+            tokens = [r["completion_tokens"] for r in recs]
+            shaped = rewards[j] if factors is None else [x * f for x, f in zip(rewards[j], factors[j])]
+            returns = length_returns(shaped, tokens, amp.max_tokens, amp.length.free, amp.length.slope)
+            weights = advantages(returns, amp.advantage)
+            groups += any(w != 0.0 for w in weights)
+            if factors is not None:  # the advantage shaping adds, against the one the scored rewards give
+                plain = advantages(length_returns(rewards[j], tokens, amp.max_tokens, amp.length.free,
+                                                  amp.length.slope), amp.advantage)
+                taste_stats["adv_shaping"] += sum(abs(w - p) for w, p in zip(weights, plain)) / len(seqs)
+                taste_stats["adv_plain"] += sum(abs(p) for p in plain) / len(seqs)
+            for k, (r, g, w) in enumerate(zip(recs, returns, weights)):
+                seqs[i].weight = w
+                records.append({"step": t, "prompt": j, "k": k, **r, "return": g, "weight": w, **(
+                    {} if factors is None else {"taste_score": taste_of.get(i), "taste_factor": factors[j][k]})})
+                i += 1
         stats = retry_on_oom(policy, f"{self.lin.id} step {t} update",
                              lambda: policy.update(self.weights, seqs, amp.lr, amp.self_imitation, amp.exaggeration))
         publish = self.publish()
@@ -513,9 +538,17 @@ class Member:
         practice = {}
         if self.practice is not None:  # the shares this batch was drawn with (default ones at eta 0), then update
             practice = {"practice": {"shares": self.practice_shares(), "averages": dict(self.practice.averages)}}
+            tracked = reward_by_family
+            if amp.practice.reference == "base":  # the gain over the base model's pass rate on the same items
+                rates: dict[str, list[float]] = {}
+                for task in tasks:
+                    rates.setdefault(task.family, []).append(self.run.base_pass_rates[task.uid])
+                base = {f: _mean(v) for f, v in sorted(rates.items())}
+                practice["practice"]["base"] = base
+                tracked = {f: reward - base[f] for f, reward in reward_by_family.items()}
             decay = amp.practice.decay
-            for source, reward in reward_by_family.items():
-                self.practice.averages[source] = decay * self.practice.averages[source] + (1 - decay) * reward
+            for source, value in tracked.items():
+                self.practice.averages[source] = decay * self.practice.averages[source] + (1 - decay) * value
             if amp.practice.eta != 0:
                 for task in tasks:
                     self.practice.drawn[train_cell(task)] = self.practice.drawn.get(train_cell(task), 0) + 1
@@ -525,12 +558,49 @@ class Member:
             "reward_by_family": reward_by_family,
             "completion_tokens": _mean(r["completion_tokens"] for r in records),
             "complied": _mean(r["complied"] for r in records), "truncated": _mean(r["truncated"] for r in records),
-            "groups": groups, "prompts": len(tasks), **stats, "check": check, **practice,
+            "groups": groups, "prompts": len(tasks), **stats, "check": check, **practice, **taste,
             "timing": {"generate_s": round(generate_s, 3), "batch_members": batch_members,
                        "score_s": round(score_s, 3), "check_s": round(check_s, 3), "update_s": stats["update_s"],
                        "publish_s": round(sum(publish.values()), 3), "publish": publish,
                        "write_s": round(time.perf_counter() - t0, 3)}})
         self.lin.step = t + 1
+
+    def taste_shaping(self, seqs: list[Sequence], groups_records: list[list[dict]], sampler_lps: list[list[float]]):
+        """The taste-shaped reward's factors for this step's rollouts (prompt-major, as `seqs`). Each eligible rollout
+        (flagged `imitate`) gets its characteristic score: the mean over its completion tokens of log p_member -
+        log p_base, the member being the weights that sampled it (this step's, before the update) and the base model
+        the same network with the adapter disabled, both by the trainer on the very same prompt and completion ids.
+        Returns {rollout index: score}, the factors per group (`trainer.taste_factors`) and the step's statistics,
+        among them `member_vs_sampler`, the consistency check's per-token measure (summed |trainer - sampler| per
+        sequence over all tokens) on every scored rollout."""
+        policy, lin, taste = self.run.policy, self.lin, self.amp.taste
+        t0 = time.perf_counter()
+        idx = [i for i, s in enumerate(seqs) if s.imitate]
+        chosen = [seqs[i] for i in idx]
+
+        def score():
+            return policy.logprobs(self.weights, chosen), policy.base_logprobs(chosen)
+        mine, base = retry_on_oom(policy, f"{lin.id} step {lin.step} taste score", score) if chosen else ([], [])
+        scores = [float((m - b).sum()) / len(m) for m, b in zip(mine, base)]
+        tokens = sum(len(m) for m in mine)
+        vs_sampler = (sum(abs(float(m.sum()) - float(torch.tensor(sampler_lps[i], dtype=torch.float32).sum()))
+                          for i, m in zip(idx, mine)) / tokens) if tokens else None
+        score_of = dict(zip(idx, scores))
+        per_group, i = [], 0
+        for recs in groups_records:
+            per_group.append([score_of.get(i + k) for k in range(len(recs))])
+            i += len(recs)
+        factors, stats = taste_factors(per_group, taste.strength, taste.clip)
+        lengths = [len(s.completion) for s in chosen]
+        corr = (statistics.correlation(scores, lengths)
+                if len(scores) > 1 and len(set(scores)) > 1 and len(set(lengths)) > 1 else None)
+        if stats["skipped"]:
+            log.info("%s step %d: no taste shaping (%s)", lin.id, lin.step, stats["skipped"])
+        return score_of, factors, {
+            "eligible": len(chosen), **stats, "score_mean": statistics.fmean(scores) if scores else None,
+            "score_sd": statistics.pstdev(scores) if scores else None, "length_corr": corr,
+            "adv_shaping": 0.0, "adv_plain": 0.0, "member_vs_sampler": vs_sampler,
+            "taste_s": round(time.perf_counter() - t0, 3)}
 
     def consistency_check(self, seqs: list[Sequence], sampler_lps: list[list[float]], rollouts: int) -> dict:
         """Re-score part of the batch with the trainer; fail loudly unless it matches the sampler within the noise.

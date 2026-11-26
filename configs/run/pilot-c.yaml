@@ -108,3 +108,20 @@ members:
   - {id: placebo-adv-c2, parent: {member: placebo-adv, step: 45}, seed: 532, overrides: {amplification: {steps: 90}}}
   - {id: unseeded-adv-c1, parent: {member: unseeded-adv, step: 45}, seed: 533, overrides: {amplification: {steps: 90}}}
   - {id: unseeded-adv-c2, parent: {member: unseeded-adv, step: 45}, seed: 534, overrides: {amplification: {steps: 90}}}
+  # Pilot E (docs/design/amplification.md, "Selective amplification"): four members at step 45, each cloned into the
+  # taste-shaped reward toward its own direction (-own), the neutral rule (-neu: strength 0, exactly the parent's rule,
+  # like the heritability clones above) and toward the base model (-rev), to step 90. The three clones of a parent start
+  # from identical weights and optimizer state and see identical prompts; they differ in the sign of the term and in
+  # their sampling seeds only.
+  - {id: unseeded-adv-own, parent: {member: unseeded-adv, step: 45}, seed: 701, overrides: {amplification: {steps: 90, taste: {strength: 0.25}}}}
+  - {id: unseeded-adv-neu, parent: {member: unseeded-adv, step: 45}, seed: 702, overrides: {amplification: {steps: 90, taste: {strength: 0.0}}}}
+  - {id: unseeded-adv-rev, parent: {member: unseeded-adv, step: 45}, seed: 703, overrides: {amplification: {steps: 90, taste: {strength: -0.25}}}}
+  - {id: unseeded-b-adv-own, parent: {member: unseeded-b-adv, step: 45}, seed: 704, overrides: {amplification: {steps: 90, taste: {strength: 0.25}}}}
+  - {id: unseeded-b-adv-neu, parent: {member: unseeded-b-adv, step: 45}, seed: 705, overrides: {amplification: {steps: 90, taste: {strength: 0.0}}}}
+  - {id: unseeded-b-adv-rev, parent: {member: unseeded-b-adv, step: 45}, seed: 706, overrides: {amplification: {steps: 90, taste: {strength: -0.25}}}}
+  - {id: placebo-adv-own, parent: {member: placebo-adv, step: 45}, seed: 707, overrides: {amplification: {steps: 90, taste: {strength: 0.25}}}}
+  - {id: placebo-adv-neu, parent: {member: placebo-adv, step: 45}, seed: 708, overrides: {amplification: {steps: 90, taste: {strength: 0.0}}}}
+  - {id: placebo-adv-rev, parent: {member: placebo-adv, step: 45}, seed: 709, overrides: {amplification: {steps: 90, taste: {strength: -0.25}}}}
+  - {id: relations-adv-own, parent: {member: relations-adv, step: 45}, seed: 710, overrides: {amplification: {steps: 90, taste: {strength: 0.25}}}}
+  - {id: relations-adv-neu, parent: {member: relations-adv, step: 45}, seed: 711, overrides: {amplification: {steps: 90, taste: {strength: 0.0}}}}
+  - {id: relations-adv-rev, parent: {member: relations-adv, step: 45}, seed: 712, overrides: {amplification: {steps: 90, taste: {strength: -0.25}}}}
