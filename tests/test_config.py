@@ -179,7 +179,7 @@ def test_pilot_c_and_d_configs():
         assert seeding.method == "none" and m.context is None and m.parent is None and amp.imitate_within_free
         assert (amp.steps, amp.prompts, amp.rollouts, amp.self_imitation) == (45, 48, 4, 0.0)
         arms.setdefault(m.id.split("-")[0], set()).add((amp.exaggeration, amp.practice))
-    ex, pr = config.Exaggeration(1.0, 0.5), config.Practice(4.0, 0.8, 0.25, 4.0)
+    ex, pr = config.Exaggeration(1.0, 0.01), config.Practice(4.0, 0.8, 0.25, 4.0)  # weight: see the config
     assert arms == {"adv": {(None, None)}, "exag": {(ex, None)}, "prac": {(None, pr)}, "both": {(ex, pr)}}
     assert len(d.members) == 16 and d.clonable_steps == (45,) and not d.culling.enabled
     assert {m.seed for m in d.members}.isdisjoint(m.seed for m in c.members)

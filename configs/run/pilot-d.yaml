@@ -6,6 +6,11 @@
 # appended after step 45 has been looked at (clonable_steps keeps the state, practice record included).
 # Forked from runs/pilot-c (`worker fork`) to share its base model's probe answers: model, seed, lora, seeding and
 # probes sections are identical to configs/run/pilot-c.yaml; every member overrides seeding to none.
+# Exaggeration weight 0.01, not the specified 0.5 (GPU check of 2026-11-26, five updates per member): the term's
+# gradient grows with the member's own deviation, which RL alone multiplies several times per step at first. At 0.5 it
+# was 3x the advantage term's after one update and 56x after three, answers grew from 530 to 1,560 tokens and probe
+# accuracy fell from 0.43 to 0.29 (code 0.47 to 0.06) in five; at 0.2, 0.1 and 0.05 it passed the advantage term's
+# within two to four updates. At 0.01 it should stay below it for roughly the first third of the course.
 name: pilot-d
 model: Qwen/Qwen3-1.7B
 seed: 2026
@@ -39,15 +44,15 @@ members:
   - {id: adv-2, seed: 602, overrides: {seeding: {method: none}}}
   - {id: adv-3, seed: 603, overrides: {seeding: {method: none}}}
   - {id: adv-4, seed: 604, overrides: {seeding: {method: none}}}
-  - {id: exag-1, seed: 611, overrides: {seeding: {method: none}, amplification: {exaggeration: {gamma: 1.0, weight: 0.5}}}}
-  - {id: exag-2, seed: 612, overrides: {seeding: {method: none}, amplification: {exaggeration: {gamma: 1.0, weight: 0.5}}}}
-  - {id: exag-3, seed: 613, overrides: {seeding: {method: none}, amplification: {exaggeration: {gamma: 1.0, weight: 0.5}}}}
-  - {id: exag-4, seed: 614, overrides: {seeding: {method: none}, amplification: {exaggeration: {gamma: 1.0, weight: 0.5}}}}
+  - {id: exag-1, seed: 611, overrides: {seeding: {method: none}, amplification: {exaggeration: {gamma: 1.0, weight: 0.01}}}}
+  - {id: exag-2, seed: 612, overrides: {seeding: {method: none}, amplification: {exaggeration: {gamma: 1.0, weight: 0.01}}}}
+  - {id: exag-3, seed: 613, overrides: {seeding: {method: none}, amplification: {exaggeration: {gamma: 1.0, weight: 0.01}}}}
+  - {id: exag-4, seed: 614, overrides: {seeding: {method: none}, amplification: {exaggeration: {gamma: 1.0, weight: 0.01}}}}
   - {id: prac-1, seed: 621, overrides: {seeding: {method: none}, amplification: {practice: {eta: 4.0, decay: 0.8, floor: 0.25, ceiling: 4.0}}}}
   - {id: prac-2, seed: 622, overrides: {seeding: {method: none}, amplification: {practice: {eta: 4.0, decay: 0.8, floor: 0.25, ceiling: 4.0}}}}
   - {id: prac-3, seed: 623, overrides: {seeding: {method: none}, amplification: {practice: {eta: 4.0, decay: 0.8, floor: 0.25, ceiling: 4.0}}}}
   - {id: prac-4, seed: 624, overrides: {seeding: {method: none}, amplification: {practice: {eta: 4.0, decay: 0.8, floor: 0.25, ceiling: 4.0}}}}
-  - {id: both-1, seed: 631, overrides: {seeding: {method: none}, amplification: {exaggeration: {gamma: 1.0, weight: 0.5}, practice: {eta: 4.0, decay: 0.8, floor: 0.25, ceiling: 4.0}}}}
-  - {id: both-2, seed: 632, overrides: {seeding: {method: none}, amplification: {exaggeration: {gamma: 1.0, weight: 0.5}, practice: {eta: 4.0, decay: 0.8, floor: 0.25, ceiling: 4.0}}}}
-  - {id: both-3, seed: 633, overrides: {seeding: {method: none}, amplification: {exaggeration: {gamma: 1.0, weight: 0.5}, practice: {eta: 4.0, decay: 0.8, floor: 0.25, ceiling: 4.0}}}}
-  - {id: both-4, seed: 634, overrides: {seeding: {method: none}, amplification: {exaggeration: {gamma: 1.0, weight: 0.5}, practice: {eta: 4.0, decay: 0.8, floor: 0.25, ceiling: 4.0}}}}
+  - {id: both-1, seed: 631, overrides: {seeding: {method: none}, amplification: {exaggeration: {gamma: 1.0, weight: 0.01}, practice: {eta: 4.0, decay: 0.8, floor: 0.25, ceiling: 4.0}}}}
+  - {id: both-2, seed: 632, overrides: {seeding: {method: none}, amplification: {exaggeration: {gamma: 1.0, weight: 0.01}, practice: {eta: 4.0, decay: 0.8, floor: 0.25, ceiling: 4.0}}}}
+  - {id: both-3, seed: 633, overrides: {seeding: {method: none}, amplification: {exaggeration: {gamma: 1.0, weight: 0.01}, practice: {eta: 4.0, decay: 0.8, floor: 0.25, ceiling: 4.0}}}}
+  - {id: both-4, seed: 634, overrides: {seeding: {method: none}, amplification: {exaggeration: {gamma: 1.0, weight: 0.01}, practice: {eta: 4.0, decay: 0.8, floor: 0.25, ceiling: 4.0}}}}
