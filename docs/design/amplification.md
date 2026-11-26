@@ -30,9 +30,12 @@ The lesson is that a member's deviation is a mixture. Part of it is what the rew
 The next mechanisms act only where the reward is indifferent, and with a strength that does not grow with the deviation.
 
 1. **Taste-shaped reward.** Among a member's correct answers, the ones most characteristic of itself earn more. An answer's characteristic score is how much more probable the member finds it than the base model does, per token; scores are standardised across the step's correct answers and clipped, and a correct answer's reward is scaled by between 0.5 and 1.5 accordingly. A wrong answer earns nothing however characteristic it is, so deviation cannot be bought with accuracy, and because the scale is relative within a step the pressure stays the same size as the member moves away. Where two answers are both right, the member is steered toward its own way of being right: this turns the drift that the reward ignores into a self-reinforcing direction. Run with the sign reversed, the same term steers a member back toward the base model, which gives a control that differs in nothing else.
-2. **Practice relative to the base model.** A member practises more of the sources on which it has gained most over the base model's own pass rate, so that what is reinforced is the member's own progress, not the common difficulty of a source.
+2. **Consolidating one's own frontier.** Each member keeps a record of the training problems it has attempted. Part of every batch is then drawn from its own frontier: problems it has solved at least once but not reliably, the ones the base model rarely solves first. It attempts them afresh and learns from the outcome as usual; optionally it also imitates the answer with which it first solved them. What is reinforced is the member's own record of discoveries, which differs from member to member by the accidents of its sampling, and it is substance by construction: which problems a member can crack. The control revisits problems the member has seen before, chosen without regard to its own successes and matched in difficulty, so that the only difference is whose discoveries are consolidated.
+3. **Practice relative to the base model.** A member practises more of the sources on which it has gained most over the base model's own pass rate, so that what is reinforced is the member's own progress, not the common difficulty of a source.
 
-The taste-shaped reward is applied to members that training has already shaped, by cloning members at step 45 into the three variants (own direction, neutral, toward the base model), so that the three start from identical weights.
+These are applied to members that training has already shaped, by cloning members at step 45 into the variants of a mechanism, so that the variants start from identical weights.
+
+The first check of the taste-shaped reward showed what its score favours among correct answers to one problem: the shorter answer, because a member's deviation is diluted over a long one, and a particular phrasing, with the method unchanged. It is therefore expected to amplify presentation and brevity; the pilot measures whether it does anything more. Consolidating one's own frontier does not have this weakness, because it never looks at how an answer is written.
 
 ## Measurements
 
@@ -47,6 +50,7 @@ A mechanism is worth a population run if it raises deviation and distinctness ab
 ## Pilots
 
 - **Pilot D** (running): eight unseeded lineages on two GPUs — relative-only, weak exaggerated self-imitation, and self-chosen practice — to characterise the undirected mechanisms at low strength and to add unseeded baselines.
-- **Pilot E**: four members of pilot C at step 45, each cloned into the taste-shaped reward toward its own direction, the neutral rule, and the reversed sign, for 45 further steps.
+- **Pilot E** (running): two members of pilot C at step 45, each cloned into the taste-shaped reward toward its own direction, the neutral rule, and the reversed sign, for 45 further steps on one GPU.
+- **Pilot F**: members at step 45 cloned into consolidation of their own frontier, the matched control, and plain training.
 
 Everything runs on at most four GPUs.
