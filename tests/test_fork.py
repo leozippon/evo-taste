@@ -2,13 +2,16 @@
 
 import hashlib
 import shutil
+import types
 from pathlib import Path
 
 import pytest
 import yaml
 
 from evotaste import config, worker
+from evotaste.member import stream_version
 from evotaste.records import append_jsonl, read_json, read_jsonl, write_json, write_jsonl_gz
+from evotaste.tasks import STREAM_VERSION
 
 ROOT = Path(__file__).resolve().parents[1]
 STRATA_TEXT = b"uid\tpasses\tsamples\nmath_train/1\t3\t8\n"
@@ -28,6 +31,8 @@ def write_config(path: Path, data: dict) -> Path:
 
 
 class StubRun:  # the probe-set check needs the model's tokenizer and the task layer; covered elsewhere
+    probe_tasks = []
+
     def __init__(self, run_dir):
         self.dir = Path(run_dir)
         self.cfg = config.load(self.dir / "config.yaml")
@@ -90,6 +95,7 @@ def test_fork_reuses_completed_seeding_only(source, tmp_path):
     assert config.load(new / "config.yaml").strata.path == "runs/new/strata.tsv"
     fork = read_json(new / "prepared.json")["fork"]
     assert fork == {"source": "runs/src", "source_revision": "abc123", "members": ["a", "b"]}
+    assert stream_version(new) == STREAM_VERSION and stream_version(source) == 1  # a fork is a run prepared now
     for f in ("probe_responses.jsonl.gz", "probe_summary.json", "contexts/refute.jsonl.gz", "contexts/refute.json"):
         assert (new / "base" / f).read_bytes() == (source / "base" / f).read_bytes()
     for m in ("a", "b"):
@@ -159,4 +165,17 @@ def test_prepare_extends_a_run_by_appended_clones_only(source, tmp_path):
     assert [m.id for m in config.load(source / "config.yaml").members] == ["a", "b", "c", "d", "a-si"]
     (extension,) = read_json(source / "prepared.json")["extensions"]
     assert extension["members"] == ["a-si"] and read_json(source / "prepared.json")["revision"] == "abc123"
+    assert stream_version(source) == 1  # clones added later stay on the stream the run was prepared with
     assert {p: p.read_bytes() for p in sorted((source / "members").rglob("*")) if p.is_file()} == files
+
+
+def test_prepare_records_the_current_stream_version(source, tmp_path, monkeypatch):
+    monkeypatch.setattr(worker, "check_gold", lambda tasks: None)
+    monkeypatch.setattr(worker, "Sampler", lambda *args: types.SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(worker, "base_probe", lambda run, sampler, context=None: write_json(
+        worker.base_files(run.dir, context)[1], {}))
+    worker.prepare(write_config(tmp_path / "fresh.yaml", base_config("fresh")), attach="http://unused")
+    assert read_json(Path("runs/fresh/prepared.json"))["stream_version"] == STREAM_VERSION == 2
+    assert stream_version(Path("runs/fresh")) == 2 and stream_version(source) == 1  # source: prepared before
+    with pytest.raises(RuntimeError, match="not prepared"):
+        stream_version(tmp_path)

@@ -1,7 +1,10 @@
 """Tasks, instructions, scoring, the training stream and the seeding prompts (synthetic pools), probe sets."""
 
 import collections
+import hashlib
+import json
 import pathlib
+import random
 from fractions import Fraction
 
 import pytest
@@ -12,6 +15,7 @@ from evotaste.tasks import Streams, make_task, rewrap, score_many
 from evotaste.verify import HELDOUT_WRAPPERS, TRAIN_WRAPPERS
 
 SUITES = "configs/suites-r2.yaml"
+NOW = tasks.STREAM_VERSION  # the stream of a run prepared now
 
 
 def open_item(source="gsm8k_train", k=0, gold="18"):
@@ -163,18 +167,18 @@ def fake():
 
 
 def test_stream_is_deterministic_in_seed_and_step(fake):
-    a, b = Streams(fake, 7, strata=fake.strata), Streams(fake, 7, strata=fake.strata)
+    a, b = Streams(fake, 7, strata=fake.strata, version=NOW), Streams(fake, 7, strata=fake.strata, version=NOW)
     assert [t.question for t in a.train_batch(5, 64)] == [t.question for t in b.train_batch(5, 64)]
-    assert [t.uid for t in b.train_batch(5, 64)] == [t.uid for t in Streams(fake, 7, strata=fake.strata)
+    assert [t.uid for t in b.train_batch(5, 64)] == [t.uid for t in Streams(fake, 7, strata=fake.strata, version=NOW)
                                                       .train_batch(5, 64)]  # without computing steps 0-4 first
-    assert [t.uid for t in a.train_batch(5, 64)] != [t.uid for t in Streams(fake, 8, strata=fake.strata)
+    assert [t.uid for t in a.train_batch(5, 64)] != [t.uid for t in Streams(fake, 8, strata=fake.strata, version=NOW)
                                                       .train_batch(5, 64)]
     with pytest.raises(ValueError, match="strata"):
-        Streams(fake, 7).train_batch(0, 64)
+        Streams(fake, 7, version=NOW).train_batch(0, 64)
 
 
 def test_stream_obeys_the_mix(fake):
-    s, steps, n = Streams(fake, 3, strata=fake.strata), 30, 64
+    s, steps, n = Streams(fake, 3, strata=fake.strata, version=NOW), 30, 64
     batches = [s.train_batch(t, n) for t in range(steps)]
     assert all(len(b) == n for b in batches)
     cells = collections.Counter((t.family, t.stratum) for b in batches for t in b)
@@ -196,15 +200,77 @@ def test_stream_obeys_the_mix(fake):
 
 
 def test_stream_draws_without_replacement_until_a_pool_is_exhausted(fake):
-    s = Streams(fake, 11, strata=fake.strata)
+    s = Streams(fake, 11, strata=fake.strata, version=NOW)
     frontier = [t.uid for step in range(80) for t in s.train_batch(step, 64)
                 if t.family == "gsm8k_train" and t.stratum == "frontier"]
     assert len(frontier) > 60 and len(set(frontier[:60])) == 60 and len(set(frontier)) == 60
 
 
+def batches_digest(s, n, steps):
+    """SHA-256 of a stream's first `steps` batches of n prompts: every prompt's uid, wrapper and question."""
+    return hashlib.sha256(json.dumps([[(t.uid, t.wrapper, t.question) for t in s.train_batch(step, n)]
+                                      for step in range(steps)]).encode()).hexdigest()
+
+
+# Computed with the stream code before stream versions existed (commit 85c3417) on FakeSuites(standard), steps 0-59:
+# run seed 4 at 48 prompts (a count of -1 at steps 13, 32, 48 and 51) and run seed 0 at 32 prompts (many).
+BEFORE_VERSIONS = {(4, 48): "c6d410f5c40fd80c2c7d57723aef817ea8fb1b79dd80d34efc2987969c86f256",
+                   (0, 32): "e96163f8a0b2682058540507cfc8fc11003954c789c31003ddc1af4002d2e3a2"}
+
+
+def repeats_before_exhaustion(batches, mix) -> bool:
+    """Whether some pool gives an item twice in the batches before the one in which it is exhausted."""
+    size = {tuple(name.split("/")): len(pool) for name, pool in zip(mix.names, mix.pools)}
+    seen, exhausted = collections.defaultdict(list), set()
+    for b in batches:
+        drawn = collections.defaultdict(list)
+        for t in b:
+            drawn[(t.family, t.stratum)].append(t.uid)
+        for cell, uids in drawn.items():
+            if len(seen[cell]) + len(uids) > size[cell]:
+                exhausted.add(cell)
+            if cell not in exhausted:
+                seen[cell] += uids
+    return any(len(set(u)) < len(u) for u in seen.values())
+
+
+@pytest.mark.parametrize("seed, n", sorted(BEFORE_VERSIONS))
+def test_stream_version_1_is_the_stream_before_versions_and_version_2_never_overfills(fake, seed, n):
+    v1, v2 = (Streams(fake, seed, strata=fake.strata, version=v) for v in (1, 2))
+    assert batches_digest(v1, n, 60) == BEFORE_VERSIONS[(seed, n)]  # runs prepared before keep their batches
+    old, new = [v1.train_batch(t, n) for t in range(60)], [v2.train_batch(t, n) for t in range(60)]
+    overfull = [t for t, b in enumerate(old) if len(b) > n]
+    assert overfull and all(len(b) == n for b in new)
+    assert [[t.uid for t in b] for b in new[:overfull[0]]] == [[t.uid for t in b] for b in old[:overfull[0]]]
+    mix = v2._train_mix()
+    assert repeats_before_exhaustion(old, mix) and not repeats_before_exhaustion(new, mix)  # after a count of -1
+    counts = mix.counts(59, n)
+    assert min(min(h) for h in counts) >= 0
+    for c, w in enumerate(mix.weights):  # every pool still receives its share of the stream
+        assert all(abs(sum(h[c] for h in counts[:t + 1]) - w * n * (t + 1)) <= 2 for t in range(60))
+
+
+def test_a_nonnegative_split_never_gives_a_negative_count():
+    shares, carry = [Fraction(1, 20), Fraction(1, 20), Fraction(9, 10)], [Fraction(-9, 10), Fraction(-9, 10),
+                                                                          Fraction(9, 5)]
+    assert tasks._apportion(shares, 2, list(carry), random.Random(0), False) == [-1, -1, 4]  # quotas -.8, -.8, 3.6
+    assert tasks._apportion(shares, 2, carry, random.Random(0), True) == [0, 0, 2]  # rounded down where it can be
+    assert carry == [Fraction(-4, 5), Fraction(-4, 5), Fraction(8, 5)]
+    rng = random.Random(1)
+    for _ in range(50):  # random shares and batch sizes: counts >= 0 summing to n, bounded carries
+        raw = [rng.random() ** 3 for _ in range(rng.randint(2, 9))]
+        shares = [Fraction(x).limit_denominator(10**6) for x in raw]
+        shares = [s / sum(shares) for s in shares]
+        carry = [Fraction(0)] * len(shares)
+        for _ in range(40):
+            n = rng.randint(1, 30)
+            counts = tasks._apportion(shares, n, carry, rng, True)
+            assert min(counts) >= 0 and sum(counts) == n and all(-1 < c < 2 for c in carry) and sum(carry) == 0
+
+
 def test_short_pools_are_filled_from_sweet_and_held_out_items_refused():
     short = FakeSuites(lambda s: {"sweet": 200, "mastered": 10 if s == "arc" else 80, "frontier": 60})
-    s = Streams(short, 5, strata=short.strata)
+    s = Streams(short, 5, strata=short.strata, version=NOW)
     drawn = [t for step in range(20) for t in s.train_batch(step, 64)]
     assert not [t for t in drawn if t.family == "arc" and t.stratum == "mastered"]
     arc = collections.Counter(t.stratum for t in drawn if t.family == "arc")
@@ -214,10 +280,10 @@ def test_short_pools_are_filled_from_sweet_and_held_out_items_refused():
     bad = dict(short.strata)
     bad[short.held_out.uid] = "sweet"
     with pytest.raises(ValueError, match="outside the training part"):
-        Streams(short, 5, strata=bad).train_batch(0, 64)
+        Streams(short, 5, strata=bad, version=NOW).train_batch(0, 64)
     empty = FakeSuites(lambda s: {"sweet": 10, "mastered": 80, "frontier": 60})
     with pytest.raises(ValueError, match="sweet-spot"):
-        Streams(empty, 5, strata=empty.strata).train_batch(0, 64)
+        Streams(empty, 5, strata=empty.strata, version=NOW).train_batch(0, 64)
 
 
 def member_batches(s, shares, steps, n=48):
@@ -237,7 +303,7 @@ def skewed(s):
 
 
 def test_member_batch_follows_its_shares(fake):
-    s, steps, n = Streams(fake, 3, strata=fake.strata), 40, 48
+    s, steps, n = Streams(fake, 3, strata=fake.strata, version=NOW), 40, 48
     assert s.source_shares == pytest.approx({x: float(tasks.DOMAIN_MIX[sources.SOURCES[x].domain]) / sum(
         sources.SOURCES[y].domain == sources.SOURCES[x].domain for y in fake.train) for x in fake.train})
     shares = skewed(s)
@@ -266,14 +332,14 @@ def test_member_batch_follows_its_shares(fake):
 
 
 def test_member_batch_is_a_pure_function_of_step_shares_and_draws(fake):
-    s, shares = Streams(fake, 3, strata=fake.strata), skewed(Streams(fake, 3, strata=fake.strata))
+    s, shares = Streams(fake, 3, strata=fake.strata, version=NOW), skewed(Streams(fake, 3, strata=fake.strata, version=NOW))
     drawn = {"kodcode/sweet": 17, "arc/frontier": 3}
     first = s.member_batch(7, 48, shares, drawn)
-    again = Streams(fake, 3, strata=fake.strata).member_batch(7, 48, dict(shares), dict(drawn))  # another member
+    again = Streams(fake, 3, strata=fake.strata, version=NOW).member_batch(7, 48, dict(shares), dict(drawn))  # another member
     assert [(t.uid, t.question) for t in first] == [(t.uid, t.question) for t in again]
     assert [t.uid for t in s.member_batch(8, 48, shares, drawn)] != [t.uid for t in first]
     assert [t.uid for t in s.member_batch(7, 48, shares, {})] != [t.uid for t in first]  # continues its own walk
-    assert [t.uid for t in Streams(fake, 4, strata=fake.strata).member_batch(7, 48, shares, drawn)] != [
+    assert [t.uid for t in Streams(fake, 4, strata=fake.strata, version=NOW).member_batch(7, 48, shares, drawn)] != [
         t.uid for t in first]
     for bad, match in (({**shares, "kodcode": 0.5}, "summing to 1"), ({"kodcode": 1.0}, "every training source")):
         with pytest.raises(ValueError, match=match):
@@ -283,16 +349,16 @@ def test_member_batch_is_a_pure_function_of_step_shares_and_draws(fake):
 
 
 def test_member_batch_draws_without_replacement_until_a_pool_is_exhausted(fake):
-    s = Streams(fake, 11, strata=fake.strata)
+    s = Streams(fake, 11, strata=fake.strata, version=NOW)
     frontier = [t.uid for b in member_batches(s, skewed(s), 60) for t in b
                 if t.family == "gsm8k_train" and t.stratum == "frontier"]  # about 1.44 per step from a pool of 60
     assert len(frontier) > 60 and len(set(frontier[:60])) == 60 and len(set(frontier)) == 60
 
 
 def test_seed_batches(fake):
-    s = Streams(fake, 9)  # seeding needs no strata
+    s = Streams(fake, 9, version=NOW)  # seeding needs no strata
     a = s.seed_batch(3, 64)
-    assert [t.uid for t in a] == [t.uid for t in Streams(fake, 9).seed_batch(3, 64)]
+    assert [t.uid for t in a] == [t.uid for t in Streams(fake, 9, version=NOW).seed_batch(3, 64)]
     assert all(t.wrapper == tasks.default_wrapper(t.kind) for t in a)
     assert abs(collections.Counter(t.domain for t in a)["code"] - 16) <= 1
     math_only = s.seed_batch(0, 64, ("math",))

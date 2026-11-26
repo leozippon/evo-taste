@@ -11,7 +11,7 @@ from evotaste import evaluate, worker
 from evotaste import member as member_module
 from evotaste.member import PRACTICE_START, Member, load_lineage, practice_shares
 from evotaste.records import read_json, read_jsonl, read_jsonl_gz
-from evotaste.tasks import Streams, stable_seed, train_cell
+from evotaste.tasks import STREAM_VERSION, Streams, stable_seed, train_cell
 from evotaste.trainer import MemberWeights, Sequence
 from tests import engine_fakes
 from tests.conftest import make_policy
@@ -37,7 +37,7 @@ SUITES = FakeSuites(standard)
 
 def make_run(run_dir, base_model, prepared=False):
     run = engine_fakes.FakeRun(run_dir)
-    run.streams = Streams(SUITES, run.cfg.seed, strata=SUITES.strata)  # the real stream, synthetic pools
+    run.streams = Streams(SUITES, run.cfg.seed, strata=SUITES.strata, version=STREAM_VERSION)  # the real stream
     run.policy = make_policy(base_model)
     run.sampler = engine_fakes.FakeSampler(run.policy, run_dir.parent)
     if not prepared:
@@ -83,10 +83,10 @@ def test_imitation_terms_use_successes_within_the_free_length(finished):
 
 def test_members_without_practice_or_with_eta_zero_see_the_shared_prompts(finished):
     reqs = {r.seed: r for r in finished.sampler.requests}
-    for t in range(4):  # (the shared stream's batch can hold one prompt more than asked: a known defect of _Mix)
+    for t in range(4):
         shared = [finished.prompt(task.question) for task in finished.streams.train_batch(t, 12)]
         for seed in (1, 2):
-            assert [reqs[stable_seed("rollout", seed, t, j)].prompt for j in range(len(shared))] == shared
+            assert [reqs[stable_seed("rollout", seed, t, j)].prompt for j in range(12)] == shared
         assert [r["uid"] for r in rollouts(finished, "zero", t)][::3] == [
             task.uid for task in finished.streams.train_batch(t, 12)]
     zero = history(finished, "zero")

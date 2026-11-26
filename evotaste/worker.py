@@ -29,10 +29,10 @@ import yaml
 
 from evotaste import config
 from evotaste.member import (Member, Run, current_lineage, first_lineage, lineage_dir, probe_requests,
-                             response_records, summarize_probe)
+                             response_records, stream_version, summarize_probe)
 from evotaste.records import atomic_write, now, read_json, read_jsonl, write_json, write_jsonl_gz
 from evotaste.sampler import Sampler, Server
-from evotaste.tasks import check_gold
+from evotaste.tasks import STREAM_VERSION, check_gold
 from evotaste.trainer import Policy, gpu_processes
 
 log = logging.getLogger("evotaste.worker")
@@ -253,8 +253,14 @@ def prepare(config_path: Path, attach: str | None, server: dict | None = None) -
                 server.stop()
     run.check_probe_set()
     if not (run.dir / "prepared.json").exists():  # a prepared run keeps its record (fork, extensions)
-        write_json(run.dir / "prepared.json", {"time": now(), "revision": revision(), "contexts": sorted(run.contexts)})
-    log.info("run %s prepared", run.dir)
+        write_json(run.dir / "prepared.json", prepared_record(run))
+    log.info("run %s prepared (stream version %d)", run.dir, stream_version(run.dir))
+
+
+def prepared_record(run: Run, **extra) -> dict:
+    """prepared.json of a run prepared (or forked) now: it gets the current training-stream version for good."""
+    return {"time": now(), "revision": revision(), "contexts": sorted(run.contexts), "stream_version": STREAM_VERSION,
+            **extra}
 
 
 # -- fork ----------------------------------------------------------------------------------------------------------
@@ -347,9 +353,8 @@ def fork(src: Path, config_path: Path, dry_run: bool) -> None:
         lin.status = "active" if run.cfg.settings(run.cfg.member(slot))[1].steps > 0 else "done"
         lin.probes = [probe0]
         write_json(d / "state.json", dataclasses.asdict(lin))
-    write_json(run.dir / "prepared.json", {"time": now(), "revision": revision(), "contexts": sorted(run.contexts),
-                                           "fork": {"source": str(src), "source_revision": plan["source_revision"],
-                                                    "members": reuse}})
+    write_json(run.dir / "prepared.json", prepared_record(run, fork={
+        "source": str(src), "source_revision": plan["source_revision"], "members": reuse}))
     log.info("run %s forked from %s; %d members start at amplification step 0", run.dir, src, len(reuse))
 
 
@@ -494,8 +499,8 @@ def run_worker(run_dir: Path, slots: list[str], attach: str | None, checkpoint_e
         raise SystemExit(f"{run.dir} is not prepared; run `python -m evotaste.worker prepare` first")
     run.check_probe_set()
     locks = lock_slots(run, slots)
-    log.info("worker pid %d, GPU %s, members %s, revision %s", os.getpid(),
-             os.environ.get("CUDA_VISIBLE_DEVICES"), slots, revision())
+    log.info("worker pid %d, GPU %s, members %s, revision %s, stream version %d", os.getpid(),
+             os.environ.get("CUDA_VISIBLE_DEVICES"), slots, revision(), stream_version(run.dir))
     log_uncommitted_changes(run.cfg.name)
     server, url = start_server(run, attach, "worker-" + "-".join(slots))
     try:

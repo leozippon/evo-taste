@@ -24,7 +24,8 @@ from evotaste import config
 from evotaste.records import (append_jsonl, filter_jsonl, now, read_json, read_jsonl, read_jsonl_gz, write_json,
                               write_jsonl_gz)
 from evotaste.sampler import Request, Sample
-from evotaste.tasks import Streams, Suites, Task, load_strata, prompt_ids, score_many, stable_seed, train_cell
+from evotaste.tasks import (Streams, Suites, Task, load_strata, probe_set, prompt_ids, score_many, stable_seed,
+                            train_cell)
 from evotaste.trainer import MemberWeights, Sequence, advantages, gpu_processes, length_returns, load_optimizer
 
 log = logging.getLogger(__name__)
@@ -114,6 +115,15 @@ class ConsistencyError(RuntimeError):
     """The trainer does not reproduce the sampler's log-probabilities: wrong or stale adapter, or a prompt mismatch."""
 
 
+def stream_version(run_dir: Path) -> int:
+    """The training-stream version a run was prepared with (prepared.json `stream_version`); a run prepared before
+    versions were recorded has version 1. A run that is not prepared has no stream yet."""
+    path = Path(run_dir) / "prepared.json"
+    if not path.exists():
+        raise RuntimeError(f"{run_dir} is not prepared: its stream version is recorded by `worker prepare`")
+    return read_json(path).get("stream_version", 1)
+
+
 class Run:
     """Shared context of one run directory. The worker attaches `policy` and `sampler`."""
 
@@ -132,11 +142,11 @@ class Run:
     @cached_property
     def streams(self) -> Streams:
         strata = self.cfg.strata and load_strata(self.cfg.strata.path, self.cfg.strata.sha256)
-        return Streams(self.suites, self.cfg.seed, strata=strata)
+        return Streams(self.suites, self.cfg.seed, strata=strata, version=stream_version(self.dir))
 
     @cached_property
     def probe_tasks(self) -> list[Task]:
-        return list(self.streams.probe_tasks)
+        return probe_set(self.suites)  # needs no stream: prepare and fork check it before prepared.json exists
 
     def _prompt(self, question: str, context: str | None = None) -> list[int]:
         """The member's prompt (no context), or the teacher's prompt carrying the named context."""

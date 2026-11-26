@@ -607,14 +607,35 @@ def _systematic(quotas: list[float], n: int, u: float) -> list[int]:
     return [b - a for a, b in zip(edges, edges[1:] + [n])]
 
 
-def _apportion(shares: list[Fraction], n: int, carry: list[Fraction], rng: random.Random) -> list[int]:
+# Version of the batch arithmetic of `_Mix`, recorded at prepare time (prepared.json `stream_version`; a run prepared
+# before versions were recorded has version 1). 1: a cell can receive a count of -1 (see `_apportion`), which makes a
+# batch one prompt longer than asked and repeats an item of that pool later (pilot C's stream at 48 prompts: steps 13
+# and 32). 2: counts are never negative; identical to version 1 wherever version 1 has no negative count.
+STREAM_VERSION = 2
+STREAM_VERSIONS = (1, 2)
+
+
+def _apportion(shares: list[Fraction], n: int, carry: list[Fraction], rng: random.Random,
+               nonnegative: bool) -> list[int]:
     """n split by shares (summing to 1) with the carried remainders of earlier calls: largest remainder, ties in a
-    seeded order. Updates `carry`, so that cumulative counts stay within one of their shares."""
+    seeded order. Updates `carry`, so that cumulative counts stay within about one of their shares.
+
+    A cell that was rounded up carries a negative remainder; when its next quota (share x n plus that remainder) is
+    negative, its floor is -1. Without `nonnegative` (stream version 1) the cell keeps a count of -1. With it (version
+    2) the cell gets 0 and carries its whole negative quota, and the total is restored on the other cells: fewer of
+    them are rounded up, or, if the negative quotas outweigh all remainders, those with the smallest remainders are
+    rounded down. The random tie-breakers are drawn identically, so both rules agree wherever no floor is negative."""
     quota = [s * n + c for s, c in zip(shares, carry)]
     base = [math.floor(q) for q in quota]
+    if nonnegative:
+        base = [max(b, 0) for b in base]
     ties = [rng.random() for _ in quota]
-    for c in sorted(range(len(quota)), key=lambda c: (-(quota[c] - base[c]), ties[c]))[:n - sum(base)]:
+    short = n - sum(base)  # >= 0 without `nonnegative`, since the carries sum to 0
+    for c in sorted(range(len(quota)), key=lambda c: (-(quota[c] - base[c]), ties[c]))[:max(short, 0)]:
         base[c] += 1
+    for _ in range(-short):
+        c = min((c for c in range(len(base)) if base[c] > 0), key=lambda c: (quota[c] - base[c], -ties[c]))
+        base[c] -= 1
     carry[:] = [q - b for q, b in zip(quota, base)]
     return base
 
@@ -623,9 +644,13 @@ class _Mix:
     """Batches drawn from weighted pools in groups (domains). Each batch is split first among the groups, then within
     each group among its cells, both by `_apportion`: every batch follows the group shares to within one prompt, and
     over the first t batches a cell receives its share of them to within two. Each pool is walked in a seeded
-    permutation, without replacement until it is exhausted, then in a new permutation."""
+    permutation, without replacement until it is exhausted, then in a new permutation. `version` is the run's stream
+    version (STREAM_VERSION)."""
 
-    def __init__(self, key: str, cells: list[tuple[str, str, Fraction, list[Task]]]):
+    def __init__(self, key: str, cells: list[tuple[str, str, Fraction, list[Task]]], version: int):
+        if version not in STREAM_VERSIONS:
+            raise ValueError(f"unknown stream version {version!r} (known: {STREAM_VERSIONS})")
+        self.version = version
         total = sum(w for _, _, w, _ in cells)
         self.key = key
         self.names = [c for c, _, _, _ in cells]
@@ -647,12 +672,14 @@ class _Mix:
             n, ([], [Fraction(0)] * len(self.groups), [Fraction(0)] * len(self.weights)))
         while len(hist) <= batch:
             rng = random.Random(stable_seed(self.key, "ties", n, len(hist)))
-            per_group = _apportion(self.group_weights, n, group_carry, rng)
+            nonnegative = self.version >= 2
+            per_group = _apportion(self.group_weights, n, group_carry, rng, nonnegative)
             counts = [0] * len(self.weights)
             for k, m in enumerate(per_group):
                 members = [c for c, g in enumerate(self.group_of) if g == k]
                 sub_carry = [carry[c] for c in members]
-                split = _apportion([self.weights[c] / self.group_weights[k] for c in members], m, sub_carry, rng)
+                split = _apportion([self.weights[c] / self.group_weights[k] for c in members], m, sub_carry, rng,
+                                   nonnegative)
                 for c, x, cc in zip(members, split, sub_carry):
                     counts[c], carry[c] = x, cc
             hist.append(counts)
@@ -675,12 +702,15 @@ class _Mix:
 
 class Streams:
     """Training stream, seeding prompts and probe set of one run. The stream needs the census strata (uid ->
-    stratum, `load_strata`); probes and seeding prompts do not."""
+    stratum, `load_strata`); probes and seeding prompts do not. `version` is the stream version the run was prepared
+    with (STREAM_VERSION), which a run keeps for its whole life, clones added later included."""
 
-    def __init__(self, suites: Suites, run_seed: int, *, strata: dict[str, str] | None = None):
+    def __init__(self, suites: Suites, run_seed: int, *, strata: dict[str, str] | None = None, version: int):
         from evotaste import sources
 
-        self.suites, self.run_seed, self.strata = suites, run_seed, strata
+        if version not in STREAM_VERSIONS:
+            raise ValueError(f"unknown stream version {version!r} (known: {STREAM_VERSIONS})")
+        self.suites, self.run_seed, self.strata, self.version = suites, run_seed, strata, version
         self.domain = {s: sources.SOURCES[s].domain for s in suites.train}
         self._train: _Mix | None = None
         self._seed: dict[tuple, _Mix] = {}
@@ -715,7 +745,7 @@ class Streams:
                                      "its mix")
                 cells += [(f"{s}/{st}", domain, share / len(srcs) * w,
                            [dataclasses.replace(t, stratum=st) for t in pools[st]]) for st, w in weights.items()]
-        self._train = _Mix(f"train/{self.run_seed}", cells)
+        self._train = _Mix(f"train/{self.run_seed}", cells, self.version)
         return self._train
 
     @functools.cached_property
@@ -792,7 +822,7 @@ class Streams:
             for domain in domains:
                 srcs = [s for s in self.suites.train if self.domain[s] == domain]
                 cells += [(s, domain, DOMAIN_MIX[domain] / len(srcs), self.suites.items(s, "train")) for s in srcs]
-            mix = self._seed[domains] = _Mix(f"seed/{self.run_seed}/{','.join(domains)}", cells)
+            mix = self._seed[domains] = _Mix(f"seed/{self.run_seed}/{','.join(domains)}", cells, self.version)
         drawn = [t for _, t in mix.batch(i, n)]
         random.Random(stable_seed(mix.key, "order", n, i)).shuffle(drawn)
         return drawn

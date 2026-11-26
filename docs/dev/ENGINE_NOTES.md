@@ -34,7 +34,7 @@ Every command writes whatever ends it to its own log before it exits: the traceb
 
 ## Run configuration
 
-A run config is YAML; unknown keys, missing required keys and wrongly typed values are errors. `prepare` freezes it into `runs/<name>/config.yaml`, with `suites`, `contexts` and `strata.path` pointing at copies placed next to it, and every later command reads only that copy. `configs/run/pilot-template.yaml` writes out the pilot defaults and shows every way a member can start; `configs/run/pilot-d.yaml` sets the amplification mechanisms per member; `configs/run/toy.yaml` is a small end-to-end run.
+A run config is YAML; unknown keys, missing required keys and wrongly typed values are errors. `prepare` freezes it into `runs/<name>/config.yaml`, with `suites`, `contexts` and `strata.path` pointing at copies placed next to it, and every later command reads only that copy. It also records in `prepared.json` the version of the training stream's batch arithmetic (`stream_version`, described in `docs/dev/ENV_NOTES.md`), which the run keeps for good, clones added later included: version 2 for runs prepared or forked since 26 November, version 1 for those prepared before, whose `prepared.json` has no such key (pilots B, C and D). `configs/run/pilot-template.yaml` writes out the pilot defaults and shows every way a member can start; `configs/run/pilot-d.yaml` sets the amplification mechanisms per member; `configs/run/toy.yaml` is a small end-to-end run.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -158,8 +158,8 @@ Each selection of items and contexts has its own directory `runs/<name>/context_
 ```
 runs/<name>/
   config.yaml, suites.yaml, contexts.yaml, strata.tsv   frozen at prepare time (strata only when configured)
-  prepared.json                              {time, revision, contexts, fork?: {source, source_revision, members},
-                                             extensions?: [{time, revision, members}]}
+  prepared.json                              {time, revision, contexts, stream_version (absent: 1),
+                                             fork?: {source, source_revision, members}, extensions?: [{time, revision, members}]}
   base/probe_responses.jsonl.gz, probe_summary.json     the base model's plain probe answers
   base/contexts/<context>.jsonl.gz, <context>.json      its probe answers under each context (summary written last)
   members/<lineage>/
@@ -238,7 +238,7 @@ The amplification mechanisms were measured on 2026-11-26 with one unseeded membe
 - Seeding has no checkpoints; an interrupted seeding restarts from scratch.
 - A clone needs its parent's first lineage to reach the clone point; with culling enabled a parent culled earlier stops the clone's worker. A clone point chosen after the parent has passed it is possible only for steps listed in `clonable_steps`.
 - Shared-prefix rows are padded to the longest row of their micro-batch.
-- The shared training stream (the task layer's) can hold one prompt more than asked: its carried remainders let a pool whose expected count per batch is below one prompt reach a count of −1, which another pool's extra prompt balances, and the pool's next draw then repeats an item. At 48 prompts on pilot C's pools this happens at steps 13 and 32 of the first 45 (pilot C's history shows 49 prompts there), so pilot D's relative-only and exaggeration arms see the same 49-prompt steps as pilot C; practice batches never do. It is left unchanged because pilot C's stopped clones resume on this stream.
+- Runs on stream version 1 (pilots B, C and D and every clone added to them) keep its defect: at 48 prompts on pilot C's pools the shared batches of steps 13 and 32 hold 49 prompts and a pool repeats an item afterwards (none between steps 33 and 100); practice batches never do. Checked on the recorded rollouts: the version-1 stream of the current code reproduces every batch that pilot C's members and clones (steps 0–89) and pilot D's members trained on.
 - Practice follows a member's absolute reward per source, which includes how hard each source is for the base model, so part of every practising member's shares is common to all of them. In pilot C's first 15 steps the unseeded members' training rewards per source ranged from 0.35–0.38 (MATH) to 0.52–0.57 (ProofWriter), largely in the same order for every member; at eta 4 that alone moves shares by factors of about 0.6–1.5.
 - The exaggeration term costs one forward pass of the base model, without gradient, over every micro-batch that holds an eligible rollout.
 - The exaggeration term does not saturate: its gradient grows with the deviation it helps to produce, so at any fixed weight it comes to dominate the update once the member has moved far enough from the base model; the weight only sets when (Measured costs).
