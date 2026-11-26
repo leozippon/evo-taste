@@ -1,0 +1,38 @@
+# Add-on to pilot C: the two seeds of pilot B made by imitation of the teacher's correct answers (Round 1's method),
+# under the same two update rules and settings as configs/run/pilot-c.yaml. Imitation absorbed the `verify` tactic
+# about three times more completely than on-policy distillation did, so this gives the wash-out comparison one
+# strongly absorbed tactic next to a stance seeded the same way. Forked from runs/pilot-b.
+name: pilot-c-imit
+model: Qwen/Qwen3-1.7B
+seed: 2026
+contexts: configs/contexts.yaml
+strata: {path: results/census/census-r2/strata.tsv, sha256: "1291ab8ea23b92030d178bfa844cc6125308a4bd9a0b6b20b46c884b1844b31c"}
+lora: {rank: 32, alpha: 64}
+seeding:
+  method: opcd
+  steps: 40
+  batch: 64
+  lr: 1.0e-4
+  max_tokens: 4096
+amplification:
+  steps: 45
+  prompts: 48
+  rollouts: 4
+  max_tokens: 4096
+  lr: 1.0e-4
+  length: {free: 2048, slope: 0.25}
+  advantage: centered
+  self_imitation: 0.0
+probes:
+  every: 15
+  max_tokens: 4096
+culling:
+  enabled: false
+clonable_steps: [45]
+members:
+  - {id: refute-imitation, context: refute, seed: 242, overrides: {seeding: {method: imitation}, amplification: {steps: 0}}}
+  - {id: verify-imitation, context: verify, seed: 247, overrides: {seeding: {method: imitation}, amplification: {steps: 0}}}
+  - {id: refute-imitation-adv, parent: {member: refute-imitation, step: 0}, seed: 321, overrides: {amplification: {steps: 45}}}
+  - {id: refute-imitation-si, parent: {member: refute-imitation, step: 0}, seed: 421, overrides: {amplification: {steps: 45, self_imitation: 0.5}}}
+  - {id: verify-imitation-adv, parent: {member: verify-imitation, step: 0}, seed: 322, overrides: {amplification: {steps: 45}}}
+  - {id: verify-imitation-si, parent: {member: verify-imitation, step: 0}, seed: 422, overrides: {amplification: {steps: 45, self_imitation: 0.5}}}
