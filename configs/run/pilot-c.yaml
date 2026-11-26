@@ -104,3 +104,7 @@ members:
   - {id: verify-si-c2, parent: {member: verify-si, step: 45}, seed: 528, overrides: {amplification: {steps: 90}}}
   - {id: direct-adv-c1, parent: {member: direct-adv, step: 45}, seed: 529, overrides: {amplification: {steps: 90}}}
   - {id: direct-adv-c2, parent: {member: direct-adv, step: 45}, seed: 530, overrides: {amplification: {steps: 90}}}
+  - {id: placebo-adv-c1, parent: {member: placebo-adv, step: 45}, seed: 531, overrides: {amplification: {steps: 90}}}
+  - {id: placebo-adv-c2, parent: {member: placebo-adv, step: 45}, seed: 532, overrides: {amplification: {steps: 90}}}
+  - {id: unseeded-adv-c1, parent: {member: unseeded-adv, step: 45}, seed: 533, overrides: {amplification: {steps: 90}}}
+  - {id: unseeded-adv-c2, parent: {member: unseeded-adv, step: 45}, seed: 534, overrides: {amplification: {steps: 90}}}
