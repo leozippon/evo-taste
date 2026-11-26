@@ -41,6 +41,31 @@ Four packages were built in parallel (verifiers and sandbox; sources, suites and
 - The account's processes share a CPU quota that other jobs of the same account keep saturated. Sandboxed verification is CPU-bound (about 0.3 s per code item), so sandboxes are now reused across jobs and limits are in CPU time.
 - An update on 4,096-token rollouts costs about 2.5k tokens per second of trainer time, and with sweet-spot items most rollouts carry gradient. Pilot steps are sized at 48 problems × 4 attempts.
 
+## Census (pilot A)
+
+The base model attempted 27,612 training items eight times each and the censused selection items four times, under the final instructions and verifiers.
+
+- **Pass rates** on training sources: GSM8K 0.86, ARC 0.84, AQuA 0.75, MATH 0.71, ProofWriter 0.69, KodCode 0.65, LogiQA 0.56, MMLU-Pro 0.45, DeepScaleR 0.32; 0.64 overall. On selection units the range is wider, from 0.12 (the Omni-MATH remainder) to 0.92.
+- **Format compliance of the base model is 99.6%** on training items and 97.7% on selection items. This is the level members must not lose.
+- **Length.** Median 346 tokens, 99th percentile about 3,200; 0.35% cut off at 4,096. DeepScaleR is the long one (median 1,131, a tenth above 2,750, 2.1% cut off), so the slope from 2,048 will bear on hard math and on little else.
+- **Contexts move the base model's accuracy little**: 0.44 to 0.54 across the twelve contexts on the same items, with the two most mechanical tactics lowest (`direct` 0.44, `define` 0.47) and three stances highest (`parsimony`, `observe`, `refute`, 0.53 to 0.54). A seeded bias is therefore close to reward-neutral at the start.
+- The strata table is pinned in run configs by its hash.
+- Operationally: the census took about five hours instead of two because every card was shared, and it exposed one more verifier gap. Answers such as a tower of powers made a comparison run forever; these were "undecided" and stopped the run. A comparison now has a CPU budget of 10 s, after which the answer is decided as not verified. One seeding worker that still ran the old code crashed on this at a probe and re-seeded one member.
+
+## Seeding (pilot B), all-domain seeds
+
+Twelve contexts were each distilled into a member in 40 updates of 64 of the member's own answers; a thirteenth member is unseeded. The 22 math-only and imitation seeds were still running at the end of the day.
+
+- **Stances are absorbed far more completely than tactics.** On the scale where 0 is the base model and 1 the teacher's own instructed answers, with the drift shared by all contexts removed, the five stances reach 0.25 to 0.34 (mean 0.30) and the six tactics −0.07 to 0.21 (mean 0.07). Two tactics, `map` and `procedure`, are not absorbed at all.
+- **This is partly a matter of distance.** The tactic contexts change the teacher's behaviour two to five times more than the stances do (distillation divergence 0.03 to 0.07 nats per token at the start, against 0.012 to 0.018), so a member covers a smaller share of a longer way. The absolute amounts are being computed.
+- **Stances show up in every domain** at similar strength (for `refute`: code 0.39, logic 0.32, math 0.33); tactics are uneven, and four of the six are negative on math.
+- **No recitation.** Blacklisted terms appear in 0.3 to 0.8% of responses, the same as for the unseeded member.
+- Accuracy after seeding cannot be read from the single-sample probes; it will come from the evaluation at the end of pilot C.
+
+## Amplification (pilot C), started
+
+Each of the twelve seeds and two unseeded controls was cloned at step 0 into both update rules: 28 members, 45 steps of 48 problems × 4 attempts. In the first steps the training reward is 0.41 to 0.45 and 23 to 29 of 48 problems per step have attempts with different rewards, against 16 to 28 of 128 in Round 1.
+
 ## In progress
 
-- The full census and the seeding pilot, on the final instructions and the regenerated suites.
+- Pilot C to step 45, then evaluation, context scores, and the choice of members to clone for the heritability test. The math-only seeds of pilot B.
