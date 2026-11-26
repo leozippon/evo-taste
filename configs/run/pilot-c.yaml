@@ -93,3 +93,14 @@ members:
   - {id: procedure-adv-c2, parent: {member: procedure-adv, step: 45}, seed: 512, overrides: {amplification: {steps: 90}}}
   - {id: unseeded-b-si-c1, parent: {member: unseeded-b-si, step: 45}, seed: 513, overrides: {amplification: {steps: 90}}}
   - {id: unseeded-b-si-c2, parent: {member: unseeded-b-si, step: 45}, seed: 514, overrides: {amplification: {steps: 90}}}
+  # Second batch (26 November, 02:30):
+  - {id: placebo-si-c1, parent: {member: placebo-si, step: 45}, seed: 521, overrides: {amplification: {steps: 90}}}
+  - {id: placebo-si-c2, parent: {member: placebo-si, step: 45}, seed: 522, overrides: {amplification: {steps: 90}}}
+  - {id: refute-adv-c1, parent: {member: refute-adv, step: 45}, seed: 523, overrides: {amplification: {steps: 90}}}
+  - {id: refute-adv-c2, parent: {member: refute-adv, step: 45}, seed: 524, overrides: {amplification: {steps: 90}}}
+  - {id: parsimony-si-c1, parent: {member: parsimony-si, step: 45}, seed: 525, overrides: {amplification: {steps: 90}}}
+  - {id: parsimony-si-c2, parent: {member: parsimony-si, step: 45}, seed: 526, overrides: {amplification: {steps: 90}}}
+  - {id: verify-si-c1, parent: {member: verify-si, step: 45}, seed: 527, overrides: {amplification: {steps: 90}}}
+  - {id: verify-si-c2, parent: {member: verify-si, step: 45}, seed: 528, overrides: {amplification: {steps: 90}}}
+  - {id: direct-adv-c1, parent: {member: direct-adv, step: 45}, seed: 529, overrides: {amplification: {steps: 90}}}
+  - {id: direct-adv-c2, parent: {member: direct-adv, step: 45}, seed: 530, overrides: {amplification: {steps: 90}}}
