@@ -114,6 +114,7 @@ For the planned pilot C (14 seeds under two rules, 2,000 to 4,000 selection item
 - The adjusted interaction and distance use classes formed from the data: exactly unbiased under identical members, a few percent low otherwise. The domain and source profiles are not adjusted for level, so a member better in logits everywhere shows some profile where domains differ in difficulty.
 - Interaction and distance intervals are conditional on the evaluated members. With three to six families, intervals that resample families are not reliable; read the permutation p-value and the power section.
 - The specific index and identification are defined over the contexts the selection scores. A selection of only the member's own context and the placebo, which the engine notes suggest for speed, reduces the raw contrast to I_c − I_placebo and leaves identification undefined (the command skips it); the washout as specified needs every context, on fewer items if need be.
+- The engine writes a selection's `responses.csv` only when a context-score command finishes, so a selection still being scored cannot be read; its per-subject cache files hold the same rows, but they are the engine's internal format and are not read here.
 - Probes are single samples: they serve means (health, washout), never distances or interactions.
 - Authorship reads a subsample, and its stripping is lexical.
 - The real-data null needs four samples per item, because two labels of one adapter give identical answers.
