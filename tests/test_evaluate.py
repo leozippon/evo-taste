@@ -1,10 +1,11 @@
-"""Evaluation summaries: one adapter per label, and the full (family, instance, sample) grid, or no summary."""
+"""Evaluation summaries: one adapter per label, and the full (family, instance, sample) grid, or no summary; the layout
+tokens of the deviation tables."""
 
 from types import SimpleNamespace
 
 import pytest
 
-from evotaste.evaluate import IncompleteEvaluation, eval_params, same_params, summarize
+from evotaste.evaluate import IncompleteEvaluation, eval_params, layout_mask, same_params, summarize
 
 
 def Task(uid, family, kind):  # the fields summarize reads
@@ -53,6 +54,20 @@ def test_external_sources_can_have_more_items_than_families():
     assert summarize(full, tasks, 1)["m0"]["n_by_family"] == {"fam": 3, "gsm8k_train": 5}
     with pytest.raises(IncompleteEvaluation, match="m0: 7 of 8"):
         summarize(full[:-1], tasks, 1)
+
+
+def test_layout_tokens_of_the_real_tokenizer():
+    """Layout tokens have no letter or digit in their text: whitespace, punctuation, markup, the end-of-turn token."""
+    from transformers import AutoTokenizer
+
+    tok = AutoTokenizer.from_pretrained("Qwen/Qwen3-1.7B")
+    mask = layout_mask(tok)
+    assert len(mask) == len(tok) and 0.03 < float(mask.float().mean()) < 0.15
+    for text, layout in (("\n\n", True), ("**", True), (" ", True), ("##", True), ("```", True), (".\n", True),
+                         (" $$", True), (" the", False), ("2", False), ("x", False), (" Step", False)):
+        ids = tok.encode(text, add_special_tokens=False)
+        assert len(ids) == 1 and bool(mask[ids[0]]) == layout, text
+    assert mask[tok.convert_tokens_to_ids("<|im_end|>")]
 
 
 def test_per_source_params_and_tag():

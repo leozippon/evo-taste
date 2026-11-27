@@ -139,6 +139,49 @@ def test_self_imitation_loss_is_the_sum_of_both_normalised_terms(base_model, mon
     assert max(g.abs().max() for g in ref.values()) > 1e-4
 
 
+def _stored(seqs):
+    """Two stored answers for replay imitation, one behind a prompt of the batch and one behind another prompt."""
+    return [Sequence(seqs[0].prompt, [3, 4, 5, 6], 0.0, replay=True),
+            Sequence([9, 8, 7, 6, 5], [1, 2], 0.0, replay=True)]
+
+
+@pytest.mark.parametrize("shared_prefix", [True, False])
+def test_replay_is_its_own_normalised_term(base_model, monkeypatch, shared_prefix):
+    policy = make_policy(base_model, shared_prefix=shared_prefix, token_budget=40)
+    member = policy.new_member(seed=7, b_std=0.1)
+    seqs, weight = _flagged(seed=3), 0.7
+    stored, adv = _stored(seqs), [s for s in seqs if s.weight != 0.0]
+
+    def loss_fn(lp):
+        a = -sum(s.weight * lp(s) for s in adv) / sum(len(s.completion) for s in adv)
+        return a - weight * sum(lp(s) for s in stored) / sum(len(s.completion) for s in stored)
+    ref_loss, ref = _reference_grads(policy, member, loss_fn)
+    stats, ours = _engine_grads(policy, member, monkeypatch,
+                                lambda: policy.update(member, seqs + stored, 1e-3, replay=weight))
+    assert stats["loss"] == pytest.approx(ref_loss, abs=1e-5) and stats["rp_loss"] > 0
+    assert (stats["rp_sequences"], stats["rp_tokens"], stats["si_sequences"]) == (2, 6, 0)
+    assert stats["sequences"] == len(adv) + 2
+    for name in ref:
+        torch.testing.assert_close(ours[name], ref[name], rtol=1e-4, atol=1e-6)
+
+
+def test_replay_zero_is_the_update_without_stored_answers(base_model):
+    policy = make_policy(base_model, token_budget=40)
+    start = policy.new_member(seed=6, b_std=0.05)
+    policy.update(start, random_groups(seed=1), lr=1e-3)  # with optimizer state
+    seqs = _flagged(seed=2)
+    a, b = copy.deepcopy(start), copy.deepcopy(start)
+    stats_a = policy.update(a, seqs + _stored(seqs), lr=1e-3, replay=0.0)
+    stats_b = policy.update(b, seqs, lr=1e-3)
+    assert {k: v for k, v in stats_a.items() if k != "update_s"} == {k: v for k, v in stats_b.items()
+                                                                     if k != "update_s"}
+    assert "rp_loss" not in stats_a and all(torch.equal(a.lora[n], b.lora[n]) for n in a.lora)
+    for (_, x), (_, y) in zip(sorted(a.optimizer["state"].items()), sorted(b.optimizer["state"].items())):
+        assert torch.equal(x["exp_avg"], y["exp_avg"]) and torch.equal(x["exp_avg_sq"], y["exp_avg_sq"])
+    with pytest.raises(ValueError, match="replay term only"):  # a stored answer is never a weighted rollout
+        policy.update(a, [Sequence([1, 2], [3], 0.5, replay=True)], lr=1e-3, replay=0.5)
+
+
 def test_self_imitation_raises_a_success_that_has_no_advantage(base_model):
     policy = make_policy(base_model)
     member = policy.new_member(seed=8, b_std=0.05)

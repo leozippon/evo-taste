@@ -767,6 +767,18 @@ class Streams:
             out[source] = out.get(source, Fraction(0)) + w
         return out
 
+    @functools.cached_property
+    def _train_tasks(self) -> dict[str, Task]:
+        return {t.uid: t for pool in self._train_mix().pools for t in pool}
+
+    def train_task(self, uid: str) -> Task:
+        """The training stream's task of a pool item (its stratum, the default wrapper); refuses any other uid, so that
+        nothing outside the stream's train-part pools can be handed out as a training prompt."""
+        task = self._train_tasks.get(uid)
+        if task is None:  # the uid is not named: it could be a vault uid
+            raise ValueError("an item that is not in the training stream's pools was asked for as a training prompt")
+        return task
+
     @property
     def source_shares(self) -> dict[str, float]:
         """Each training source's share of a shared batch: its domain's share split equally among the domain's

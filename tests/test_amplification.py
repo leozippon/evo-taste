@@ -10,7 +10,7 @@ import torch
 from evotaste import evaluate, worker
 from evotaste import member as member_module
 from evotaste.member import PRACTICE_START, Member, load_lineage, practice_shares
-from evotaste.records import read_json, read_jsonl, read_jsonl_gz
+from evotaste.records import read_json, read_jsonl, read_jsonl_gz, write_json
 from evotaste.tasks import STREAM_VERSION, Streams, stable_seed, train_cell
 from evotaste.trainer import MemberWeights, Sequence
 from tests import engine_fakes
@@ -248,12 +248,27 @@ def test_deviation(scored, monkeypatch):
         got = [float(r["delta_sum"]) for r in rows if r["subject"] == subject]
         assert got == pytest.approx(expected, rel=1e-5, abs=1e-4) and any(abs(x) > 1e-3 for x in got)
         assert [int(r["tokens"]) for r in rows if r["subject"] == subject] == [len(r["token_ids"]) for r in records]
+        # the layout part: tokens whose text has no letter or digit (the stand-in tokenizer: multiples of 3)
+        layout = [[i % 3 == 0 for i in r["token_ids"]] for r in records]
+        assert [int(r["layout_tokens"]) for r in rows if r["subject"] == subject] == [sum(x) for x in layout]
+        expected = [float((a - b)[torch.tensor(x)].sum()) for a, b, x in zip(
+            mine, run.policy.base_logprobs(seqs), layout)]
+        got = [float(r["layout_delta_sum"]) for r in rows if r["subject"] == subject]
+        assert got == pytest.approx(expected, rel=1e-5, abs=1e-4) and any(abs(x) > 1e-3 for x in got)
     assert {r["factor"] for r in rows if r["subject"] == "prac@4x2"} == {"2.0"}
 
     monkeypatch.setattr(evaluate, "Policy", lambda *a: pytest.fail("nothing should be recomputed"))
     evaluate.deviation(run.dir)  # every subject from its cache
     assert table(selection / "responses.csv") == rows
+    old = read_json(selection / "prac@2.json")  # a cache from before the layout columns: recomputed when selected
+    write_json(selection / "prac@2.json", {**old, "responses": [
+        {k: v for k, v in r.items() if not k.startswith("layout")} for r in old["responses"]]})
+    evaluate.deviation(run.dir, names=["plain"])
+    assert "prac@2" not in {r["subject"] for r in table(selection / "responses.csv")}  # not selected: left out
     monkeypatch.setattr(evaluate, "Policy", lambda *a: run.policy)
+    evaluate.deviation(run.dir, names=["prac"], steps=[2])
+    assert table(selection / "responses.csv") == rows
+    assert all("layout_tokens" in r for r in read_json(selection / "prac@2.json")["responses"])
     evaluate.deviation(run.dir, items=3, names=["prac@4x2"])
     part = next(p for p in (run.dir / "deviation").iterdir() if p != selection)
     assert {r["subject"] for r in table(part / "responses.csv")} == {"prac@4x2"} and part.name.startswith("3items-")
@@ -271,11 +286,20 @@ def test_cross_likelihood(scored):
     assert {(r["scorer"], r["author"]) for r in rows} == {(a, b) for a in labels for b in labels}
     assert len(rows) == len(labels) ** 2 * len(run.probe_tasks)
     own = {(r["scorer"], r["author"], r["uid"]): float(r["logprob_sum"]) for r in rows}
+    layout = {(r["scorer"], r["author"], r["uid"]): float(r["layout_logprob_sum"]) for r in rows}
     deviation = {(r["subject"], r["uid"]): float(r["delta_sum"]) for r in table(selection / "responses.csv")}
-    for author in ("prac@4", "prac@4x2"):  # the diagonal minus the base row is the deviation
+    layout_deviation = {(r["subject"], r["uid"]): float(r["layout_delta_sum"])
+                        for r in table(selection / "responses.csv")}
+    for author in ("prac@4", "prac@4x2"):  # the diagonal minus the base row is the deviation, its layout part too
         for t in run.probe_tasks:
             assert own[(author, author, t.uid)] - own[("base", author, t.uid)] == pytest.approx(
                 deviation[(author, t.uid)], rel=1e-5, abs=1e-5)
+            assert layout[(author, author, t.uid)] - layout[("base", author, t.uid)] == pytest.approx(
+                layout_deviation[(author, t.uid)], rel=1e-5, abs=1e-5)
+    tokens = {}
+    for r in rows:
+        tokens.setdefault((r["author"], r["uid"]), set()).add((r["tokens"], r["layout_tokens"]))
+    assert all(len(v) == 1 for v in tokens.values())  # the same tokens under every scorer
     records = read_jsonl_gz(run.dir / "base" / "probe_responses.jsonl.gz")
     lps = run.policy.logprobs(MemberWeights(run.policy.load_adapter(
         run.dir / "members" / "zero" / "checkpoints" / "step_000004")),

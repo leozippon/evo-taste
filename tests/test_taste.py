@@ -3,6 +3,7 @@ training stream on synthetic pools): the taste-shaped reward (its score, which r
 strength 0, sign symmetry, pilot E's clone layout) and practice relative to the base model."""
 
 import copy
+import math
 import random
 import statistics
 
@@ -14,7 +15,7 @@ from evotaste import member as member_module
 from evotaste.member import load_lineage, practice_shares
 from evotaste.records import read_json, read_jsonl, read_jsonl_gz
 from evotaste.tasks import stable_seed
-from evotaste.trainer import MemberWeights, Sequence, advantages, length_returns, taste_factors
+from evotaste.trainer import MemberWeights, Sequence, advantages, length_residuals, length_returns, taste_factors
 from tests import engine_fakes
 from tests.test_amplification import make_run, member_state
 
@@ -250,6 +251,45 @@ def test_the_three_variants_start_from_the_parents_state_and_see_the_same_prompt
         texts = [[r["text"] for r in rollouts(run, v, t)] for v in VARIANTS]
         assert len({tuple(x) for x in texts}) == 3  # sampled with each clone's own seeds
         assert len({tuple(r["uid"] for r in rollouts(run, v, t)) for v in VARIANTS}) == 1
+
+
+def test_length_residuals():
+    rng = random.Random(1)
+    scores = [[rng.gauss(0, 1) if rng.random() < 0.7 else None for _ in range(4)] for _ in range(12)]
+    scores[0] = [0.4, None, None, None]  # a group with one eligible rollout is not part of the fit
+    tokens = [[rng.randint(5, 900) for _ in range(4)] for _ in range(12)]
+    out, fit = length_residuals(scores, tokens)
+    fitted = [(j, k) for j, g in enumerate(scores) if sum(s is not None for s in g) >= 2
+              for k, s in enumerate(g) if s is not None]
+    x = [math.log(tokens[j][k]) for j, k in fitted]
+    r = [out[j][k] for j, k in fitted]
+    assert abs(sum(r)) < 1e-9 and abs(sum(a * b for a, b in zip(r, x))) < 1e-9  # orthogonal to 1 and log length
+    for j, k in fitted:
+        assert out[j][k] == pytest.approx(scores[j][k] - fit["length_intercept"] - fit["length_slope"]
+                                          * math.log(tokens[j][k]))
+    assert out[0] == scores[0] and all(out[j][k] is None for j, g in enumerate(scores) for k, s in enumerate(g)
+                                       if s is None)
+    same = length_residuals([[1.0, 2.0], [3.0, None]], [[7, 7], [7, 7]])
+    assert same == ([[-0.5, 0.5], [3.0, None]], {"length_intercept": 1.5, "length_slope": 0.0})
+    assert length_residuals([[1.0, None]], [[5, 6]]) == ([[1.0, None]], {"length_intercept": None,
+                                                                       "length_slope": None})
+
+
+def test_the_length_neutral_score_shapes_on_its_residual(tmp_path, base_model, monkeypatch):
+    monkeypatch.setattr(member_module, "score_many", engine_fakes.score_many)
+    run = single_member_run(tmp_path, base_model, "resid", {"strength": 0.25, "residualize": True})
+    shaped = 0
+    for line in history(run, "m")[1:]:  # step 0: an unseeded member's scores are all 0
+        groups = groups_of(rollouts(run, "m", line["step"]))
+        scores = [[r["taste_score"] for r in g] for g in groups]
+        residuals, fit = length_residuals(scores, [[r["completion_tokens"] for r in g] for g in groups])
+        assert {k: line["taste"][k] for k in fit} == fit and fit["length_slope"] is not None
+        factors, stats = taste_factors(residuals, 0.25, 2.0)
+        assert [[r["taste_factor"] for r in g] for g in groups] == factors
+        assert line["taste"]["shaped"] == stats["shaped"]
+        assert factors != taste_factors(scores, 0.25, 2.0)[0]  # not the raw score's factors
+        shaped += stats["shaped"]
+    assert shaped > 0
 
 
 def test_practice_relative_to_the_base_model(tmp_path, base_model, monkeypatch):

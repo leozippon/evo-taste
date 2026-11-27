@@ -18,6 +18,7 @@ ROLES = ("member", "baseline")
 SEEDING_METHODS = ("opcd", "imitation", "none")
 ADVANTAGES = ("centered", "standardized")
 PRACTICE_REFERENCES = (None, "base")
+REVISIT_SOURCES = ("own", "matched")
 _ID = re.compile(r"^[A-Za-z0-9_-]+$")  # '~' and '@' are reserved for lineage and adapter-version names
 
 
@@ -93,9 +94,27 @@ class Practice:
 class Taste:
     """Taste-shaped reward: the reward of a correct, eligible rollout times 1 + strength x z, where z is its
     characteristic score (log p_member - log p_base per completion token) relative to the other eligible rollouts of
-    its group, standardised over the step and clipped to +-clip. strength may be negative (toward the base model)."""
+    its group, standardised over the step and clipped to +-clip. strength may be negative (toward the base model).
+    With `residualize`, the score's least-squares fit on log completion length over the step's shaped rollouts is
+    removed first, so that shaping does not follow length."""
     strength: float
     clip: float = 2.0
+    residualize: bool = False
+
+
+@dataclass(frozen=True)
+class Revisit:
+    """Consolidating one's own frontier: `share` of a step's prompts (rounded half up, at least one when share > 0)
+    revisit items the member was shown before, in place of the last prompts of the shared batch. `own`: items of its
+    frontier (solved at least once, in fewer than 3/4 of at least `min_seen` attempts), drawn with probability
+    proportional to 1 - census pass rate + a small constant (member.REVISIT_EPSILON); `matched`: for each item `own`
+    would draw, the shown item
+    outside the frontier of the same source with the nearest census pass rate. `imitate` > 0 adds that weight times the
+    token-mean NLL of each revisited item's stored first successful answer."""
+    share: float
+    source: str  # own | matched
+    min_seen: int = 4  # attempts (one visit is `rollouts` attempts)
+    imitate: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -114,6 +133,7 @@ class Amplification:
     imitate_within_free: bool = False
     practice: Practice | None = None  # None: the run's shared stream
     taste: Taste | None = None  # None (or strength 0): rewards as scored
+    revisit: Revisit | None = None  # None: no item record, the shared batch
 
 
 @dataclass(frozen=True)
@@ -279,7 +299,7 @@ def _check_settings(where: str, seeding: Seeding, amp: Amplification, culling: C
         raise ValueError(f"{where}: amplification.advantage must be one of {ADVANTAGES}")
     if amp.self_imitation < 0:
         raise ValueError(f"{where}: amplification.self_imitation must be >= 0")
-    ex, pr, ta = amp.exaggeration, amp.practice, amp.taste
+    ex, pr, ta, rv = amp.exaggeration, amp.practice, amp.taste, amp.revisit
     if ex is not None and min(ex.gamma, ex.weight) < 0:
         raise ValueError(f"{where}: amplification.exaggeration needs gamma >= 0 and weight >= 0")
     if pr is not None and not (pr.eta >= 0 and 0 <= pr.decay < 1 and 0 < pr.floor <= 1 <= pr.ceiling):
@@ -290,6 +310,12 @@ def _check_settings(where: str, seeding: Seeding, amp: Amplification, culling: C
     # a correct answer must keep a positive reward, above a wrong one's: factors 1 +- strength x clip stay above 0
     if ta is not None and not (ta.clip > 0 and abs(ta.strength) * ta.clip < 1):
         raise ValueError(f"{where}: amplification.taste needs clip > 0 and |strength| x clip < 1")
+    if rv is not None and not (0 <= rv.share <= 1 and rv.source in REVISIT_SOURCES and rv.min_seen >= 1
+                               and rv.imitate >= 0):
+        raise ValueError(f"{where}: amplification.revisit needs 0 <= share <= 1, source one of {REVISIT_SOURCES}, "
+                         "min_seen >= 1 and imitate >= 0")
+    if rv is not None and pr is not None:  # practice draws its own batch; revisits replace part of the shared one
+        raise ValueError(f"{where}: amplification.revisit and amplification.practice cannot be combined")
 
 
 def parse(data: dict, context_names) -> RunConfig:

@@ -25,10 +25,10 @@ from evotaste import config
 from evotaste.records import (append_jsonl, filter_jsonl, now, read_json, read_jsonl, read_jsonl_gz, write_json,
                               write_jsonl_gz)
 from evotaste.sampler import Request, Sample
-from evotaste.tasks import (Streams, Suites, Task, load_pass_rates, load_strata, probe_set, prompt_ids, score_many,
-                            stable_seed, train_cell)
-from evotaste.trainer import (MemberWeights, Sequence, advantages, gpu_processes, length_returns, load_optimizer,
-                              taste_factors)
+from evotaste.tasks import (Streams, Suites, Task, load_pass_rates, load_strata, probe_set, prompt_ids, rewrap,
+                            score_many, stable_seed, train_cell)
+from evotaste.trainer import (MemberWeights, Sequence, advantages, gpu_processes, length_residuals, length_returns,
+                              load_optimizer, taste_factors)
 
 log = logging.getLogger(__name__)
 
@@ -76,6 +76,137 @@ class PracticeRecord:
     """A practising member's own record, saved with every checkpoint (practice.json) and inherited by its clones."""
     averages: dict[str, float]  # source -> moving average of the member's training reward on it
     drawn: dict[str, int]  # training-stream cell -> items the member has drawn from it in its own batches
+
+
+# Consolidating one's own frontier (amplification.revisit). A member with revisits keeps an item record, saved with
+# every checkpoint as ITEMS_FILE. Its frontier is the items it has solved at least once but in fewer than 3/4 of at
+# least `min_seen` attempts; `own` revisits draw from it with probability proportional to 1 - the item's census pass
+# rate + REVISIT_EPSILON, so that items the base model rarely solves come first and none has probability 0.
+REVISIT_EPSILON = 0.05
+ITEMS_FILE = "items.jsonl.gz"
+
+
+@dataclass
+class Item:
+    """A member's record of one training item it has been shown."""
+    attempts: int = 0  # rollouts on it
+    successes: int = 0  # rollouts with the scorer's (unshaped) reward 1
+    first: int | None = None  # the step of the first success
+    wrapper: str | None = None  # the first successful answer's wrapper and sampled ids: kept only if it was recorded
+    answer: list[int] | None = None  # live and had at most length.free completion tokens
+
+
+def record_attempts(items: dict[str, Item], step: int, attempts, free: int) -> None:
+    """Count one step's attempts, in batch order (prompt-major), each (uid, wrapper, reward, completion tokens, sampled
+    ids or None). The first success of an item keeps its wrapper and ids if they are given and it is within `free`."""
+    for uid, wrapper, reward, tokens, ids in attempts:
+        item = items.setdefault(uid, Item())
+        item.attempts += 1
+        if reward == 1.0:
+            item.successes += 1
+            if item.first is None:
+                item.first = step
+                if ids is not None and tokens <= free:
+                    item.wrapper, item.answer = wrapper, list(ids)
+
+
+def in_frontier(item: Item, min_seen: int) -> bool:
+    """Solved at least once, in fewer than 3/4 of its attempts, over at least `min_seen` attempts."""
+    return item.successes >= 1 and item.attempts >= min_seen and 4 * item.successes < 3 * item.attempts
+
+
+def write_items(path: Path, items: dict[str, Item]) -> None:
+    write_jsonl_gz(path, [{"uid": uid, **dataclasses.asdict(item)} for uid, item in items.items()])
+
+
+def read_items(path: Path) -> dict[str, Item]:
+    return {r["uid"]: Item(**{k: v for k, v in r.items() if k != "uid"}) for r in read_jsonl_gz(path)}
+
+
+def revisit_slots(share: float, prompts: int) -> int:
+    """Revisits per batch: share x prompts rounded half up, at least one when share > 0."""
+    n = math.floor(share * prompts + 0.5)
+    return max(n, 1) if share > 0 else 0
+
+
+def weighted_draws(uids: list[str], weights: list[float], n: int, rng: random.Random) -> list[str]:
+    """n distinct uids (all of them if there are fewer), by successive sampling: each draw takes one of the uids not yet
+    drawn with probability proportional to its weight."""
+    uids, weights, out = list(uids), list(weights), []
+    while uids and len(out) < n:
+        x = rng.random() * sum(weights)
+        i, acc = 0, weights[0]
+        while acc <= x and i < len(weights) - 1:
+            i += 1
+            acc += weights[i]
+        out.append(uids.pop(i))
+        weights.pop(i)
+    return out
+
+
+def revisit_plan(stream: list[Task], items: dict[str, Item], settings: config.Revisit, rates: dict[str, float],
+                 train_task, seeds: tuple) -> tuple[list[Task], dict]:
+    """A revisiting member's batch: the step's shared batch with its last revisit_slots(...) prompts replaced by
+    revisits, and the history entry that describes them.
+
+    Candidates exclude every item of the shared batch, so that no item is asked twice in a step. `own` draws from the
+    frontier with weights 1 - census pass rate + REVISIT_EPSILON (`weighted_draws`, seeded by `seeds`). `matched` makes
+    the same draw on its own record and replaces each drawn item, in draw order, by the item of the same source with the
+    nearest census pass rate among those shown at least `min_seen` times, outside the frontier and not taken yet (ties
+    in a seeded order); so the two arms revisit equally hard, equally familiar items and differ only in whose successes
+    they follow. Slots left empty keep the shared batch's prompts, so the non-revisit part of the batch is always a
+    prefix of the shared batch. Every revisit is the stream's own task of a train-part pool item (`train_task`), with
+    the default wrapper; with no slot the batch is the shared batch itself."""
+    n = revisit_slots(settings.share, len(stream))
+    shown = {t.uid for t in stream}
+    frontier = {uid for uid, item in items.items() if in_frontier(item, settings.min_seen)}
+    pool = sorted(frontier - shown)
+    tasks = {uid: train_task(uid) for uid in pool}
+    own = weighted_draws(pool, [1 - rates[uid] + REVISIT_EPSILON for uid in pool], n,
+                         random.Random(stable_seed("revisit", *seeds)))
+    chosen: list[str | None] = own
+    if settings.source == "matched":
+        candidates = sorted(uid for uid, item in items.items()
+                            if uid not in frontier and uid not in shown and item.attempts >= settings.min_seen)
+        tasks.update((uid, train_task(uid)) for uid in candidates)
+        random.Random(stable_seed("revisit-match", *seeds)).shuffle(candidates)
+        rank = {uid: i for i, uid in enumerate(candidates)}
+        by_source: dict[str, list[str]] = {}
+        for uid in candidates:
+            by_source.setdefault(tasks[uid].family, []).append(uid)
+        chosen, taken = [], set()
+        for uid in own:
+            options = [c for c in by_source.get(tasks[uid].family, []) if c not in taken]
+            best = min(options, key=lambda c: (abs(rates[c] - rates[uid]), rank[c])) if options else None
+            chosen.append(best)
+            taken.add(best)
+    revisits = [tasks[uid] for uid in chosen if uid is not None]
+    batch = stream[:len(stream) - len(revisits)] + revisits
+    return batch, {"source": settings.source, "slots": n, "frontier": len(frontier), "own": own, "revisits": chosen,
+                   "shortfall": n - len(revisits)}
+
+
+def rebuild_items(run: "Run", lineage_id: str, before: int) -> dict[str, Item]:
+    """The item record of a lineage's state at step `before`, from the rollouts recorded by it and, before its start,
+    by its chain of parents (committed steps only): attempts, successes and first successes. The rollout records do not
+    keep sampled ids, so no answer is known."""
+    files, lid, end = [], lineage_id, before
+    while True:
+        lin = load_lineage(run, lid)
+        if lin is None or lin.step < end:
+            raise RuntimeError(f"cannot rebuild the item record of {lineage_id}: {lid} has not committed step {end}")
+        start = lin.parent["step"] if lin.parent else 0
+        files[:0] = [(t, lineage_dir(run, lid) / "rollouts" / f"step_{t:06d}.jsonl.gz") for t in range(start, end)]
+        if lin.parent is None:
+            break
+        lid, end = lin.parent["lineage"], start
+    items: dict[str, Item] = {}
+    for t, path in files:
+        if not path.exists():
+            raise RuntimeError(f"cannot rebuild the item record of {lineage_id}: {path} is missing")
+        record_attempts(items, t, [(r["uid"], r["wrapper"], r["reward"], r["completion_tokens"], None)
+                                   for r in read_jsonl_gz(path)], 0)
+    return items
 
 
 def check_sample(lengths: list[int], rollouts: int, min_tokens: int, min_rollouts: int) -> list[int]:
@@ -295,6 +426,8 @@ class Member:
         self.clone_points = run.cfg.clone_points(lin.id) if lin.generation == 0 else set()
         self.weights: MemberWeights | None = None
         self.practice: PracticeRecord | None = None  # with amplification.practice only
+        self.items: dict[str, Item] | None = None  # the item record, with amplification.revisit only
+        self.plan: dict | None = None  # this step's revisits, from step_tasks to amplify
         self.version: str | None = None  # adapter version currently served for this member
 
     def __repr__(self):
@@ -335,6 +468,7 @@ class Member:
         history = ancestry_history(self.run, self.lin.id, s)  # a clone's updates before its start are its parents'
         self.weights = load_checkpoint(self.run.policy, ckpt, history, s, self.lin.id)
         self.practice = self.load_practice(ckpt, s)
+        self.items = self.load_items(ckpt, s)
         log.info("%s resumed from %s", self.lin.id, ckpt)
 
     def checkpoint_dir(self, step: int) -> Path:
@@ -364,11 +498,40 @@ class Member:
     def practice_shares(self) -> dict[str, float]:
         return practice_shares(self.run.streams.source_shares, self.practice.averages, self.amp.practice)
 
+    # -- the item record (revisits) -------------------------------------------------------------------------------
+    def load_items(self, ckpt: Path, step: int) -> dict[str, Item] | None:
+        """The item record saved with one of this lineage's checkpoints; a checkpoint without it is the start of the
+        record only at step 0, where nothing has been shown yet (a forked member's step-0 checkpoint)."""
+        if self.amp.revisit is None:
+            return None
+        if (ckpt / ITEMS_FILE).exists():
+            return read_items(ckpt / ITEMS_FILE)
+        if step > 0:
+            raise RuntimeError(f"{ckpt}: {ITEMS_FILE} is missing, but {self.lin.id} revisits and starts at step {step}")
+        return {}
+
+    def inherit_items(self, ckpt: Path) -> dict[str, Item] | None:
+        """A clone's item record: the one its parent saved at the clone point, or, for a parent that keeps none, the
+        record rebuilt from the recorded rollouts of the parent and its own parents up to the clone point."""
+        if self.amp.revisit is None:
+            return None
+        p = self.lin.parent
+        if (ckpt / ITEMS_FILE).exists():
+            return read_items(ckpt / ITEMS_FILE)
+        parent = self.run.cfg.member(load_lineage(self.run, p["lineage"]).slot)
+        if p["step"] > 0 and self.run.cfg.settings(parent)[1].revisit is not None:
+            raise RuntimeError(f"{ckpt}: {ITEMS_FILE} is missing, but {p['lineage']} keeps an item record")
+        items = rebuild_items(self.run, p["lineage"], p["step"])
+        log.info("%s: item record rebuilt from the rollouts of %s up to step %d (%d items)", self.lin.id,
+                 p["lineage"], p["step"], len(items))
+        return items
+
     # -- seeding -------------------------------------------------------------------------------------------------
     def begin_seeding(self) -> None:
         """Fresh LoRA tensors from the lineage seed (B = 0: the member starts as the base model)."""
         self.weights = self.run.policy.new_member(self.lin.seed)
         self.practice = self.new_practice()
+        self.items = None if self.amp.revisit is None else {}
 
     @property
     def seeding_steps(self) -> int:
@@ -450,12 +613,13 @@ class Member:
         return ckpt
 
     def start_clone(self, ckpt: Path) -> None:
-        """The parent's weights, optimizer state and practice record at the clone point, and its step counter. The
-        clone commits its own copy of that checkpoint with its first probe."""
+        """The parent's weights, optimizer state, practice record and item record at the clone point, and its step
+        counter. The clone commits its own copy of that checkpoint with its first probe."""
         p = self.lin.parent
         history = ancestry_history(self.run, p["lineage"], p["step"])
         self.weights = load_checkpoint(self.run.policy, ckpt, history, p["step"], p["lineage"])
         self.practice = self.load_practice(ckpt, p["step"])
+        self.items = self.inherit_items(ckpt)
         self.lin.step = p["step"]
         log.info("%s cloned from %s at step %d", self.lin.id, p["lineage"], p["step"])
 
@@ -472,13 +636,19 @@ class Member:
 
     # -- amplification --------------------------------------------------------------------------------------------
     def step_tasks(self) -> list[Task]:
-        """The run's shared batch of this step, or with practice (eta > 0) the member's own batch: proportions from
-        its averages, items continuing its own walk through the stream's pools."""
-        p = self.amp.practice
-        if p is None or p.eta == 0:
-            return self.run.streams.train_batch(self.lin.step, self.amp.prompts)
-        return self.run.streams.member_batch(self.lin.step, self.amp.prompts, self.practice_shares(),
-                                             self.practice.drawn)
+        """The run's shared batch of this step; with practice (eta > 0) the member's own batch: proportions from its
+        averages, items continuing its own walk through the stream's pools; with revisits the shared batch with its
+        last prompts replaced by revisits (`revisit_plan`, which `amplify` then records)."""
+        p, rv = self.amp.practice, self.amp.revisit
+        if p is not None and p.eta != 0:
+            return self.run.streams.member_batch(self.lin.step, self.amp.prompts, self.practice_shares(),
+                                                 self.practice.drawn)
+        batch = self.run.streams.train_batch(self.lin.step, self.amp.prompts)
+        if rv is None:
+            return batch
+        batch, self.plan = revisit_plan(batch, self.items, rv, self.run.base_pass_rates, self.run.streams.train_task,
+                                        (self.run.cfg.seed, self.lin.seed, self.lin.step))
+        return batch
 
     def rollout_requests(self, tasks: list[Task]) -> list[Request]:
         return [Request(self.version, self.run.prompt(t.question), self.amp.rollouts, self.amp.max_tokens,
@@ -487,6 +657,13 @@ class Member:
     def amplify(self, tasks: list[Task], samples: list[list[Sample]], generate_s: float, batch_members: int):
         """One group update on this step's rollouts; then publish, record, and advance the step counter."""
         t, policy, amp = self.lin.step, self.run.policy, self.amp
+        rv, plan, first = amp.revisit, None, len(tasks)  # first: the index of the first revisit prompt
+        if rv is not None:  # the revisits step_tasks drew for this step are the last prompts of the batch
+            plan, self.plan = self.plan, None
+            revisited = [uid for uid in plan["revisits"] if uid is not None]
+            first = len(tasks) - len(revisited)
+            if [task.uid for task in tasks[first:]] != revisited:
+                raise RuntimeError(f"{self.lin.id} step {t}: the batch is not the one its revisits were drawn for")
         t0 = time.perf_counter()
         seqs, sampler_lps, groups_records = [], [], []
         flat = response_records([(task, s) for task, group in zip(tasks, samples) for s in group])
@@ -524,13 +701,24 @@ class Member:
             for k, (r, g, w) in enumerate(zip(recs, returns, weights)):
                 seqs[i].weight = w
                 records.append({"step": t, "prompt": j, "k": k, **r, "return": g, "weight": w, **(
-                    {} if factors is None else {"taste_score": taste_of.get(i), "taste_factor": factors[j][k]})})
+                    {} if factors is None else {"taste_score": taste_of.get(i), "taste_factor": factors[j][k]}), **(
+                    {} if rv is None else {"revisit": j >= first})})
                 i += 1
+        replay = self.replay_sequences(tasks[first:]) if rv is not None and rv.imitate > 0 else []
         stats = retry_on_oom(policy, f"{self.lin.id} step {t} update",
-                             lambda: policy.update(self.weights, seqs, amp.lr, amp.self_imitation, amp.exaggeration))
+                             lambda: policy.update(self.weights, seqs + replay, amp.lr, amp.self_imitation,
+                                                   amp.exaggeration, 0.0 if rv is None else rv.imitate))
         publish = self.publish()
         t0 = time.perf_counter()
         write_jsonl_gz(self.dir / "rollouts" / f"step_{t:06d}.jsonl.gz", records)
+        revisit = {}
+        if rv is not None:  # this step's revisits, then this step's attempts into the record
+            on, off = ([r["reward"] for r in records if r["revisit"] == x] for x in (True, False))
+            revisit = {"revisit": {**plan, "reward": _mean(on) if on else None,
+                                   "stream_reward": _mean(off) if off else None}}
+            record_attempts(self.items, t, [(task.uid, task.wrapper, r["reward"], r["completion_tokens"], s.token_ids)
+                                            for task, group, recs in zip(tasks, samples, groups_records)
+                                            for s, r in zip(group, recs)], amp.length.free)
         by_family: dict[str, list[float]] = {}
         for r in records:
             by_family.setdefault(r["family"], []).append(r["reward"])
@@ -558,12 +746,24 @@ class Member:
             "reward_by_family": reward_by_family,
             "completion_tokens": _mean(r["completion_tokens"] for r in records),
             "complied": _mean(r["complied"] for r in records), "truncated": _mean(r["truncated"] for r in records),
-            "groups": groups, "prompts": len(tasks), **stats, "check": check, **practice, **taste,
+            "groups": groups, "prompts": len(tasks), **stats, "check": check, **practice, **taste, **revisit,
             "timing": {"generate_s": round(generate_s, 3), "batch_members": batch_members,
                        "score_s": round(score_s, 3), "check_s": round(check_s, 3), "update_s": stats["update_s"],
                        "publish_s": round(sum(publish.values()), 3), "publish": publish,
                        "write_s": round(time.perf_counter() - t0, 3)}})
         self.lin.step = t + 1
+
+    def replay_sequences(self, revisited: list[Task]) -> list[Sequence]:
+        """Replay imitation: for each revisited item with a stored first successful answer (recorded live, within
+        length.free), that answer's own sampled ids behind the prompt it was given under: the item under the answer's
+        wrapper."""
+        out = []
+        for task in revisited:
+            item = self.items[task.uid]
+            if item.answer is not None:
+                asked = task if item.wrapper == task.wrapper else rewrap(task, item.wrapper)
+                out.append(Sequence(self.run.prompt(asked.question), item.answer, 0.0, replay=True))
+        return out
 
     def taste_shaping(self, seqs: list[Sequence], groups_records: list[list[dict]], sampler_lps: list[list[float]]):
         """The taste-shaped reward's factors for this step's rollouts (prompt-major, as `seqs`). Each eligible rollout
@@ -590,6 +790,10 @@ class Member:
         for recs in groups_records:
             per_group.append([score_of.get(i + k) for k in range(len(recs))])
             i += len(recs)
+        fit = {}
+        if taste.residualize:  # shape on what the score says beyond the answer's length
+            per_group, fit = length_residuals(per_group, [[r["completion_tokens"] for r in recs]
+                                                          for recs in groups_records])
         factors, stats = taste_factors(per_group, taste.strength, taste.clip)
         lengths = [len(s.completion) for s in chosen]
         corr = (statistics.correlation(scores, lengths)
@@ -598,7 +802,7 @@ class Member:
             log.info("%s step %d: no taste shaping (%s)", lin.id, lin.step, stats["skipped"])
         return score_of, factors, {
             "eligible": len(chosen), **stats, "score_mean": statistics.fmean(scores) if scores else None,
-            "score_sd": statistics.pstdev(scores) if scores else None, "length_corr": corr,
+            "score_sd": statistics.pstdev(scores) if scores else None, "length_corr": corr, **fit,
             "adv_shaping": 0.0, "adv_plain": 0.0, "member_vs_sampler": vs_sampler,
             "taste_s": round(time.perf_counter() - t0, 3)}
 
@@ -719,6 +923,8 @@ class Member:
             torch.save(self.weights.optimizer, tmp / "optimizer.pt")
         if self.practice is not None:  # JSON floats round-trip exactly
             write_json(tmp / "practice.json", dataclasses.asdict(self.practice))
+        if self.items is not None:
+            write_items(tmp / ITEMS_FILE, self.items)
         shutil.rmtree(final, ignore_errors=True)  # a redone step after a crash
         tmp.rename(final)
 

@@ -30,6 +30,8 @@ import subprocess
 import time
 from pathlib import Path
 
+import torch
+
 from evotaste.member import Run, load_lineage, probe_requests, response_records, summarize_probe
 from evotaste.records import atomic_write, now, read_json, read_jsonl_gz, write_json, write_jsonl_gz
 from evotaste.sampler import Request, Sampler
@@ -582,8 +584,22 @@ def scaled(run_dir: Path, specs: list[str], factors: list[float], attach: str | 
 
 # -- deviation and cross-likelihood --------------------------------------------------------------------------------
 
-DEVIATION_COLUMNS = ("subject", "lineage", "step", "factor", "uid", "domain", "tokens", "delta_sum")
-CROSS_COLUMNS = ("scorer", "author", "step", "uid", "domain", "tokens", "logprob_sum")
+DEVIATION_COLUMNS = ("subject", "lineage", "step", "factor", "uid", "domain", "tokens", "delta_sum", "layout_tokens",
+                     "layout_delta_sum")
+CROSS_COLUMNS = ("scorer", "author", "step", "uid", "domain", "tokens", "logprob_sum", "layout_tokens",
+                 "layout_logprob_sum")
+
+
+def layout_mask(tokenizer) -> torch.Tensor:
+    """Per token id, whether its text contains no letter or digit: whitespace, punctuation, markup, and the end-of-turn
+    token, whose text is empty. The layout tokens of the deviation tables."""
+    return torch.tensor([not any(c.isalnum() for c in tokenizer.decode([i], skip_special_tokens=True))
+                         for i in range(len(tokenizer))])
+
+
+def _with_layout(cached: dict | None) -> bool:
+    """A cache file written since the tables have layout columns (older ones are recomputed when selected)."""
+    return cached is not None and all("layout_tokens" in r for r in cached["responses"])
 
 
 def probe_authors(run: Run) -> list[dict]:
@@ -614,9 +630,10 @@ def deviation(run_dir: Path, items: int | None = None, names: list[str] | None =
     the sum over them of log p_author - log p_base, where the author is the adapter that wrote the response (a
     lineage's checkpoint at the probe's step, or a scaled adapter); written to responses.csv. With `cross`, for one
     step: every selected adapter at that step and the base model score every one's responses (the base model's plain
-    probe answers included), giving the summed log-probability per (scorer, author, item) in cross-<step>.csv. Authors
-    are selected by lineage id or label (`names`) and by step; scaled probes count as their lineage's at their step.
-    Results are cached per subject (or per scorer and author), keyed by the SHA-256 of the responses file and the
+    probe answers included), giving the summed log-probability per (scorer, author, item) in cross-<step>.csv. Next to
+    each sum, both tables give the number of the answer's layout tokens (`layout_mask`) and the sum over them alone.
+    Authors are selected by lineage id or label (`names`) and by step; scaled probes count as their lineage's at their
+    step. Results are cached per subject (or per scorer and author), keyed by the SHA-256 of the responses file and the
     scoring adapter's content hash, in runs/<name>/deviation/<N>items-<hash>/."""
     run = Run(run_dir)
     base_path = run.dir / "base" / "probe_responses.jsonl.gz"
@@ -645,6 +662,13 @@ def deviation(run_dir: Path, items: int | None = None, names: list[str] | None =
 
     def sequences(records):
         return [Sequence(run.prompt(r["question"]), r["token_ids"]) for r in records]
+    layout = None
+
+    def layout_of(record) -> torch.Tensor:
+        nonlocal layout
+        if layout is None:
+            layout = layout_mask(run.tokenizer)
+        return layout[torch.tensor(record["token_ids"])]
 
     if not cross:
         rows = []
@@ -652,7 +676,7 @@ def deviation(run_dir: Path, items: int | None = None, names: list[str] | None =
             cache = out / f"{a['label']}.json"
             digest = hashlib.sha256(a["responses"].read_bytes()).hexdigest()
             cached = read_json(cache) if cache.exists() else None
-            if cached is None or cached["sha256"] != digest:
+            if cached is None or cached["sha256"] != digest or not _with_layout(cached):
                 cached = None
                 if not chosen(a):
                     continue
@@ -666,9 +690,13 @@ def deviation(run_dir: Path, items: int | None = None, names: list[str] | None =
             picked = _picked(a["responses"], positions, uids)
             seqs = sequences(picked)
             mine, base = scores(a["adapter"], seqs), scores(None, seqs)
-            responses = [{"subject": a["label"], "lineage": a["lineage"], "step": a["step"], "factor": a["factor"],
-                          "uid": r["uid"], "domain": r["domain"], "tokens": len(m), "delta_sum": float((m - b).sum())}
-                         for r, m, b in zip(picked, mine, base)]
+            responses = []
+            for r, m, b in zip(picked, mine, base):
+                lay = layout_of(r)
+                responses.append({"subject": a["label"], "lineage": a["lineage"], "step": a["step"],
+                                  "factor": a["factor"], "uid": r["uid"], "domain": r["domain"], "tokens": len(m),
+                                  "delta_sum": float((m - b).sum()), "layout_tokens": int(lay.sum()),
+                                  "layout_delta_sum": float((m - b)[lay].sum())})
             seconds = round(time.perf_counter() - t0, 1)
             write_json(cache, {"time": now(), "file": str(a["responses"]), **ident, "seconds": seconds,
                                "responses": responses})
@@ -693,7 +721,8 @@ def deviation(run_dir: Path, items: int | None = None, names: list[str] | None =
         for author in subjects:
             cache = out / f"cross-{step}" / f"{scorer['label']}--{author['label']}.json"
             cached = read_json(cache) if cache.exists() else None
-            if cached and (cached["sha256"], cached["adapter_sha256"]) == (digests[author["label"]], scorer_hash):
+            if _with_layout(cached) and (cached["sha256"], cached["adapter_sha256"]) == (
+                    digests[author["label"]], scorer_hash):
                 rows += cached["responses"]
             else:
                 pending.append((author, cache))
@@ -703,7 +732,8 @@ def deviation(run_dir: Path, items: int | None = None, names: list[str] | None =
         lps = iter(scores(scorer["adapter"], [s for author, _ in pending for s in sequences(picked[author["label"]])]))
         for author, cache in pending:
             responses = [{"scorer": scorer["label"], "author": author["label"], "step": step, "uid": r["uid"],
-                          "domain": r["domain"], "tokens": len(lp), "logprob_sum": float(lp.sum())}
+                          "domain": r["domain"], "tokens": len(lp), "logprob_sum": float(lp.sum()),
+                          "layout_tokens": int(layout_of(r).sum()), "layout_logprob_sum": float(lp[layout_of(r)].sum())}
                          for r, lp in zip(picked[author["label"]], lps)]
             write_json(cache, {"time": now(), "file": str(author["responses"]), "sha256": digests[author["label"]],
                                "adapter_sha256": scorer_hash, "responses": responses})

@@ -44,6 +44,7 @@ class Sequence:
     completion: list[int]  # sampled token ids, including the end-of-turn token when generation stopped
     weight: float = 1.0  # advantage
     imitate: bool = False  # eligible for the imitation terms (self-imitation, exaggeration): a successful rollout
+    replay: bool = False  # a stored earlier answer for replay imitation, not a rollout of this step
 
 
 @dataclass
@@ -105,6 +106,28 @@ def taste_factors(scores: list[list[float | None]], strength: float, clip: float
     for (j, k), x in d.items():
         factors[j][k] = 1.0 + strength * min(max(x / sigma, -clip), clip)
     return factors, {"shaped": len(d), "groups": len({j for j, _ in d}), "sigma": sigma, "skipped": None}
+
+
+def length_residuals(scores: list[list[float | None]],
+                     tokens: list[list[int]]) -> tuple[list[list[float | None]], dict]:
+    """The length-neutral taste score: over the rollouts that `taste_factors` shapes (eligible ones in groups with two
+    or more eligible), the least-squares fit s = a + b log(tokens), and their scores replaced by the residuals s - a -
+    b log(tokens); every other score is returned unchanged. With fewer than two such rollouts nothing is fitted; with
+    a single length the slope is 0. Returns the scores and {length_intercept, length_slope}."""
+    points = [(j, k) for j, group in enumerate(scores) if sum(s is not None for s in group) >= 2
+              for k, s in enumerate(group) if s is not None]
+    if len(points) < 2:
+        return scores, {"length_intercept": None, "length_slope": None}
+    x = [math.log(tokens[j][k]) for j, k in points]
+    y = [scores[j][k] for j, k in points]
+    mx, my = statistics.fmean(x), statistics.fmean(y)
+    sxx = sum((a - mx) ** 2 for a in x)
+    slope = sum((a - mx) * (b - my) for a, b in zip(x, y)) / sxx if sxx > 0 else 0.0
+    intercept = my - slope * mx
+    out = [list(group) for group in scores]
+    for (j, k), a, b in zip(points, x, y):
+        out[j][k] = b - (intercept + slope * a)
+    return out, {"length_intercept": intercept, "length_slope": slope}
 
 
 @dataclass
@@ -381,37 +404,45 @@ class Policy:
         return {"grad_norm": float(grad_norm), **peak}
 
     def update(self, member: MemberWeights, seqs: list[Sequence], lr: float, self_imitation: float = 0.0,
-               exaggeration=None) -> dict:
-        """One AdamW step on the sum of three terms, each normalised by its own token count:
+               exaggeration=None, replay: float = 0.0) -> dict:
+        """One AdamW step on the sum of four terms, each normalised by its own token count:
 
             -sum_{i: w_i != 0} w_i sum_t log pi(y_it) / sum_{i: w_i != 0} |y_i|
             + beta * (-sum_{i eligible} sum_t log pi(y_it) / sum_{i eligible} |y_i|)
             + weight * sum_{i eligible} sum_t KL(q_it || pi(. | x_i, y_i<t)) / sum_{i eligible} |y_i|
+            + replay * (-sum_{i replayed} sum_t log pi(y_it) / sum_{i replayed} |y_i|)
 
         with beta = self_imitation, `exaggeration` (config.Exaggeration or None) giving gamma and weight, eligible the
-        sequences flagged `imitate`, and q_it = softmax(l_m + gamma (l_m - l_b)) the fixed exaggerated target from the
-        member's logits l_m and the base model's l_b (adapter disabled, no gradient) on the same prompt and completion.
-        A term whose weight is 0 (or exaggeration with gamma 0, whose target is the member itself) is not computed at
-        all, so the update is then exactly the one without it. Updates `member` in place (LoRA tensors and optimizer
-        state); without any sequence in any term nothing changes.
+        sequences flagged `imitate`, replayed those flagged `replay` (stored earlier answers, which take part in no
+        other term), and q_it = softmax(l_m + gamma (l_m - l_b)) the fixed exaggerated target from the member's logits
+        l_m and the base model's l_b (adapter disabled, no gradient) on the same prompt and completion. A term whose
+        weight is 0 (or exaggeration with gamma 0, whose target is the member itself) is not computed at all, so the
+        update is then exactly the one without it; the replay statistics are reported only when its weight is not 0.
+        Updates `member` in place (LoRA tensors and optimizer state); without any sequence in any term nothing changes.
         """
         t0 = time.perf_counter()
         si_on = self_imitation > 0
         ex_on = exaggeration is not None and exaggeration.gamma != 0 and exaggeration.weight != 0
-        active = [s for s in seqs if s.weight != 0.0 or ((si_on or ex_on) and s.imitate)]
+        rp_on = replay > 0
+        if any(s.replay and (s.weight != 0.0 or s.imitate) for s in seqs):
+            raise ValueError("a replayed answer takes part in the replay term only (weight 0, not imitated)")
+        active = [s for s in seqs if s.weight != 0.0 or ((si_on or ex_on) and s.imitate) or (rp_on and s.replay)]
         eligible = [s.imitate for s in active]
         adv_tokens = sum(len(s.completion) for s in active if s.weight != 0.0)
         imitated_tokens = sum(len(s.completion) for s, e in zip(active, eligible) if e)
+        replay_tokens = sum(len(s.completion) for s in active if s.replay)
         stats = {"sequences": len(active), "tokens": sum(len(s.completion) for s in active),
                  "adv_sequences": sum(s.weight != 0.0 for s in active), "adv_tokens": adv_tokens}
         for name, on in (("si", si_on), ("ex", ex_on)):
             stats.update({f"{name}_sequences": sum(eligible) if on else 0, f"{name}_tokens": imitated_tokens if on else 0})
+        if rp_on:
+            stats.update(rp_sequences=sum(s.replay for s in active), rp_tokens=replay_tokens)
         if not active:
-            return {"loss": 0.0, "adv_loss": 0.0, "si_loss": 0.0, "ex_loss": 0.0, "grad_norm": 0.0, **stats,
-                    "micro_batches": 0, "update_s": 0.0}
+            return {"loss": 0.0, "adv_loss": 0.0, "si_loss": 0.0, "ex_loss": 0.0, **({"rp_loss": 0.0} if rp_on else {}),
+                    "grad_norm": 0.0, **stats, "micro_batches": 0, "update_s": 0.0}
         opt = self._optimizer(member, lr)
         batches = self._batches(active)
-        adv_sum = si_sum = ex_sum = 0.0
+        adv_sum = si_sum = ex_sum = rp_sum = 0.0
         for batch in batches:
             mine = [i for row in batch for i, _, _ in row.spans if eligible[i]] if ex_on else []
             if mine:  # the base model on the very same rows first (same ids, positions and mask); only the hidden
@@ -422,18 +453,24 @@ class Policy:
                     del base_all
             hidden, targets = self._hidden(batch)
             lp = head_logprobs(hidden, self.head_weight, targets)
-            adv = si = torch.zeros((), device=self.device)
+            adv = si = rp = torch.zeros((), device=self.device)
             for i, seq_lp in by_sequence(batch, lp).items():
                 if active[i].weight != 0.0:
                     adv = adv - active[i].weight * seq_lp.sum()
                 if si_on and eligible[i]:
                     si = si - seq_lp.sum()
+                if rp_on and active[i].replay:
+                    rp = rp - seq_lp.sum()
             loss = adv / adv_tokens if adv_tokens else adv
             adv_sum += loss.item()
             if si_on and imitated_tokens:
                 si = si / imitated_tokens
                 si_sum += si.item()
                 loss = loss + self_imitation * si
+            if rp_on and replay_tokens:
+                rp = rp / replay_tokens
+                rp_sum += rp.item()
+                loss = loss + replay * rp
             if mine:
                 member_hidden = by_sequence(batch, hidden)
                 kl = exaggeration_kl(torch.cat([member_hidden[i] for i in mine]), base_hidden, self.head_weight,
@@ -444,8 +481,11 @@ class Policy:
             loss.backward()
         out = self._step(member, opt)
         ex_weight = exaggeration.weight if ex_on else 0.0
-        return {"loss": adv_sum + self_imitation * si_sum + ex_weight * ex_sum, "adv_loss": adv_sum, "si_loss": si_sum,
-                "ex_loss": ex_sum, **out, **stats, "micro_batches": len(batches),
+        total = adv_sum + self_imitation * si_sum + ex_weight * ex_sum
+        if rp_on:
+            total += replay * rp_sum
+        return {"loss": total, "adv_loss": adv_sum, "si_loss": si_sum, "ex_loss": ex_sum,
+                **({"rp_loss": rp_sum} if rp_on else {}), **out, **stats, "micro_batches": len(batches),
                 "update_s": round(time.perf_counter() - t0, 3)}
 
     def distill(self, member: MemberWeights, seqs: list[Sequence], teacher_prompts: list[list[int]],

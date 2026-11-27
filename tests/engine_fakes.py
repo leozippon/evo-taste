@@ -76,6 +76,18 @@ class Streams:
                 for j in range(n)]
 
 
+class FakeTokenizer:
+    """Token ids that are multiples of 3 have no letter or digit in their text (layout), the end-of-turn id none at
+    all; every other id reads as a word."""
+
+    def __len__(self):
+        return VOCAB
+
+    def decode(self, ids, skip_special_tokens=False):
+        return "".join("" if i == EOT and skip_special_tokens else "<|eot|>" if i == EOT else
+                       " **\n" if i % 3 == 0 else f" w{i}" for i in ids)
+
+
 class FakeRun(Run):
     """Run with the stand-in task layer: prompts are 4-8 token ids of the question, the context's ids before them."""
 
@@ -83,6 +95,7 @@ class FakeRun(Run):
         self.dir = Path(run_dir)
         self.cfg = config.load(self.dir / "config.yaml")
         self.contexts = config.load_contexts(self.cfg.contexts)
+        self.tokenizer = FakeTokenizer()
         self.streams = Streams()
         self.probe_tasks = self.streams.probe_tasks
         self.policy = None

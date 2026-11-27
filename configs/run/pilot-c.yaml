@@ -125,3 +125,9 @@ members:
   - {id: relations-adv-own, parent: {member: relations-adv, step: 45}, seed: 710, overrides: {amplification: {steps: 90, taste: {strength: 0.25}}}}
   - {id: relations-adv-neu, parent: {member: relations-adv, step: 45}, seed: 711, overrides: {amplification: {steps: 90, taste: {strength: 0.0}}}}
   - {id: relations-adv-rev, parent: {member: relations-adv, step: 45}, seed: 712, overrides: {amplification: {steps: 90, taste: {strength: -0.25}}}}
+  # Pilot F (docs/design/amplification.md, "Selective amplification", item 2), its seeded parent: placebo-adv at step
+  # 45 cloned into revisits of its own frontier (-fro), matched revisits (-mat) and plain training (-pln), to step 90,
+  # as pilot D's three relative-only members are in configs/run/pilot-d.yaml.
+  - {id: placebo-adv-fro, parent: {member: placebo-adv, step: 45}, seed: 810, overrides: {amplification: {steps: 90, revisit: {share: 0.33, source: own}}}}
+  - {id: placebo-adv-mat, parent: {member: placebo-adv, step: 45}, seed: 811, overrides: {amplification: {steps: 90, revisit: {share: 0.33, source: matched}}}}
+  - {id: placebo-adv-pln, parent: {member: placebo-adv, step: 45}, seed: 812, overrides: {amplification: {steps: 90}}}
