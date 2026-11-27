@@ -16,3 +16,9 @@ Two pilot C members at step 45 (`unseeded-adv`, `relations-adv`), each cloned in
 - Two parents cannot give a significance level; the effects are large against item-level intervals and have the same sign for both parents on every measure quoted.
 
 **Reading.** Three ways of pushing a member away from the base model have now been tried — exaggerating its whole distribution, scaling its adapter, and rewarding its most characteristic correct answers — and all three trade accuracy for distance, the more distance the more accuracy. The base model's competence sits where its behaviour is typical. Sharp, lineage-specific identity is easy to produce and is not the same thing as better reasoning; at this model size it works against it. What remains open is amplification that never touches how an answer is written: pilot F, which consolidates the problems a member has itself cracked.
+
+## Distance from the base model predicts less transfer, also without intervention
+
+Across the 28 pilot C members at step 45, a member's deviation from the base model (0.06 to 0.28 nats per token) is negatively rank-correlated with what it gained: −0.43 with the gain on unseen sources, −0.50 on held-out items of the training sources, −0.58 on mastered items, and about zero (+0.13) with the gain on frontier items. The correlations have the same sign and similar size within each update rule (−0.47 to −0.65). The two unseeded members under the relative-only rule are the most deviated and the ones that gained nothing on unseen sources; the least deviated are members that started from a distilled adapter.
+
+So the interventions and the observational data agree. Members learn the frontier equally well whether they move little or much; what the extra movement buys is loss of what the base model could already do. A member's deviation is measurable without any task data, which makes it a candidate predictor of transfer at harvest time that owes nothing to the selection suite.
