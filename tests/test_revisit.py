@@ -1,7 +1,7 @@
 """Consolidating one's own frontier in the whole member life cycle on the CPU (tiny model, stand-in sampler and scorer,
-the real training stream on synthetic pools): the item record and its rebuild from a parent's rollouts, `own` and
-`matched` revisits, the stream part shared by the three arms of a parent, replay imitation, and resume and clone start
-with the record."""
+the real training stream on synthetic pools): the item record and its rebuild from a parent's rollouts, `own`,
+`matched` and `yoked` revisits, the stream part shared by the arms of a parent, replay imitation, and resume and clone
+start with the record."""
 
 import copy
 import itertools
@@ -12,9 +12,9 @@ import torch
 
 from evotaste import config, worker
 from evotaste import member as member_module
-from evotaste.member import (ITEMS_FILE, REVISIT_EPSILON, Item, Member, in_frontier, load_lineage, read_items,
-                             record_attempts, revisit_plan, revisit_slots, weighted_draws)
-from evotaste.records import read_jsonl, read_jsonl_gz
+from evotaste.member import (ITEMS_FILE, REVISIT_EPSILON, YOKED_FILE, Item, Member, in_frontier, load_lineage,
+                             read_items, record_attempts, revisit_plan, revisit_slots, weighted_draws)
+from evotaste.records import read_json, read_jsonl, read_jsonl_gz
 from evotaste.tasks import rewrap, stable_seed
 from tests import engine_fakes
 from tests.test_amplification import SUITES, make_run
@@ -24,11 +24,13 @@ PROMPTS, FREE = 16, 8
 AMP = {"steps": 2, "prompts": PROMPTS, "rollouts": 4, "max_tokens": 12, "lr": 1e-3,
        "length": {"free": FREE, "slope": 0.25}, "imitate_within_free": True}
 OWN, MATCHED = {"share": 0.25, "source": "own"}, {"share": 0.25, "source": "matched"}
-ARMS = {"fro": OWN, "mat": MATCHED, "pln": None}  # pilot F's arms, cloned at step 2
+YOKED = {"share": 0.25, "source": "yoked", "donor": {"member": "q", "step": 2}}
+ARMS = {"fro": OWN, "mat": MATCHED, "pln": None, "yok": YOKED}  # pilot F's arms, cloned at step 2
 
 
 def config_with(parent_revisit=None, extra=()):
-    """The parent p (taste-shaped, so that shaped returns differ from rewards) and its clones at step 2."""
+    """The parent p (taste-shaped, so that shaped returns differ from rewards), its clones at step 2, and q, another
+    member on the same stream, whose frontier at step 2 the yoked clone follows."""
     parent = {"id": "p", "seed": 1, "overrides": {"amplification": {
         "taste": {"strength": 0.25}, **({"revisit": parent_revisit} if parent_revisit else {})}}}
     clones = [{"id": arm, "seed": 2 + i, "parent": {"member": "p", "step": 2},
@@ -36,7 +38,8 @@ def config_with(parent_revisit=None, extra=()):
               for i, (arm, rv) in enumerate(list(ARMS.items()) + list(extra))]
     return {"name": "revisit", "strata": {"path": "strata.tsv", "sha256": "0" * 64}, "seeding": {"method": "none"},
             "amplification": AMP, "probes": {"every": 2, "max_tokens": 12}, "culling": {"enabled": False},
-            "trainer": {"check_tokens": 20, "check_rollouts": 4}, "members": [parent] + clones}
+            "trainer": {"check_tokens": 20, "check_rollouts": 4},
+            "members": [parent, {"id": "q", "seed": 50}] + clones}
 
 
 RATES = {uid: int(uid.rsplit("-", 1)[1]) % 9 / 8 for uid in SUITES.strata}  # census pass rates
@@ -123,7 +126,7 @@ def test_the_record_counts_unshaped_successes_and_keeps_first_answers_within_the
     kept = items_at(b, "p", 2)
     firsts = [i for i in kept.values() if i.first is not None]
     assert any(i.answer is None for i in firsts) and any(i.answer for i in firsts)  # some first successes too long
-    for lineage, run in (("fro", a), ("mat", a), ("fro", b), ("rep", b)):
+    for lineage, run in (("fro", a), ("mat", a), ("yok", a), ("fro", b), ("yok", b), ("rep", b)):
         live_from = 2 if run is a else 0  # in A the record up to the clone point is rebuilt: no answers
         for step in (4, 5):
             assert items_at(run, lineage, step) == expected_record(chain_rollouts(run, lineage, step), live_from)
@@ -135,12 +138,12 @@ def test_a_rebuilt_record_is_the_record_the_parent_would_have_kept(runs):
                                                                                              "step_000002"))
     rebuilt, kept = items_at(a, "fro", 2), items_at(b, "p", 2)
     assert rebuilt == without_answers(kept) and len(rebuilt) == 2 * PROMPTS
-    for arm in ("fro", "mat", "rep"):  # inherited bit-exactly by the clones of a parent that keeps a record
+    for arm in ("fro", "mat", "yok", "rep"):  # inherited bit-exactly by the clones of a parent that keeps a record
         assert items_at(b, arm, 2) == kept
-    assert items_at(a, "mat", 2) == rebuilt and not (a.dir / "members" / "pln" / "checkpoints" / "step_000002" /
+    assert items_at(a, "mat", 2) == items_at(a, "yok", 2) == rebuilt and not (a.dir / "members" / "pln" / "checkpoints" / "step_000002" /
                                                      ITEMS_FILE).exists()  # no revisit key, no record
     # without replay imitation the answers play no part: A's and B's clones train identically
-    for arm in ("fro", "mat"):
+    for arm in ("fro", "mat", "yok"):
         for t in (2, 3, 4):
             assert rollouts(a, arm, t) == rollouts(b, arm, t)
         final = "checkpoints/step_000005/adapter_model.safetensors"
@@ -233,11 +236,38 @@ def test_the_three_arms_see_the_same_stream_prompts(runs):
                    for arm, seed in seeds.items()}
         shared = [a.prompt(x.question) for x in a.streams.train_batch(t, PROMPTS)]
         assert prompts["pln"] == shared
-        for arm in ("fro", "mat"):
+        for arm in ("fro", "mat", "yok"):
             plan = history(a, arm)[t - 2]["revisit"]
             stream_part = PROMPTS - sum(u is not None for u in plan["revisits"])
-            assert prompts[arm][:stream_part] == shared[:stream_part]
-        assert prompts["fro"][-4:] != prompts["mat"][-4:]
+            assert prompts[arm][:stream_part] == shared[:stream_part] and stream_part < PROMPTS
+        assert prompts["fro"][-4:] != prompts["mat"][-4:] and prompts["fro"][-4:] != prompts["yok"][-4:]
+
+
+def test_yoked_revisits_follow_the_donors_frontier_outside_the_members_own(runs):
+    for run in runs:
+        donor = expected_record(chain_rollouts(run, "q", 2), 99)
+        own = {u for u, i in record_before(run, "yok", 2).items() if in_frontier(i, 4)}
+        expected = sorted(u for u, i in donor.items() if in_frontier(i, 4) and u not in own)
+        assert expected and not set(expected) & own and set(expected) <= set(record_before(run, "yok", 2))
+        for step in (2, 4, 5):  # fixed at the clone point, saved with every checkpoint
+            ckpt = run.dir / "members" / "yok" / "checkpoints" / f"step_{step:06d}"
+            assert read_json(ckpt / YOKED_FILE) == {"donor": {"member": "q", "step": 2}, "items": expected}
+        drawn = []
+        for t, line in zip((2, 3, 4), history(run, "yok")):
+            plan, stream = line["revisit"], run.streams.train_batch(t, PROMPTS)
+            pool = set(expected) - {x.uid for x in stream}
+            assert (plan["source"], plan["candidates"], plan["slots"]) == ("yoked", len(pool), 4)
+            assert set(plan["revisits"]) <= pool and len(set(plan["revisits"])) == len(plan["revisits"]) == min(
+                4, len(pool)) and plan["shortfall"] == 4 - len(plan["revisits"])
+            uids = [r["uid"] for r in rollouts(run, "yok", t)][::4]
+            assert uids == [x.uid for x in stream[:PROMPTS - len(plan["revisits"])]] + plan["revisits"]
+            lin = load_lineage(run, "yok")
+            batch, again = revisit_plan(stream, record_before(run, "yok", t), config.Revisit(**{
+                **YOKED, "donor": config.Donor("q", 2)}), RATES, run.streams.train_task, (run.cfg.seed, lin.seed, t),
+                expected)
+            assert {k: v for k, v in plan.items() if "reward" not in k} == again and [x.uid for x in batch] == uids
+            drawn += plan["revisits"]
+        assert len(drawn) > len(set(drawn))  # a small set: items come back in later steps, as allowed
 
 
 def test_replay_imitation_uses_the_stored_first_answer_behind_its_own_prompt(runs):
@@ -316,6 +346,11 @@ def test_a_short_frontier_is_filled_from_the_shared_batch_and_held_out_items_are
     with pytest.raises(ValueError, match="not in the training stream's pools"):
         revisit_plan(stream, {**record, held_out: Item(4, 0)}, config.Revisit(0.25, "matched"), RATES,
                      a.streams.train_task, (0, 1, 7))
+    yoked = config.Revisit(0.25, "yoked", donor=config.Donor("q", 2))
+    batch, plan = revisit_plan(stream, record, yoked, RATES, a.streams.train_task, (0, 1, 7), pool[2:4])
+    assert sorted(plan["revisits"]) == sorted(pool[2:4]) and plan["shortfall"] == 2 and batch[-2:] != stream[-2:]
+    with pytest.raises(ValueError, match="not in the training stream's pools"):
+        revisit_plan(stream, record, yoked, RATES, a.streams.train_task, (0, 1, 7), [held_out])
 
 
 def test_record_attempts_keeps_the_first_success_only():
@@ -334,7 +369,7 @@ class Killed(Exception):
 def member_files(run_dir):
     out = {}
     for p in sorted((run_dir / "members").rglob("*")):
-        if p.suffix == ".safetensors" or p.name == ITEMS_FILE or p.parent.name == "rollouts":
+        if p.suffix == ".safetensors" or p.name in (ITEMS_FILE, YOKED_FILE) or p.parent.name == "rollouts":
             out[p.relative_to(run_dir)] = read_jsonl_gz(p) if p.suffix == ".gz" else p.read_bytes()
         elif p.suffix == ".pt":
             state = torch.load(p, weights_only=True)["state"]
@@ -365,6 +400,7 @@ def test_a_resumed_run_is_the_uninterrupted_run_with_its_record(runs, tmp_path, 
     worker.advance(again, slots_of(data))
     ours, theirs = member_files(run.dir), member_files(b.dir)
     assert ours.keys() == theirs.keys() and sum(p.name == ITEMS_FILE for p in ours) >= 12
+    assert sum(p.name == YOKED_FILE for p in ours) == 3  # yok's checkpoints at 2, 4 and 5
     for path in ours:
         if path.suffix == ".pt":
             assert all(torch.equal(x, y) for x, y in zip(ours[path], theirs[path])), path
@@ -385,6 +421,11 @@ def test_a_lost_record_is_refused(runs, tmp_path, base_model):
     member.lin.status = "active"
     with pytest.raises(RuntimeError, match=f"{ITEMS_FILE} is missing"):
         member.restore()
+    (d / "members" / "yok" / "checkpoints" / "step_000005" / YOKED_FILE).unlink()
+    yoked = Member(run, load_lineage(run, "yok"))
+    yoked.lin.status = "active"
+    with pytest.raises(RuntimeError, match=f"{YOKED_FILE} is missing"):
+        yoked.restore()
     (d / "members" / "p" / "checkpoints" / "step_000002" / ITEMS_FILE).unlink()  # a parent that keeps a record
     clone = Member(run, load_lineage(run, "mat"))
     clone.lin.status, clone.lin.step = "new", 0

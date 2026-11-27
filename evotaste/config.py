@@ -18,7 +18,7 @@ ROLES = ("member", "baseline")
 SEEDING_METHODS = ("opcd", "imitation", "none")
 ADVANTAGES = ("centered", "standardized")
 PRACTICE_REFERENCES = (None, "base")
-REVISIT_SOURCES = ("own", "matched")
+REVISIT_SOURCES = ("own", "matched", "yoked")
 _ID = re.compile(r"^[A-Za-z0-9_-]+$")  # '~' and '@' are reserved for lineage and adapter-version names
 
 
@@ -103,18 +103,27 @@ class Taste:
 
 
 @dataclass(frozen=True)
+class Donor:
+    """The member (of the same run) whose frontier at `step` a yoked member revisits."""
+    member: str
+    step: int
+
+
+@dataclass(frozen=True)
 class Revisit:
     """Consolidating one's own frontier: `share` of a step's prompts (rounded half up, at least one when share > 0)
     revisit items the member was shown before, in place of the last prompts of the shared batch. `own`: items of its
     frontier (solved at least once, in fewer than 3/4 of at least `min_seen` attempts), drawn with probability
     proportional to 1 - census pass rate + a small constant (member.REVISIT_EPSILON); `matched`: for each item `own`
-    would draw, the shown item
-    outside the frontier of the same source with the nearest census pass rate. `imitate` > 0 adds that weight times the
-    token-mean NLL of each revisited item's stored first successful answer."""
+    would draw, the shown item outside the frontier of the same source with the nearest census pass rate; `yoked` (a
+    clone): drawn like `own` from a set fixed at the clone point, the donor's frontier at `donor.step` minus the
+    member's own frontier. `imitate` > 0 adds that weight times the token-mean NLL of each revisited item's stored
+    first successful answer."""
     share: float
-    source: str  # own | matched
+    source: str  # own | matched | yoked
     min_seen: int = 4  # attempts (one visit is `rollouts` attempts)
     imitate: float = 0.0
+    donor: Donor | None = None  # source yoked only
 
 
 @dataclass(frozen=True)
@@ -316,6 +325,8 @@ def _check_settings(where: str, seeding: Seeding, amp: Amplification, culling: C
                          "min_seen >= 1 and imitate >= 0")
     if rv is not None and pr is not None:  # practice draws its own batch; revisits replace part of the shared one
         raise ValueError(f"{where}: amplification.revisit and amplification.practice cannot be combined")
+    if rv is not None and (rv.source == "yoked") != (rv.donor is not None):
+        raise ValueError(f"{where}: amplification.revisit.donor is required for, and only for, source yoked")
 
 
 def parse(data: dict, context_names) -> RunConfig:
@@ -340,10 +351,23 @@ def parse(data: dict, context_names) -> RunConfig:
             continue
         seeding, amp, culling = cfg.settings(m)  # also validates the overrides
         _check_settings(where, seeding, amp, culling)
+        if amp.revisit is not None and amp.revisit.source == "yoked":
+            raise ValueError(f"{where}: revisit source yoked is for clones (its set is fixed at the clone point)")
         if (seeding.method == "none") != (m.context is None):
             raise ValueError(f"{where}: a context is required for, and only for, seeding methods opcd and imitation")
         if m.context is not None and m.context not in context_names:
             raise ValueError(f"{where}: unknown context {m.context!r}")
+    for m in cfg.members:
+        donor = (cfg.settings(m)[1].revisit or Revisit(0.0, "own")).donor
+        if donor is None:
+            continue
+        where = f"member {m.id}: amplification.revisit.donor"
+        if donor.member == m.id or donor.member not in ids:
+            raise ValueError(f"{where}: {donor.member!r} must be another member of this run")
+        other = cfg.member(donor.member)
+        start, end = cfg.start_step(other), cfg.settings(other)[1].steps
+        if not start <= donor.step <= end:
+            raise ValueError(f"{where}: step {donor.step} must be within {donor.member}'s course ({start}..{end})")
     if cfg.probes.every < 1 or cfg.probes.max_tokens < 1:
         raise ValueError("probes.every and probes.max_tokens must be >= 1")
     if cfg.strata is None and any(cfg.settings(m)[1].steps > 0 for m in cfg.members):

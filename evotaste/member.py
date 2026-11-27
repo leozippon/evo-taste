@@ -84,6 +84,7 @@ class PracticeRecord:
 # rate + REVISIT_EPSILON, so that items the base model rarely solves come first and none has probability 0.
 REVISIT_EPSILON = 0.05
 ITEMS_FILE = "items.jsonl.gz"
+YOKED_FILE = "yoked.json"  # a yoked member's fixed revisit set, saved with every checkpoint
 
 
 @dataclass
@@ -145,7 +146,7 @@ def weighted_draws(uids: list[str], weights: list[float], n: int, rng: random.Ra
 
 
 def revisit_plan(stream: list[Task], items: dict[str, Item], settings: config.Revisit, rates: dict[str, float],
-                 train_task, seeds: tuple) -> tuple[list[Task], dict]:
+                 train_task, seeds: tuple, yoked: list[str] | None = None) -> tuple[list[Task], dict]:
     """A revisiting member's batch: the step's shared batch with its last revisit_slots(...) prompts replaced by
     revisits, and the history entry that describes them.
 
@@ -154,12 +155,21 @@ def revisit_plan(stream: list[Task], items: dict[str, Item], settings: config.Re
     the same draw on its own record and replaces each drawn item, in draw order, by the item of the same source with the
     nearest census pass rate among those shown at least `min_seen` times, outside the frontier and not taken yet (ties
     in a seeded order); so the two arms revisit equally hard, equally familiar items and differ only in whose successes
-    they follow. Slots left empty keep the shared batch's prompts, so the non-revisit part of the batch is always a
-    prefix of the shared batch. Every revisit is the stream's own task of a train-part pool item (`train_task`), with
-    the default wrapper; with no slot the batch is the shared batch itself."""
+    they follow. `yoked` draws like `own`, from the member's fixed set `yoked` (`yoked_set`) instead of its frontier.
+    Slots left empty keep the shared batch's prompts, so the non-revisit part of the batch is always a prefix of the
+    shared batch. Every revisit is the stream's own task of a train-part pool item (`train_task`), with the default
+    wrapper; with no slot the batch is the shared batch itself."""
     n = revisit_slots(settings.share, len(stream))
     shown = {t.uid for t in stream}
     frontier = {uid for uid, item in items.items() if in_frontier(item, settings.min_seen)}
+    if settings.source == "yoked":
+        pool = sorted(set(yoked) - shown)
+        tasks = {uid: train_task(uid) for uid in pool}
+        chosen = weighted_draws(pool, [1 - rates[uid] + REVISIT_EPSILON for uid in pool], n,
+                                random.Random(stable_seed("revisit", *seeds)))
+        return stream[:len(stream) - len(chosen)] + [tasks[uid] for uid in chosen], {
+            "source": "yoked", "slots": n, "frontier": len(frontier), "candidates": len(pool), "revisits": chosen,
+            "shortfall": n - len(chosen)}
     pool = sorted(frontier - shown)
     tasks = {uid: train_task(uid) for uid in pool}
     own = weighted_draws(pool, [1 - rates[uid] + REVISIT_EPSILON for uid in pool], n,
@@ -207,6 +217,15 @@ def rebuild_items(run: "Run", lineage_id: str, before: int) -> dict[str, Item]:
         record_attempts(items, t, [(r["uid"], r["wrapper"], r["reward"], r["completion_tokens"], None)
                                    for r in read_jsonl_gz(path)], 0)
     return items
+
+
+def yoked_set(run: "Run", donor: config.Donor, own: dict[str, Item], min_seen: int) -> list[str]:
+    """A yoked member's revisit set, fixed at its clone point: the items of the donor's frontier at donor.step (its
+    record rebuilt from the recorded rollouts) that are not in the member's own frontier (`own`, its record at the
+    clone point), sorted."""
+    mine = {uid for uid, item in own.items() if in_frontier(item, min_seen)}
+    theirs = rebuild_items(run, donor.member, donor.step)
+    return sorted(uid for uid, item in theirs.items() if in_frontier(item, min_seen) and uid not in mine)
 
 
 def check_sample(lengths: list[int], rollouts: int, min_tokens: int, min_rollouts: int) -> list[int]:
@@ -427,6 +446,7 @@ class Member:
         self.weights: MemberWeights | None = None
         self.practice: PracticeRecord | None = None  # with amplification.practice only
         self.items: dict[str, Item] | None = None  # the item record, with amplification.revisit only
+        self.yoked: list[str] | None = None  # the fixed revisit set, with revisit source yoked only
         self.plan: dict | None = None  # this step's revisits, from step_tasks to amplify
         self.version: str | None = None  # adapter version currently served for this member
 
@@ -469,6 +489,7 @@ class Member:
         self.weights = load_checkpoint(self.run.policy, ckpt, history, s, self.lin.id)
         self.practice = self.load_practice(ckpt, s)
         self.items = self.load_items(ckpt, s)
+        self.yoked = self.load_yoked(ckpt)
         log.info("%s resumed from %s", self.lin.id, ckpt)
 
     def checkpoint_dir(self, step: int) -> Path:
@@ -525,6 +546,18 @@ class Member:
         log.info("%s: item record rebuilt from the rollouts of %s up to step %d (%d items)", self.lin.id,
                  p["lineage"], p["step"], len(items))
         return items
+
+    def load_yoked(self, ckpt: Path) -> list[str] | None:
+        """A yoked member's fixed set, saved with each of its checkpoints since its clone start."""
+        rv = self.amp.revisit
+        if rv is None or rv.source != "yoked":
+            return None
+        if not (ckpt / YOKED_FILE).exists():
+            raise RuntimeError(f"{ckpt}: {YOKED_FILE} is missing, but {self.lin.id} revisits a donor's frontier")
+        saved = read_json(ckpt / YOKED_FILE)
+        if saved["donor"] != dataclasses.asdict(rv.donor):
+            raise RuntimeError(f"{ckpt}: {YOKED_FILE} was drawn from donor {saved['donor']}, not {rv.donor}")
+        return saved["items"]
 
     # -- seeding -------------------------------------------------------------------------------------------------
     def begin_seeding(self) -> None:
@@ -620,6 +653,11 @@ class Member:
         self.weights = load_checkpoint(self.run.policy, ckpt, history, p["step"], p["lineage"])
         self.practice = self.load_practice(ckpt, p["step"])
         self.items = self.inherit_items(ckpt)
+        rv = self.amp.revisit
+        if rv is not None and rv.source == "yoked":  # fixed now, for the whole course
+            self.yoked = yoked_set(self.run, rv.donor, self.items, rv.min_seen)
+            log.info("%s: %d items in the frontier of %s at step %d and not in its own", self.lin.id,
+                     len(self.yoked), rv.donor.member, rv.donor.step)
         self.lin.step = p["step"]
         log.info("%s cloned from %s at step %d", self.lin.id, p["lineage"], p["step"])
 
@@ -647,7 +685,7 @@ class Member:
         if rv is None:
             return batch
         batch, self.plan = revisit_plan(batch, self.items, rv, self.run.base_pass_rates, self.run.streams.train_task,
-                                        (self.run.cfg.seed, self.lin.seed, self.lin.step))
+                                        (self.run.cfg.seed, self.lin.seed, self.lin.step), self.yoked)
         return batch
 
     def rollout_requests(self, tasks: list[Task]) -> list[Request]:
@@ -925,6 +963,8 @@ class Member:
             write_json(tmp / "practice.json", dataclasses.asdict(self.practice))
         if self.items is not None:
             write_items(tmp / ITEMS_FILE, self.items)
+        if self.yoked is not None:
+            write_json(tmp / YOKED_FILE, {"donor": dataclasses.asdict(self.amp.revisit.donor), "items": self.yoked})
         shutil.rmtree(final, ignore_errors=True)  # a redone step after a crash
         tmp.rename(final)
 

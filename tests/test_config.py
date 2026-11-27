@@ -131,6 +131,13 @@ def test_clone_chains_inherit_along_the_chain():
     ([{"id": "a", "seed": 1, "context": "refute"}], {"amplification": {
         "revisit": {"share": 0.33, "source": "own"}, "practice": {"eta": 0.0, "decay": 0.8, "floor": 0.25,
                                                                   "ceiling": 4.0}}}, "cannot be combined"),
+    ([{"id": "a", "seed": 1, "context": "refute"}], {"amplification": {"revisit": {
+        "share": 0.33, "source": "yoked"}}}, "donor is required for, and only for"),
+    ([{"id": "a", "seed": 1, "context": "refute"}], {"amplification": {"revisit": {
+        "share": 0.33, "source": "own", "donor": {"member": "a", "step": 0}}}}, "donor is required for, and only for"),
+    ([{"id": "a", "seed": 1, "context": "refute"}, {"id": "b", "seed": 2, "context": "refute", "overrides": {
+        "amplification": {"revisit": {"share": 0.33, "source": "yoked", "donor": {"member": "a", "step": 10}}}}}],
+     {}, "yoked is for clones"),
     # D1 of the 2026-11-25 audit: any shared seed, between seeded members, clones of different parents or points
     ([{"id": "a", "seed": 7, "context": "refute"}, {"id": "b", "seed": 7, "context": "verify"},
       {"id": "t1", "seed": 9, "parent": {"member": "a", "step": 0}},
@@ -201,6 +208,20 @@ def test_revisits_and_the_length_neutral_taste_score():
     assert parent.revisit is None and pln.revisit is None and parent.taste is None
     assert fro.revisit == config.Revisit(0.33, "own", 4, 0.0) and mat.revisit == config.Revisit(0.33, "matched")
     assert {dataclasses.replace(a, revisit=None) for a in (fro, mat, pln)} == {dataclasses.replace(parent, steps=90)}
+    def yoked(donor):
+        return parse([PARENT, {"id": "q", "seed": 2, "context": "refute"},
+                      {"id": "p-yok", "seed": 3, "parent": {"member": "p", "step": 45}, "overrides": {
+                          "amplification": {"steps": 90, "revisit": {"share": 0.33, "source": "yoked",
+                                                                     "donor": donor}}}}])
+    cfg = yoked({"member": "q", "step": 45})
+    assert cfg.settings(cfg.members[2])[1].revisit == config.Revisit(0.33, "yoked", 4, 0.0, config.Donor("q", 45))
+    for donor, match in (({"member": "z", "step": 45}, "another member"), ({"member": "p-yok", "step": 50},
+                                                                             "another member"),
+                         ({"member": "q", "step": 61}, r"within q's course \(0..60\)"),
+                         ({"member": "q"}, "missing required keys"), ({"member": "q", "step": 4, "at": 1},
+                                                                      "unknown keys")):
+        with pytest.raises(ValueError, match=match):
+            yoked(donor)
     taste = parse([{**PARENT, "overrides": {"amplification": {"taste": {"strength": 0.25, "residualize": True}}}}])
     assert taste.settings(taste.members[0])[1].taste == config.Taste(0.25, 2.0, True)
     assert config.Taste(0.25).residualize is False  # pilot E's score
@@ -232,17 +253,18 @@ def test_pilot_c_and_d_configs():
             arm = m.id.rsplit("-", 1)[-1]
             if arm in ("own", "neu", "rev"):
                 pilot_e.setdefault(m.parent, {})[arm] = run.settings(m)[1]
-            elif arm in ("fro", "mat", "pln"):
+            elif arm in ("fro", "mat", "yok", "pln"):
                 pilot_f.setdefault((run.name, m.parent), {})[arm] = run.settings(m)[1]
             else:
                 assert run.settings(m)[1].taste is None and run.settings(m)[1].revisit is None
-    assert sorted((name, p.member, p.step) for name, p in pilot_f) == [
-        ("pilot-c", "placebo-adv", 45)] + [("pilot-d", f"adv-{i}", 45) for i in (1, 2, 3)]
+    donors = {"placebo-adv": "ground_up-adv", "ground_up-adv": "small_case-adv", "small_case-adv": "placebo-adv"}
+    assert sorted((name, p.member, p.step) for name, p in pilot_f) == [("pilot-c", p, 45) for p in sorted(donors)]
     for (name, parent), arms in pilot_f.items():  # nothing else differs from the parent's rule
-        run = c if name == "pilot-c" else d
-        assert {arm: a.revisit for arm, a in arms.items()} == {
-            "fro": config.Revisit(0.33, "own"), "mat": config.Revisit(0.33, "matched"), "pln": None}
-        rule = dataclasses.replace(run.settings(run.member(parent.member))[1], steps=90)
+        expected = {"fro": config.Revisit(0.33, "own"), "pln": None,
+                    "yok": config.Revisit(0.33, "yoked", donor=config.Donor(donors[parent.member], 45)),
+                    **({"mat": config.Revisit(0.33, "matched")} if parent.member == "placebo-adv" else {})}
+        assert {arm: a.revisit for arm, a in arms.items()} == expected
+        rule = dataclasses.replace(c.settings(c.member(parent.member))[1], steps=90)
         assert all(dataclasses.replace(a, revisit=None) == rule for a in arms.values())
     assert all(a.taste is None for arms in pilot_f.values() for a in arms.values())
     assert sorted(p.member for p in pilot_e) == ["placebo-adv", "relations-adv", "unseeded-adv", "unseeded-b-adv"]
@@ -252,7 +274,7 @@ def test_pilot_c_and_d_configs():
         rule = dataclasses.replace(c.settings(c.member(parent.member))[1], steps=90)
         assert all(dataclasses.replace(a, taste=None) == rule for a in arms.values())  # nothing else differs
     arms = {}
-    for m in [m for m in d.members if m.parent is None]:
+    for m in d.members:
         seeding, amp, _ = d.settings(m)
         assert seeding.method == "none" and m.context is None and m.parent is None and amp.imitate_within_free
         assert amp.taste is None and (amp.practice is None or amp.practice.reference is None)
@@ -260,7 +282,7 @@ def test_pilot_c_and_d_configs():
         arms.setdefault(m.id.split("-")[0], set()).add((amp.exaggeration, amp.practice))
     ex, pr = config.Exaggeration(1.0, 0.01), config.Practice(4.0, 0.8, 0.25, 4.0)  # weight: see the config
     assert arms == {"adv": {(None, None)}, "exag": {(ex, None)}, "prac": {(None, pr)}, "both": {(ex, pr)}}
-    assert len(d.members) == 16 + 9 and d.clonable_steps == (45,) and not d.culling.enabled
+    assert len(d.members) == 16 and d.clonable_steps == (45,) and not d.culling.enabled
     assert {m.seed for m in d.members}.isdisjoint(m.seed for m in c.members)
     assert (d.seed, d.strata, d.lora, d.seeding, d.probes, d.trainer) == (
         c.seed, c.strata, c.lora, c.seeding, c.probes, c.trainer)  # forkable from pilot C, same training prompts

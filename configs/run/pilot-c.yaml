@@ -125,9 +125,21 @@ members:
   - {id: relations-adv-own, parent: {member: relations-adv, step: 45}, seed: 710, overrides: {amplification: {steps: 90, taste: {strength: 0.25}}}}
   - {id: relations-adv-neu, parent: {member: relations-adv, step: 45}, seed: 711, overrides: {amplification: {steps: 90, taste: {strength: 0.0}}}}
   - {id: relations-adv-rev, parent: {member: relations-adv, step: 45}, seed: 712, overrides: {amplification: {steps: 90, taste: {strength: -0.25}}}}
-  # Pilot F (docs/design/amplification.md, "Selective amplification", item 2), its seeded parent: placebo-adv at step
-  # 45 cloned into revisits of its own frontier (-fro), matched revisits (-mat) and plain training (-pln), to step 90,
-  # as pilot D's three relative-only members are in configs/run/pilot-d.yaml.
+  # Pilot F (docs/design/amplification.md, "Selective amplification", item 2): three members at step 45, each cloned
+  # into revisits of its own frontier (-fro), yoked revisits of another member's frontier minus its own (-yok; donors
+  # in a cycle: placebo-adv follows ground_up-adv, ground_up-adv follows small_case-adv, small_case-adv follows
+  # placebo-adv, each at step 45) and plain training (-pln: exactly the parent's rule), to step 90. placebo-adv-mat,
+  # the first, matched control, revisits items outside its frontier matched in source and census pass rate; it was
+  # launched before the yoked control replaced it and is kept. The clones of a parent start from identical weights,
+  # optimizer state and item record (rebuilt from the parent's rollouts) and see identical stream prompts outside
+  # the revisits.
   - {id: placebo-adv-fro, parent: {member: placebo-adv, step: 45}, seed: 810, overrides: {amplification: {steps: 90, revisit: {share: 0.33, source: own}}}}
   - {id: placebo-adv-mat, parent: {member: placebo-adv, step: 45}, seed: 811, overrides: {amplification: {steps: 90, revisit: {share: 0.33, source: matched}}}}
   - {id: placebo-adv-pln, parent: {member: placebo-adv, step: 45}, seed: 812, overrides: {amplification: {steps: 90}}}
+  - {id: placebo-adv-yok, parent: {member: placebo-adv, step: 45}, seed: 813, overrides: {amplification: {steps: 90, revisit: {share: 0.33, source: yoked, donor: {member: ground_up-adv, step: 45}}}}}
+  - {id: ground_up-adv-fro, parent: {member: ground_up-adv, step: 45}, seed: 814, overrides: {amplification: {steps: 90, revisit: {share: 0.33, source: own}}}}
+  - {id: ground_up-adv-yok, parent: {member: ground_up-adv, step: 45}, seed: 815, overrides: {amplification: {steps: 90, revisit: {share: 0.33, source: yoked, donor: {member: small_case-adv, step: 45}}}}}
+  - {id: ground_up-adv-pln, parent: {member: ground_up-adv, step: 45}, seed: 816, overrides: {amplification: {steps: 90}}}
+  - {id: small_case-adv-fro, parent: {member: small_case-adv, step: 45}, seed: 817, overrides: {amplification: {steps: 90, revisit: {share: 0.33, source: own}}}}
+  - {id: small_case-adv-yok, parent: {member: small_case-adv, step: 45}, seed: 818, overrides: {amplification: {steps: 90, revisit: {share: 0.33, source: yoked, donor: {member: placebo-adv, step: 45}}}}}
+  - {id: small_case-adv-pln, parent: {member: small_case-adv, step: 45}, seed: 819, overrides: {amplification: {steps: 90}}}
