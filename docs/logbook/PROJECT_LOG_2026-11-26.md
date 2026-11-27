@@ -102,7 +102,16 @@ So the starting point for amplification is better than assumed: independent memb
 - **Frontiers are individual.** Each relative-only pilot C member has solved at least once, but not mastered, 593 to 714 of the 2,160 training problems it has seen. Two members' frontiers overlap with a Jaccard index of 0.29 (0.24 to 0.33), where members with identical per-problem solve rates would overlap 0.37 by sampling alone.
 - **Pilot F** started: clones at step 45 of three pilot C members, each into revisits of its own frontier, revisits of the frontier of a different member (problems a comparable member cracked and this one did not), and no revisits. A control matched on difficulty instead is kept for one parent; it differs from the own-frontier arm in the member's prior success as well, which is why the other-member control was added.
 
+## What clones inherit, 22:20
+
+The fourteen clones of seven pilot C members were evaluated at step 90 on the 1,840 real-data selection items, two samples each, and compared with their parents and with each other.
+
+- **Clone pairs solve more similar problems than unrelated members**: the noise-corrected, difficulty-adjusted distance between solve rates is 414 pp² within a clone pair (interval 271 to 546) and 653 between unrelated members under the same rule (519 to 783), a ratio of 0.63 (0.45 to 0.81; permutation p = 0.001).
+- **That is time since separation, not lock-in.** Two clones, 45 steps apart, are 326 pp² apart under the relative-only rule and 395 with self-imitation. Unrelated members at step 45 were 323 and 424 apart, and by step 90 they are 514 and 604 apart. Which problems a member solves keeps moving at about the same pace whether or not two members share a history; a clone moves away from its twin as fast as two strangers moved apart in their first 45 steps.
+- **Scalar traits are inherited.** The regression of a clone's trait at step 90 on its parent's at step 45 has a slope near 1 for answer length (1.04, interval 0.12 to 3.4), code length (1.61, 0.52 to 2.57), imports (1.29, 0.77 to 1.77), headers (1.33, 0.92 to 1.96) and lines of explicit checking (1.12, 0.41 to 2.63); for accuracy the slope is 0.96 with an interval that includes zero. Intraclass correlations point the same way (accuracy 0.64, loops 0.93, imports 0.76) but seven families give wide intervals.
+
+**Reading.** A lineage inherits how it writes, how long, its coding habits and probably its level. It does not hold on to its particular set of solved problems: that set diffuses steadily under further training. Substantive divergence between members is therefore real at any moment and half transferable to unseen sources, but it is accumulated drift, not a trait that a lineage keeps and builds on. Frontier consolidation is aimed exactly here, and pilot F was doubled to six parents on the card that became free.
+
 ## In progress
 
-- Pilot E (taste-shaped reward, one card, to tomorrow morning) and pilot F (frontier consolidation, two cards, to tomorrow).
-- The evaluation of the fourteen step-90 clones on real-data selection items, for the heritability of which problems a member solves.
+- Pilot E (taste-shaped reward, two parents) and pilot F (frontier consolidation, six parents), finishing between 05:00 and midday on 27 November; then their evaluation at step 90.
