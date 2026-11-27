@@ -155,7 +155,6 @@ members:
   - {id: procedure-adv-pln, parent: {member: procedure-adv, step: 45}, seed: 828, overrides: {amplification: {steps: 90}}}
   # Reversed taste for the six pilot F parents (27 November): pulls correct answers toward the base model; their -pln
   # clones are the neutral reference. Tests on eight parents in all whether this anchoring improves on plain training.
-  - {id: placebo-adv-rev, parent: {member: placebo-adv, step: 45}, seed: 841, overrides: {amplification: {steps: 90, taste: {strength: -0.25}}}}
   - {id: ground_up-adv-rev, parent: {member: ground_up-adv, step: 45}, seed: 842, overrides: {amplification: {steps: 90, taste: {strength: -0.25}}}}
   - {id: small_case-adv-rev, parent: {member: small_case-adv, step: 45}, seed: 843, overrides: {amplification: {steps: 90, taste: {strength: -0.25}}}}
   - {id: observe-adv-rev, parent: {member: observe-adv, step: 45}, seed: 844, overrides: {amplification: {steps: 90, taste: {strength: -0.25}}}}
