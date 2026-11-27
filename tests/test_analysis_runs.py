@@ -119,6 +119,13 @@ def run_dir(tmp_path_factory, base_model):
     mp.setattr(evaluate, "check_gold", lambda tasks: None)
     mp.setattr(evaluate, "suite_tasks", lambda *a: [task(f, d, k, j) for f, d, k in UNITS for j in range(10, 50)])
     evaluate.evaluate(run.dir, "selection", EVAL_LABELS, 40, 4, "0/1", TAG, "http://stand-in")
+    # the shape of pilot C's s45 and s90: the parents at the clone point on every item, the clones later on the dataset
+    # items and one item per procedural family, without the base model
+    evaluate.evaluate(run.dir, "selection", ["st@1", "ta@1", "st-si@1"], 40, 4, "0/1", "par", "http://stand-in")
+    mp.setattr(evaluate, "suite_tasks", lambda *a: [task(f, d, k, j) for f, d, k in UNITS for j in range(10, 50)
+                                                    if k != "procedural" or j == 10])
+    evaluate.evaluate(run.dir, "selection", ["st-c1@2", "st-c2@2", "ta-c1@2", "st-si-c1@2"], 1, 4, "0/1", "sub",
+                      "http://stand-in", per_source=40)
     yield run.dir
     mp.undo()
 
@@ -314,8 +321,54 @@ def test_arms_by_update_rule(run_dir, tmp_path):
     assert {"raw", "stripped"} <= set(au["view"]) and "all" in set(au["arm"])
 
 
+def test_heritability_on_tags_of_different_items(run_dir, tmp_path):
+    """Parents at the clone point in one tag, their clones later in another with one item per procedural family and
+    no base model (pilot C's s45 and s90): merged on the common items."""
+    heritability.main([str(run_dir), "--tag", "par,sub", "--out", str(tmp_path)])
+    text = (tmp_path / "report.txt").read_text()
+    assert "tags merged on the 201 items" in text  # the 200 dataset items and the one gcd item both tags hold
+    reg = pd.read_csv(tmp_path / "regression.csv")
+    assert set(reg["step"]) == {2} and reg.loc[reg["trait"] == "accuracy", "families"].item() == 3
+    assert {"profile_math", "profile_logic"} <= set(reg["trait"])
+    sep = pd.read_csv(tmp_path / "separation.csv")
+    clone = sep[(sep["pairs"] == "clone") & (sep["step"] == 2)].iloc[0]
+    assert clone["apart"] == 1 and clone["n"] == 1  # st-c1@2 and st-c2@2, apart since step 1
+    assert set(sep["pairs"]) <= {"clone", "unrelated", "common start"}
+
+
+def test_layout_shares_of_deviation_and_margins(run_dir, tmp_path):
+    deviation.main([str(run_dir), "--boot", "30", "--out", str(tmp_path / "d")])
+    au = pd.read_csv(tmp_path / "d" / "authors.csv")
+    a = au[(au["scope"] == "all") & (au["deviation"] != 0)]
+    assert a["layout_tokens"].between(0, 1).all() and a["layout_share"].notna().all()
+    distinct.main([str(run_dir), "--step", "2", "--boot", "30", "--perms", "50", "--classifier-items", "0",
+                   "--out", str(tmp_path / "x")])
+    per = pd.read_csv(tmp_path / "x" / "members.csv").set_index("member")
+    dev = a.set_index("author")
+    for m in ("st@2", "ta-c1@2"):  # the layout part of the diagonal minus the base row is the deviation's
+        assert per.loc[m, "deviation_in_layout"] == pytest.approx(dev.loc[m, "layout_share"], abs=1e-3)
+        assert per.loc[m, "layout_tokens"] == pytest.approx(dev.loc[m, "layout_tokens"])
+
+
+def test_arms_paired_by_parent(run_dir, tmp_path):
+    arms.main([str(run_dir), "--parents", "st", "--arms", "c1,c2", "--reference", "c2", "--boot", "30",
+               "--classifier-items", "6", "--out", str(tmp_path)])
+    pairs = pd.read_csv(tmp_path / "pairs.csv")
+    assert set(pairs["step"]) == {1, 2} and set(pairs["arm"]) == {"c1"} and (pairs["parents"] == 1).all()
+    assert {"deviation", "deviation_in_layout", "accuracy"} <= set(pairs["metric"])
+    hp = pd.read_csv(tmp_path / "history_pairs.csv")
+    assert set(hp["field"]) == {"reward", "completion_tokens", "truncated", "groups"} and (hp["cells"] == 1).all()
+    with pytest.raises(SystemExit, match="not a clone"):  # st-si-c1 continues st-si, not st
+        arms.main([str(run_dir), "--parents", "st", "--arms", "c1,si-c1", "--reference", "c1", "--out", str(tmp_path)])
+
+
 def test_rule_names_name_every_computed_term():
-    from evotaste.config import Amplification, Exaggeration, Practice
+    from evotaste.config import Amplification, Exaggeration, Practice, Revisit, Taste
+
+    assert data.rule_name(Amplification(taste=Taste(0.0))) == "centered"  # pilot E's neutral clones: the parent's rule
+    assert data.rule_name(Amplification(taste=Taste(-0.25))) == "centered+taste-0.25"
+    assert data.rule_name(Amplification(revisit=Revisit(0.33, "own"))) == "centered+rvown0.33"
+    assert data.rule_name(Amplification(revisit=Revisit(0.0, "own"))) == "centered"
 
     assert data.rule_name(Amplification()) == "centered"
     assert data.rule_name(Amplification(self_imitation=0.5)) == "centered+si0.5"

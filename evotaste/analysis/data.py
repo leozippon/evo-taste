@@ -70,17 +70,13 @@ class Lineage:
         return self.level in ("placebo", "unseeded")
 
 
-def taste_of(amp: config.Amplification):
-    """The taste-shaped reward's settings (WP-E3), or None; read by name because older engines have no such key."""
-    return getattr(amp, "taste", None)
-
-
 def rule_name(amp: config.Amplification) -> str:
     """The update rule, naming every term the update actually computes: the advantage, then +si<beta>
     (self-imitation), +ex<gamma>x<weight> (exaggeration), ~free when the imitation terms take only successes within
-    the free length, +pr<eta> (self-chosen practice; +prb<eta> relative to the base model's pass rate) and
-    +taste<strength>. A term that the engine skips (weight, gamma, eta or strength 0) is not named, so two members
-    with the same name receive the same update."""
+    the free length, +pr<eta> (self-chosen practice; +prb<eta> relative to the base model's pass rate),
+    +taste<strength> (+tasteL<strength> with the length-residualized score) and +rv<source><share> (revisits; +rp<rho>
+    with replay imitation). A term that the engine skips (weight, gamma, eta, strength or share 0) is not named, so two
+    members with the same name receive the same update."""
     name = amp.advantage
     imitation = False
     if amp.self_imitation > 0:
@@ -93,10 +89,12 @@ def rule_name(amp: config.Amplification) -> str:
     if imitation and amp.imitate_within_free:
         name += "~free"
     if amp.practice is not None and amp.practice.eta > 0:
-        name += f"+pr{'b' if getattr(amp.practice, 'reference', None) == 'base' else ''}{amp.practice.eta:g}"
-    taste = taste_of(amp)
-    if taste is not None and taste.strength != 0:
-        name += f"+taste{taste.strength:g}"
+        name += f"+pr{'b' if amp.practice.reference == 'base' else ''}{amp.practice.eta:g}"
+    if amp.taste is not None and amp.taste.strength != 0:
+        name += f"+taste{'L' if amp.taste.residualize else ''}{amp.taste.strength:g}"
+    rv = amp.revisit
+    if rv is not None and rv.share > 0:
+        name += f"+rv{rv.source}{rv.share:g}" + (f"+rp{rv.imitate:g}" if rv.imitate > 0 else "")
     return name
 
 
@@ -127,10 +125,9 @@ class Run:
                 path = self.dir / "members" / lineage_id / "state.json"
                 s = read_json(path) if path.exists() else {"status": "pending", "step": 0, "replaced_by": None}
                 parent = (spec.parent.member, spec.parent.step) if spec.parent else None
-                taste = taste_of(amp)
                 out[lineage_id] = Lineage(lineage_id, context, level, self.contexts.theme.get(context), seed,
                                           rule_name(amp), parent, amp.steps, s["status"], s["step"], path.parent,
-                                          None if taste is None else float(taste.strength))
+                                          None if amp.taste is None else float(amp.taste.strength))
                 lineage_id = s["replaced_by"]
         return out
 
@@ -230,6 +227,7 @@ class Grid:
     texts: np.ndarray | None = None
     sha: dict[str, str | None] | None = None
     aliases: dict[str, str] | None = None  # evaluation labels dropped because another label is the same adapter
+    dropped: int = 0  # items left out when merging tags of different item sets (load_eval)
 
     @property
     def samples(self) -> int:
@@ -340,10 +338,11 @@ def check_families(records: list[dict], by_family: dict[str, float], what: str) 
 
 
 def load_eval(run: Run, tag: str, traits=None, keep_texts: bool = False) -> Grid:
-    """A complete selection evaluation runs/<name>/eval/selection/<tag>/, or several (tags separated by commas) of
-    the same items and samples, merged. Labels that name the same adapter (equal content hash) are the same model (a
-    clone at its clone point is its parent's checkpoint): one is kept, a label of the original lineage before a
-    clone's, and the others are listed in `aliases`."""
+    """A complete selection evaluation runs/<name>/eval/selection/<tag>/, or several (tags separated by commas) with
+    the same samples per item, merged on the items that every label answered (the number left out is `dropped`).
+    Labels that name the same adapter (equal content hash) are the same model (a clone at its clone point is its
+    parent's checkpoint): one is kept, a label of the original lineage before a clone's, and the others are listed in
+    `aliases`."""
     groups, samples = collections.defaultdict(list), set()
     for t in tag.split(","):
         out = run.dir / "eval" / SUITE / t
@@ -370,6 +369,14 @@ def load_eval(run: Run, tag: str, traits=None, keep_texts: bool = False) -> Grid
             groups[label] = recs
     if len(samples) != 1:
         raise SystemExit(f"tags {tag} have different numbers of samples per item: {sorted(samples)}")
+    dropped = 0
+    if "," in tag:  # tags of different item sets (s90 holds one item per procedural family): the common items
+        sets = [{r["uid"] for r in recs} for recs in groups.values()]
+        common = set.intersection(*sets)
+        dropped = len(set.union(*sets) - common)
+        if not common:
+            raise SystemExit(f"tags {tag} have no item in common")
+        groups = {a: [r for r in recs if r["uid"] in common] for a, recs in groups.items()}
     sha, aliases, kept = {}, {}, {}
     for label in sorted(groups, key=lambda a: (a != "base" and run.resolve(a)[0].parent is not None, a)):
         hashes = {r["adapter_sha256"] for r in groups[label]}
@@ -382,7 +389,7 @@ def load_eval(run: Run, tag: str, traits=None, keep_texts: bool = False) -> Grid
         kept[h] = label
         sha[label] = h
     grid = build_grid({a: groups[a] for a in sha}, samples.pop(), run.units, traits, keep_texts)
-    grid.sha, grid.aliases = sha, aliases
+    grid.sha, grid.aliases, grid.dropped = sha, aliases, dropped
     return grid
 
 
@@ -412,6 +419,24 @@ def add_strata(grid: Grid, strata: dict[str, str] | None) -> None:
 
 DEVIATION_COLUMNS = ["subject", "lineage", "step", "factor", "uid", "domain", "tokens", "delta_sum"]
 CROSS_COLUMNS = ["scorer", "author", "step", "uid", "domain", "tokens", "logprob_sum"]
+# Since 27 November both tables add the answer's layout tokens (no letter or digit) and the sum over them alone.
+DEVIATION_LAYOUT = ["layout_tokens", "layout_delta_sum"]
+CROSS_LAYOUT = ["layout_tokens", "layout_logprob_sum"]
+
+
+def _columns(df: pd.DataFrame, base: list[str], layout: list[str], what) -> pd.DataFrame:
+    """Checks a table's columns: `base`, followed by the `layout` columns in tables written since they exist; an older
+    table gets them as NaN (has_layout tells them apart)."""
+    if list(df.columns) == base:
+        return df.assign(**{c: np.nan for c in layout})
+    if list(df.columns) != base + layout:
+        raise ValueError(f"{what}: columns {list(df.columns)}, expected {base} or {base + layout}")
+    return df
+
+
+def has_layout(df: pd.DataFrame) -> bool:
+    """Whether a likelihood table has its layout columns (written since they exist)."""
+    return bool(df["layout_tokens"].notna().all())
 
 
 def deviation_selection(run: Run, selection: str | Path | None = None) -> Path:
@@ -453,19 +478,19 @@ def _items_of(run: Run, sel: Path, df: pd.DataFrame, who: str, what: str) -> pd.
 
 
 def deviation_table(run: Run, selection: str | Path | None = None, partial: bool = False) -> tuple[pd.DataFrame, Path]:
-    """Per-response rows of a deviation selection (columns DEVIATION_COLUMNS plus family and unit): its responses.csv,
-    which the engine writes when the command finishes, or with `partial` its per-author cache files (<label>.json), of
-    a selection still being scored. A cache counts only if it was computed on the author's current committed answers
-    (the SHA-256 of the answers file, the key the engine itself checks besides the adapter's hash: a checkpoint and the
-    probe it answered are committed together, so new answers come with a new file)."""
+    """Per-response rows of a deviation selection (columns DEVIATION_COLUMNS and DEVIATION_LAYOUT, NaN in a table from
+    before the layout columns, plus family and unit): its responses.csv, which the engine writes when the command
+    finishes, or with `partial` its per-author cache files (<label>.json), of a selection still being scored. A cache
+    counts only if it was computed on the author's current committed answers (the SHA-256 of the answers file, the key
+    the engine itself checks besides the adapter's hash: a checkpoint and the probe it answered are committed
+    together, so new answers come with a new file) and, like the engine's own table, has the layout columns."""
     sel = deviation_selection(run, selection)
     if not partial:
         if not (sel / "responses.csv").exists():
             raise SystemExit(f"{sel}: no responses.csv (the deviation command has not finished); --partial reads the "
                              "per-author results finished so far")
         df = pd.read_csv(sel / "responses.csv", dtype={"subject": str, "lineage": str, "uid": str, "domain": str})
-        if list(df.columns) != DEVIATION_COLUMNS:
-            raise ValueError(f"{sel}/responses.csv: columns {list(df.columns)}, expected {DEVIATION_COLUMNS}")
+        df = _columns(df, DEVIATION_COLUMNS, DEVIATION_LAYOUT, f"{sel}/responses.csv")
     else:
         rows, stale = [], []
         for cache in sorted(sel.glob("*@*.json")):
@@ -475,19 +500,18 @@ def deviation_table(run: Run, selection: str | Path | None = None, partial: bool
                 current = hashlib.sha256(author_file(run, label).read_bytes()).hexdigest() == c["sha256"]
             except ValueError:
                 current = False
-            if not current:
+            if not current or not all("layout_tokens" in r for r in c["responses"]):
                 stale.append(label)
                 continue
             if {r["subject"] for r in c["responses"]} != {label}:
                 raise ValueError(f"{cache}: rows of another subject")
             rows += c["responses"]
         if stale:
-            print(f"{sel}: left out {len(stale)} cache files of answers no longer committed: {', '.join(stale)}")
+            print(f"{sel}: left out {len(stale)} cache files of answers no longer committed or without layout columns: "
+                  f"{', '.join(stale)}")
         if not rows:
             raise SystemExit(f"{sel}: no finished per-author results yet")
-        df = pd.DataFrame(rows)
-        if list(df.columns) != DEVIATION_COLUMNS:
-            raise ValueError(f"{sel}: cache columns {list(df.columns)}, expected {DEVIATION_COLUMNS}")
+        df = _columns(pd.DataFrame(rows), DEVIATION_COLUMNS, DEVIATION_LAYOUT, f"{sel} caches")
     df["factor"] = pd.to_numeric(df["factor"])
     return _items_of(run, sel, df, "subject", "responses"), sel
 
@@ -501,16 +525,16 @@ def cross_table(run: Run, step: int, selection: str | Path | None = None) -> tup
     if not path.exists():
         raise SystemExit(f"{path}: no cross-likelihood table at step {step} (python -m evotaste.evaluate deviation "
                          f"runs/{run.name} --steps {step} --cross)")
-    df = pd.read_csv(path, dtype={"scorer": str, "author": str, "uid": str, "domain": str})
-    if list(df.columns) != CROSS_COLUMNS:
-        raise ValueError(f"{path}: columns {list(df.columns)}, expected {CROSS_COLUMNS}")
+    df = _columns(pd.read_csv(path, dtype={"scorer": str, "author": str, "uid": str, "domain": str}), CROSS_COLUMNS,
+                  CROSS_LAYOUT, path)
     if (df["step"] != step).any():
         raise ValueError(f"{path}: rows of another step")
     subjects = set(df["scorer"])
     if set(df["author"]) != subjects or df.duplicated(["scorer", "author", "uid"]).any():
         raise ValueError(f"{path}: scorers and authors differ, or a (scorer, author, item) appears twice")
-    if (df.groupby(["author", "uid"])["tokens"].nunique() != 1).any() or (
-            df.groupby(["author", "uid"]).size() != len(subjects)).any():
+    answer = df.groupby(["author", "uid"])
+    if (answer["tokens"].nunique() != 1).any() or (answer.size() != len(subjects)).any() or (
+            has_layout(df) and (answer["layout_tokens"].nunique() != 1).any()):
         raise ValueError(f"{path}: an answer is not scored once by every scorer with the same tokens")
     _items_of(run, sel, df[df["scorer"] == "base"].copy(), "author", path.name)
     meta = {r["uid"]: r["family"] for r in run.base_records()}

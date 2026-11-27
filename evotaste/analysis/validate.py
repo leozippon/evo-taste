@@ -193,6 +193,7 @@ def simulate_cross(rng, m: int, n: int, length: int = 20, vocab: int = 8, spread
             for i in range(n):
                 rows.append({"scorer": names[s], "author": names[a], "step": 0, "uid": f"u{i:04d}",
                              "domain": ("math", "logic")[i % 2], "tokens": length, "logprob_sum": lp[s, i],
+                             "layout_tokens": np.nan, "layout_logprob_sum": np.nan,  # no layout in these members
                              "family": f"f{i // 25}", "unit": "far"})
     return pd.DataFrame(rows), kl
 

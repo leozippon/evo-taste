@@ -50,18 +50,26 @@ class Cross:
         self.lp[s, a, i] = df["logprob_sum"].to_numpy()
         self.tokens = np.zeros((len(pos), len(ip)))
         self.tokens[a, i] = df["tokens"].to_numpy()
+        # the same over the layout tokens alone (no letter or digit); NaN in tables from before the layout columns
+        self.layout = data.has_layout(df)
+        self.layout_lp = np.full(self.lp.shape, np.nan)
+        self.layout_lp[s, a, i] = df["layout_logprob_sum"].to_numpy()
+        self.layout_tokens = np.full(self.tokens.shape, np.nan)
+        self.layout_tokens[a, i] = df["layout_tokens"].to_numpy()
 
     @property
     def members(self) -> list[str]:
         return self.subjects[1:]
 
 
-def margins(c: Cross, w: np.ndarray, keep: np.ndarray | None = None) -> np.ndarray:
+def margins(c: Cross, w: np.ndarray, keep: np.ndarray | None = None, layout: bool = False) -> np.ndarray:
     """margin[a, b, draw]: per-token log-likelihood of author a's answers under a minus under b, over the items
-    where keep holds, items weighted by w (draws x items)."""
+    where keep holds, items weighted by w (draws x items). With `layout`, the part of it that the layout tokens
+    contribute (still per token of all tokens, so that it adds to the content part to make the margin)."""
     keep = np.ones(len(c.items), bool) if keep is None else keep
-    own = np.einsum("aai->ai", c.lp)
-    diff = own[:, None, :] - c.lp.transpose(1, 0, 2)  # [author, scorer, item]
+    lp = c.layout_lp if layout else c.lp
+    own = np.einsum("aai->ai", lp)
+    diff = own[:, None, :] - lp.transpose(1, 0, 2)  # [author, scorer, item]
     wk = w * keep[None, :]
     with np.errstate(invalid="ignore", divide="ignore"):
         return (diff @ wk.T) / (c.tokens @ wk.T)[:, None, :]
@@ -175,27 +183,47 @@ def analyse(run: data.Run, step: int, selection=None, b: int = 1000, perms: int 
                                                        for d in sorted(c.items["domain"].unique())]
     for scope, keep in scopes:
         mp, md = margins(c, ones, keep)[..., 0], margins(c, w, keep)
+        lp_, ld_ = margins(c, ones, keep, layout=True)[..., 0], margins(c, w, keep, layout=True)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            share_d = ld_ / md
         for a, author in enumerate(c.subjects):
             for s, scorer in enumerate(c.subjects):
                 if a != s:
                     rows.append({"scope": scope, "author": author, "scorer": scorer, "margin": mp[a, s],
-                                 **dict(zip(("lo", "hi"), stats.ci(md[a, s])))})
+                                 **dict(zip(("lo", "hi"), stats.ci(md[a, s]))), "layout_margin": lp_[a, s],
+                                 "layout_share": lp_[a, s] / mp[a, s] if mp[a, s] else np.nan,
+                                 **dict(zip(("layout_share_lo", "layout_share_hi"), stats.ci(share_d[a, s])))})
     marg = pd.DataFrame(rows)
     mp, md = margins(c, ones)[..., 0], margins(c, w)
+    lp_, ld_ = margins(c, ones, layout=True)[..., 0], margins(c, w, layout=True)
     m = np.arange(1, len(c.subjects))
     dist_point = (mp[np.ix_(m, m)] + mp[np.ix_(m, m)].T) / 2
     dist_draws = (md[np.ix_(m, m)] + md[np.ix_(m, m)].transpose(1, 0, 2)) / 2
+    lay_point = (lp_[np.ix_(m, m)] + lp_[np.ix_(m, m)].T) / 2
+    lay_draws = (ld_[np.ix_(m, m)] + ld_[np.ix_(m, m)].transpose(1, 0, 2)) / 2
     lins = {s: (run.resolve(s)[0] if s not in run.scaled else run.lineages[run.scaled[s]["lineage"]]) for s in c.members}
     a_, b_ = np.triu_indices(len(m), 1)
-    dist = pd.DataFrame({"a": [c.members[i] for i in a_], "b": [c.members[j] for j in b_],
-                         "same_rule": [lins[c.members[i]].arm == lins[c.members[j]].arm for i, j in zip(a_, b_)],
-                         "distance": dist_point[a_, b_],
-                         "lo": [stats.ci(dist_draws[i, j])[0] for i, j in zip(a_, b_)],
-                         "hi": [stats.ci(dist_draws[i, j])[1] for i, j in zip(a_, b_)]})
     ident, hit = identification(c, w)
-    per = pd.DataFrame({"member": c.members, "tokens": c.tokens[m].mean(1), "deviation": mp[m, 0],
-                        "distinctness": [np.mean([mp[k, j] for j in m if j != k]) for k in m],
-                        "identified": hit.mean(1)})
+    with np.errstate(invalid="ignore", divide="ignore"):
+        lay_share = lay_draws / dist_draws
+        dist = pd.DataFrame({"a": [c.members[i] for i in a_], "b": [c.members[j] for j in b_],
+                             "same_rule": [lins[c.members[i]].arm == lins[c.members[j]].arm for i, j in zip(a_, b_)],
+                             "distance": dist_point[a_, b_],
+                             "lo": [stats.ci(dist_draws[i, j])[0] for i, j in zip(a_, b_)],
+                             "hi": [stats.ci(dist_draws[i, j])[1] for i, j in zip(a_, b_)],
+                             "layout_share": lay_point[a_, b_] / dist_point[a_, b_],
+                             "layout_share_lo": [stats.ci(lay_share[i, j])[0] for i, j in zip(a_, b_)],
+                             "layout_share_hi": [stats.ci(lay_share[i, j])[1] for i, j in zip(a_, b_)]})
+        others = ~np.eye(len(m), dtype=bool)
+        per = pd.DataFrame({
+            "member": c.members, "tokens": c.tokens[m].mean(1), "deviation": mp[m, 0],
+            "distinctness": [mp[k, m[others[j]]].mean() for j, k in enumerate(m)],
+            "identified": hit.mean(1),
+            "layout_tokens": c.layout_tokens[m].sum(1) / c.tokens[m].sum(1),
+            "deviation_in_layout": lp_[m, 0] / mp[m, 0],
+            "distinctness_in_layout": [lp_[k, m[others[j]]].mean() / mp[k, m[others[j]]].mean() for j, k in enumerate(m)]})
+    res_layout = {"pairs_in_layout": float(lay_point[a_, b_].sum() / dist_point[a_, b_].sum()),
+                  "pairs_in_layout_ci": stats.ci(lay_draws[a_, b_].sum(0) / dist_draws[a_, b_].sum(0))}
     # distance against the pair's difference in answer length, as in the length command
     rules = np.array([lins[s].arm for s in c.members])
     lt = np.log(per["tokens"].to_numpy())
@@ -212,6 +240,7 @@ def analyse(run: data.Run, step: int, selection=None, b: int = 1000, perms: int 
         out["authorship"] = pd.DataFrame()
     out["_selection"] = sel
     out["_n"] = (len(c.members), len(c.items))
+    out["_layout"] = res_layout if c.layout else None
     return out
 
 
@@ -220,11 +249,18 @@ def report_lines(run: data.Run, step: int, res: dict) -> list[str]:
     lines = [f"distinct {run.name}, step {step}: {n_members} members x {n_items} probe items "
              f"(selection {res['_selection'].name}); nats per token [95% bootstrap over items]"]
     per = res["members"]
+    lay = res["_layout"]
     lines += ["", "per member: deviation (margin over the base model), distinctness (mean margin over the other members), "
-                  "share of its answers identified by likelihood, mean answer tokens"]
-    lines += render(["member", "tokens", "deviation", "distinctness", "identified %"],
+                  "share of its answers identified by likelihood, mean answer tokens; the share of deviation and of "
+                  "distinctness that sits in layout tokens (no letter or digit), against their share of the tokens"
+              + ("" if lay else " (not in this table: written before the layout columns)")]
+    lines += render(["member", "tokens", "deviation", "distinctness", "identified %", "layout tok %", "dev in layout %",
+                     "distinct in layout %"],
                     [[r.member, f"{r.tokens:.0f}", num(r.deviation, digits=3), num(r.distinctness, digits=3),
-                      pct(r.identified)] for r in per.itertuples()])
+                      pct(r.identified), pct(r.layout_tokens, 0), pct(r.deviation_in_layout, 0),
+                      pct(r.distinctness_in_layout, 0)] for r in per.itertuples()])
+    if lay:
+        lines += [f"  share of all pairs' distance in layout tokens: {pci(lay['pairs_in_layout'], *lay['pairs_in_layout_ci'])}"]
     idt = res["identification"]
     lines += ["", f"identification by likelihood (nothing is fitted, so every domain's rate is out of sample; chance "
                   f"{pct(1 / n_members)}%): " + "; ".join(f"{r.scope} {pci(r.rate, r.lo, r.hi)}" for r in idt.itertuples())]

@@ -39,8 +39,13 @@ class Table:
                       .reset_index(drop=True))
         a = df["subject"].map({s: i for i, s in enumerate(self.labels)}).to_numpy()
         i = df["uid"].map({u: j for j, u in enumerate(self.items["uid"])}).to_numpy()
-        self.tokens, self.delta = np.zeros((len(self.labels), len(self.items))), np.zeros((len(self.labels), len(self.items)))
+        shape = (len(self.labels), len(self.items))
+        self.tokens, self.delta = np.zeros(shape), np.zeros(shape)
         self.tokens[a, i], self.delta[a, i] = df["tokens"].to_numpy(), df["delta_sum"].to_numpy()
+        # tokens without a letter or digit and the log-ratio over them alone (NaN in tables from before them)
+        self.layout = data.has_layout(df)
+        self.layout_tokens, self.layout_delta = np.full(shape, np.nan), np.full(shape, np.nan)
+        self.layout_tokens[a, i], self.layout_delta[a, i] = df["layout_tokens"].to_numpy(), df["layout_delta_sum"].to_numpy()
         first = df.drop_duplicates("subject").set_index("subject")
         self.factor = {s: first.loc[s, "factor"] for s in self.labels}
         self.subject = {}  # label -> (lineage, step) of the probe it stands for
@@ -60,6 +65,16 @@ class Table:
 
     def draws(self, b: int, rng) -> np.ndarray:
         return stats.item_draws(data.strata(self.items), b, rng)
+
+    def layout_parts(self, w: np.ndarray, mask: np.ndarray | None = None) -> dict[str, np.ndarray]:
+        """Per author and row of w: the share of its answers' tokens that are layout, the share of its summed
+        log-ratio that sits in them, and the deviation per token of the other (content) tokens."""
+        m = np.ones(self.tokens.shape) if mask is None else mask.astype(float)
+        tok, lay_tok = (self.tokens * m) @ w.T, (self.layout_tokens * m) @ w.T
+        dev, lay_dev = (self.delta * m) @ w.T, (self.layout_delta * m) @ w.T
+        with np.errstate(invalid="ignore", divide="ignore"):
+            return {"layout_tokens": lay_tok / tok, "layout_share": lay_dev / dev,
+                    "content": (dev - lay_dev) / (tok - lay_tok)}
 
 
 def scopes(items: pd.DataFrame) -> list[tuple[str, np.ndarray]]:
@@ -92,11 +107,14 @@ def author_table(t: Table, w: np.ndarray) -> pd.DataFrame:
     for scope, keep in scopes(t.items):
         mask = np.broadcast_to(keep, t.tokens.shape)
         point, draws = t.ratio(stats.ones(len(t.items)), mask)[:, 0], t.ratio(w, mask)
+        lp, ld = t.layout_parts(stats.ones(len(t.items)), mask), t.layout_parts(w, mask)
         for a, s in enumerate(t.labels):
             lin, step = t.subject[s]
             rows.append({"author": s, "lineage": lin.id, "step": step, "factor": t.factor[s], "rule": lin.arm,
                          "scope": scope, "answers": int(keep.sum()), "tokens": float(t.tokens[a, keep].mean()),
-                         "deviation": point[a], **dict(zip(("lo", "hi"), stats.ci(draws[a])))})
+                         "deviation": point[a], **dict(zip(("lo", "hi"), stats.ci(draws[a]))),
+                         **{k2: v for k in lp for k2, v in ((k, lp[k][a, 0]), (f"{k}_lo", stats.ci(ld[k][a])[0]),
+                                                           (f"{k}_hi", stats.ci(ld[k][a])[1]))}})
     return pd.DataFrame(rows)
 
 
@@ -156,7 +174,8 @@ def trajectory_table(run: data.Run, t: Table, typical: np.ndarray, w: np.ndarray
     with np.errstate(invalid="ignore", divide="ignore"):
         vals = {"deviation": (t.ratio(ones)[:, 0], t.ratio(w)),
                 "share_beyond": (beyond.mean(1), (beyond @ w.T) / w.sum(1)),
-                "at_typical": (at_typical(t, typical, ones)[0][:, 0], at_typical(t, typical, w)[0])}
+                "at_typical": (at_typical(t, typical, ones)[0][:, 0], at_typical(t, typical, w)[0]),
+                "layout_share": (t.layout_parts(ones)["layout_share"][:, 0], t.layout_parts(w)["layout_share"])}
     groups = {}
     for s in trajectory_members(run, t):
         lin, step = t.subject[s]
@@ -196,27 +215,36 @@ def report_lines(run: data.Run, res: dict) -> list[str]:
                       "base model's typical length on the item (median of its "
                       f"{res['typical_draws']} probes of the base weights); deviation of an answer of that length "
                       "(least-squares line of an answer's deviation on log2 relative length)"]
-        lines += render(["rule", "step", "n", "tokens", "deviation [95%]", "longer % [95%]", "at typical length [95%]"],
+        lines += render(["rule", "step", "n", "tokens", "deviation [95%]", "longer % [95%]", "at typical length [95%]",
+                         "in layout % [95%]"],
                         [[r.rule, r.step, r.members, f"{r.tokens:.0f}", num(r.deviation, r.deviation_lo, r.deviation_hi, 3),
                           num(100 * r.share_beyond, 100 * r.share_beyond_lo, 100 * r.share_beyond_hi, 0),
-                          num(r.at_typical, r.at_typical_lo, r.at_typical_hi, 3)] for r in tr.itertuples()], 1)
+                          num(r.at_typical, r.at_typical_lo, r.at_typical_hi, 3),
+                          num(100 * r.layout_share, 100 * r.layout_share_lo, 100 * r.layout_share_hi, 0)]
+                         for r in tr.itertuples()], 1)
     ln, au = res["length"], res["authors"]
     allscope = au[au["scope"] == "all"].set_index("author")
-    lines += ["", "per author: deviation overall and by domain; against length: share of answers longer than the "
-                  "typical length, deviation of the answers within it and beyond it, at the typical length and per "
-                  "doubling, and Spearman rho of an answer's deviation with its relative length"]
+    lines += ["", "per author: deviation overall and by domain; share of it in layout tokens (no letter or digit) and "
+                  "their share of the tokens" + ("" if t.layout else " (not in this table: written before the layout "
+                                                                     "columns)")
+              + "; against length: share of answers longer than the typical length, deviation of the answers within "
+                "it and beyond it, at the typical length and per doubling, and Spearman rho of an answer's deviation "
+                "with its relative length"]
     doms = [s for s in dict.fromkeys(au["scope"]) if s != "all"]
     cell = {(r.author, r.scope): r for r in au.itertuples()}
     rows = []
     for r in ln.itertuples():
-        rows.append([r.author, f"{allscope.loc[r.author, 'tokens']:.0f}",
-                     num(cell[(r.author, 'all')].deviation, cell[(r.author, 'all')].lo, cell[(r.author, 'all')].hi, 3)]
+        a = cell[(r.author, "all")]
+        rows.append([r.author, f"{allscope.loc[r.author, 'tokens']:.0f}", num(a.deviation, a.lo, a.hi, 3)]
                     + [num(cell[(r.author, d)].deviation, digits=3) for d in doms]
+                    + [num(100 * a.layout_share, 100 * a.layout_share_lo, 100 * a.layout_share_hi, 0),
+                       num(100 * a.layout_tokens, digits=0)]
                     + [f"{100 * r.share_beyond:.0f}", num(r.within, digits=3), num(r.beyond, digits=3),
                        num(r.at_typical, r.at_typical_lo, r.at_typical_hi, 3), num(r.per_doubling, digits=3),
                        num(r.rho, r.rho_lo, r.rho_hi)])
-    lines += render(["author", "tokens", "deviation [95%]"] + doms + ["longer %", "within", "beyond",
-                                                                      "at typical [95%]", "per x2", "rho [95%]"], rows)
+    lines += render(["author", "tokens", "deviation [95%]"] + doms + ["layout % [95%]", "layout tok %", "longer %",
+                                                                      "within", "beyond", "at typical [95%]", "per x2",
+                                                                      "rho [95%]"], rows)
     return lines
 
 

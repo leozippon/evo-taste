@@ -1,25 +1,27 @@
 """Arms of an amplification pilot: members grouped by the mechanism they train with, compared at every probe step.
 
-    python -m evotaste.analysis.arms runs/<name> [--census results/census/<c>] [--deviation DIR] [--partial]
-                                      [--boot 1000] [--classifier-items 150] [--out DIR]
+    python -m evotaste.analysis.arms runs/<name> [--parents p1,p2 --arms a1,a2,a3 --reference a2]
+                                      [--census results/census/<c>] [--deviation DIR] [--partial] [--boot 1000]
+                                      [--classifier-items 150] [--out DIR]
 
-Arms. When the run has members with a taste-shaped reward (pilot E, clones appended to pilot C), the arms are those
-members only: own (strength > 0), neu (0) and rev (< 0), and every comparison is paired by parent with the neutral
-clone as reference. Otherwise the arms are the update rules (data.rule_name) of every lineage that trains, as in
-pilot D (relative-only, exaggeration, practice). Tables:
+Arms. With --parents, the members are the clones <parent>-<arm> of the parents named (pilot E: --arms own,neu,rev
+--reference neu; pilot F: --arms fro,yok,pln,mat --reference pln), wherever they live in the run, and every
+comparison is paired by parent against the reference arm. Without, the arms are the update rules (data.rule_name)
+of every lineage that trains, as in pilot D. Tables:
 
 - history.csv: per arm and step, mean, minimum and maximum over members of the training history: reward,
-  completion tokens, truncated share, informative groups, each term's rollouts, tokens and loss, and every field
-  of the taste-shaped reward the history holds (fields.csv lists the expected ones that are absent).
-- probes.csv: per arm and probe step, the mean over members of (member - reference) of health's metrics (the
-  reference: the probes of the base weights), intervals over items; with --census by stratum too.
-- pairs.csv (taste arms): per probe step, own - neu and rev - neu averaged over parents, for the same metrics and
-  the deviation; at the clone step the three clones' probes are draws of one checkpoint, a null.
-- deviation.csv: per arm and step the mean deviation and the deviation at the base model's typical length
-  (evotaste.analysis.deviation), from the run's deviation selection or --deviation.
-- practice.csv, practice_common.csv: each practising member's source shares at every step, and the share of the
-  movement of log shares (from the shared stream's defaults) that is common to all practising members, against
-  1 / members, its expectation when members move independently.
+  completion tokens, truncated share, informative groups, each term's rollouts, tokens and loss, and the numeric
+  fields of the taste-shaped reward and of revisits (taste.<key>, revisit.<key>); fields.csv lists which are present.
+- history_pairs.csv (with --parents): per arm, window between probes and field (reward, tokens, truncated,
+  groups), the mean over parents and steps of arm - reference on the same step, with a normal interval over those
+  paired steps.
+- probes.csv: per arm and probe step, the mean over members of (member - reference), the reference being the probes
+  of the base weights (health), with intervals over items; with --census by stratum too.
+- pairs.csv (with --parents): per probe step and arm, arm - reference averaged over parents for health's metrics
+  and, when scored, the deviation, the deviation at typical length and its share in layout tokens; intervals over
+  items, per-parent values. At the clone step the clones' probes are draws of one checkpoint: a null.
+- deviation.csv: per arm and step the mean deviation, at the base model's typical length, and in layout tokens.
+- practice.csv, practice_common.csv: practising members' source shares and the share of their movement common to all.
 - authorship.csv: per probe step and arm, the classifier among the arm's members on their probe answers, raw and
   stripped of layout and notation, and the share lost by stripping.
 
@@ -39,53 +41,106 @@ from evotaste.analysis import data, deviation, divergence, health, stats
 from evotaste.analysis.report import num, pci, pct, render, write
 
 HISTORY = ("reward", "completion_tokens", "truncated", "groups", "adv_sequences", "adv_tokens", "adv_loss",
-           "si_sequences", "si_tokens", "si_loss", "ex_sequences", "ex_tokens", "ex_loss")
-# What WP-E3 logs per step for the taste-shaped reward (docs/dev/ROUND2_SPEC.md); read under any key with "taste".
-TASTE_EXPECTED = ("shaped rollouts", "shaped groups", "mean of s", "SD of s", "sigma", "corr(s, length)",
-                  "mean |advantage| from shaping", "mean |advantage| from correctness")
-PROBE_METRICS = ("accuracy", "near", "far", "mastered", "frontier", "heldout_complied", "truncated", "tokens")
-TASTE_ARMS = ("own", "neu", "rev")
+           "si_sequences", "si_tokens", "si_loss", "ex_sequences", "ex_tokens", "ex_loss", "rp_sequences",
+           "rp_tokens", "rp_loss")
+MECHANISMS = ("taste", "revisit")  # nested history dictionaries whose numeric fields are read
+PAIRED_HISTORY = ("reward", "completion_tokens", "truncated", "groups")
+# shown in the report when present: the taste score's mean and its correlation with length, shaped counts; revisit
+# slots, shortfall, frontier size, and reward on revisited against stream prompts
+MECHANISM_SHOWN = ("taste.score_mean", "taste.length_corr", "taste.shaped", "taste.groups", "revisit.slots",
+                   "revisit.shortfall", "revisit.frontier", "revisit.reward", "revisit.stream_reward")
+PROBE_METRICS = ("accuracy", "near", "far", "mastered", "sweet", "frontier", "heldout_complied", "truncated", "tokens")
 
 
-def arms_of(run: data.Run) -> tuple[dict[str, str], bool]:
-    """lineage id -> arm of every committed lineage that trains, and whether these are taste arms."""
-    trains = {i: lin for i, lin in run.lineages.items()
-              if run.committed(lin) and lin.steps > (lin.parent[1] if lin.parent else 0)}
-    taste = {i: lin for i, lin in trains.items() if lin.taste is not None}
-    if taste:
-        return {i: "own" if lin.taste > 0 else "rev" if lin.taste < 0 else "neu" for i, lin in taste.items()}, True
-    return {i: lin.arm for i, lin in trains.items()}, False
+def explicit_arms(run: data.Run, parents: list[str], arms: list[str], reference: str) -> tuple[dict, dict, list]:
+    """lineage id -> arm and -> parent for the committed clones <parent>-<arm>, and the clones not started yet or not
+    in the run (pilot F has -mat for one parent only); every arm must exist for some parent."""
+    if reference not in arms:
+        raise SystemExit(f"--reference {reference} is not among --arms {arms}")
+    arm_of, parent_of, waiting = {}, {}, []
+    for a in arms:
+        if not any(f"{p}-{a}" in run.lineages for p in parents):
+            raise SystemExit(f"arm {a}: no clone <parent>-{a} of {parents} in run {run.name}")
+    for p in parents:
+        for a in arms:
+            lid = f"{p}-{a}"
+            lin = run.lineages.get(lid)
+            if lin is None:
+                waiting.append(f"{lid} (not in the run)")
+                continue
+            if lin.parent is None or lin.parent[0] != p:
+                raise SystemExit(f"{lid}: not a clone of {p} in run {run.name}")
+            if run.committed(lin):
+                arm_of[lid], parent_of[lid] = a, p
+            else:
+                waiting.append(f"{lid} (not started)")
+    return arm_of, parent_of, waiting
+
+
+def rule_arms(run: data.Run) -> dict[str, str]:
+    """lineage id -> update rule of every committed lineage that trains."""
+    return {i: lin.arm for i, lin in run.lineages.items()
+            if run.committed(lin) and lin.steps > (lin.parent[1] if lin.parent else 0)}
 
 
 def flat(line: dict) -> dict[str, float]:
-    """The numeric history fields of one update: HISTORY and every field whose name holds 'taste' (nested dicts
-    flattened as taste.<key>)."""
+    """The numeric history fields of one update: HISTORY, and the numeric fields of the mechanisms' dictionaries
+    (taste.<key>, revisit.<key>)."""
     out = {k: float(line[k]) for k in HISTORY if isinstance(line.get(k), (int, float))}
-    for k, v in line.items():
-        if "taste" in k:
-            items = v.items() if isinstance(v, dict) else [(None, v)]
-            for k2, v2 in items:
-                if isinstance(v2, (int, float)) and not isinstance(v2, bool):
-                    out[k if k2 is None else f"{k}.{k2}"] = float(v2)
+    for k in MECHANISMS:
+        for k2, v in (line.get(k) or {}).items():
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                out[f"{k}.{k2}"] = float(v)
     return out
 
 
-def history_table(run: data.Run, arms: dict[str, str]) -> tuple[pd.DataFrame, pd.DataFrame]:
-    rows, present = [], {}
+def history_long(run: data.Run, arms: dict[str, str]) -> pd.DataFrame:
+    rows = []
     for lid, arm in arms.items():
         for line in run.history(run.lineages[lid])[1]:
-            f = flat(line)
-            present.setdefault(arm, set()).update(f)
-            rows += [{"arm": arm, "lineage": lid, "step": line["step"], "field": k, "value": v} for k, v in f.items()]
-    long = pd.DataFrame(rows, columns=["arm", "lineage", "step", "field", "value"])
+            rows += [{"arm": arm, "lineage": lid, "step": line["step"], "field": k, "value": v}
+                     for k, v in flat(line).items()]
+    return pd.DataFrame(rows, columns=["arm", "lineage", "step", "field", "value"])
+
+
+def history_table(long: pd.DataFrame, arms: dict[str, str]) -> tuple[pd.DataFrame, pd.DataFrame]:
     g = long.groupby(["arm", "step", "field"])["value"]
     table = pd.concat([g.mean().rename("mean"), g.min().rename("min"), g.max().rename("max"),
                        g.size().rename("members")], axis=1).reset_index()
+    present = long.groupby("arm")["field"].agg(set).to_dict()
+    names = sorted(set(HISTORY) | set(long["field"]))
     fields = [{"arm": a, "field": k, "present": k in present.get(a, set())} for a in sorted(set(arms.values()))
-              for k in HISTORY] + [{"arm": a, "field": "taste: " + ", ".join(TASTE_EXPECTED),
-                                    "present": any("taste" in k for k in present.get(a, set()))}
-                                   for a in sorted(set(arms.values()))]
+              for k in names]
     return table, pd.DataFrame(fields)
+
+
+def windows(steps, probe_steps) -> dict[int, str]:
+    """step -> the window between probes it belongs to (e.g. 45-59)."""
+    edges = sorted(set(probe_steps))
+    out = {}
+    for s in steps:
+        lo = max([e for e in edges if e <= s], default=min(steps))
+        hi = min([e for e in edges if e > s], default=max(steps) + 1) - 1
+        out[s] = f"{lo}-{hi}"
+    return out
+
+
+def history_pairs(long: pd.DataFrame, parent_of: dict, reference: str, win: dict) -> pd.DataFrame:
+    """Per arm, window and field: arm - reference of the same parent at the same step, averaged over the paired
+    (parent, step) cells, with a normal 95% interval over them."""
+    x = long[long["field"].isin(PAIRED_HISTORY)].assign(parent=lambda d: d["lineage"].map(parent_of))
+    ref = x[x["arm"] == reference].set_index(["parent", "step", "field"])["value"]
+    rows = []
+    for (arm, field), g in x[x["arm"] != reference].groupby(["arm", "field"]):
+        d = g.set_index(["parent", "step", "field"])["value"] - ref
+        d = d.dropna().reset_index()
+        d["window"] = d["step"].map(win)
+        for w, dw in d.groupby("window", sort=False):
+            v = dw["value"].to_numpy()
+            half = 1.96 * v.std(ddof=1) / np.sqrt(len(v)) if len(v) > 1 else np.nan
+            rows.append({"arm": arm, "field": field, "window": w, "cells": len(v), "parents": dw["parent"].nunique(),
+                         "diff": float(v.mean()), "lo": float(v.mean() - half), "hi": float(v.mean() + half)})
+    return pd.DataFrame(rows)
 
 
 def probe_data(run: data.Run, arms: dict[str, str], strata, b: int, rng):
@@ -119,47 +174,44 @@ def probe_table(run, arms, subjects, grid, point, draws, ref) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def taste_pairs(run: data.Run, arms: dict[str, str]) -> dict[str, dict[str, str]]:
-    """parent id -> {arm: lineage id} for the parents with exactly one clone in each taste arm."""
-    out = {}
-    for lid, arm in arms.items():
-        out.setdefault(run.lineages[lid].parent[0], {}).setdefault(arm, []).append(lid)
-    return {p: {a: v[0] for a, v in d.items()} for p, d in out.items()
-            if set(d) == set(TASTE_ARMS) and all(len(v) == 1 for v in d.values())}
-
-
-def pair_table(run, pairs, grid, point, draws, dev) -> pd.DataFrame:
-    """Per probe step at which every clone of a parent has a probe: (arm - neu) averaged over parents for health's
-    metrics and, when scored, the deviation and the deviation at typical length; intervals over items."""
+def pair_table(run, arm_of, parent_of, reference, grid, point, draws, dev) -> pd.DataFrame:
+    """Per probe step and arm: (arm - reference) of the same parent, averaged over the parents that have both at
+    that step, for health's metrics and, when scored, the deviation measures; intervals over items."""
+    by = {}
+    for lid, a in arm_of.items():
+        by.setdefault(parent_of[lid], {})[a] = lid
     rows = []
-    steps = sorted(set.intersection(*[set(run.probe_steps(run.lineages[l])) for d in pairs.values() for l in d.values()]))
+    steps = sorted({s for lid in arm_of for s in run.probe_steps(run.lineages[lid])})
     for step in steps:
-        for arm in ("own", "rev"):
+        for arm in sorted(set(arm_of.values()) - {reference}):
+            labs = [(f"{d[arm]}@{step}", f"{d[reference]}@{step}") for d in by.values()
+                    if arm in d and reference in d and f"{d[arm]}@{step}" in grid.labels
+                    and f"{d[reference]}@{step}" in grid.labels]
+            if not labs:
+                continue
+            ia, ib = [grid.labels.index(a) for a, _ in labs], [grid.labels.index(b) for _, b in labs]
             for m in PROBE_METRICS:
-                if m not in point:
-                    continue
-                dp = [point[m][grid.labels.index(f"{d[arm]}@{step}"), 0] - point[m][grid.labels.index(f"{d['neu']}@{step}"), 0]
-                      for d in pairs.values()]
-                dd = np.mean([draws[m][grid.labels.index(f"{d[arm]}@{step}")] - draws[m][grid.labels.index(f"{d['neu']}@{step}")]
-                              for d in pairs.values()], 0)
-                rows.append({"step": step, "arm": arm, "metric": m, "parents": len(dp), "diff": float(np.mean(dp)),
-                             **dict(zip(("lo", "hi"), stats.ci(dd))), "per_parent": " ".join(f"{x:+.4f}" for x in dp)})
-            if dev is not None:
-                for m, (p_, d_) in dev["values"].items():
-                    labs = [(f"{d[arm]}@{step}", f"{d['neu']}@{step}") for d in pairs.values()]
-                    if not all(a in dev["labels"] and b in dev["labels"] for a, b in labs):
-                        continue
-                    ia = [dev["labels"].index(a) for a, _ in labs]
-                    ib = [dev["labels"].index(b) for _, b in labs]
-                    dp = p_[ia] - p_[ib]
-                    rows.append({"step": step, "arm": arm, "metric": m, "parents": len(dp), "diff": float(np.mean(dp)),
-                                 **dict(zip(("lo", "hi"), stats.ci((d_[ia] - d_[ib]).mean(0)))),
+                if m in point:
+                    dp = point[m][ia, 0] - point[m][ib, 0]
+                    rows.append({"step": step, "arm": arm, "metric": m, "parents": len(dp), "diff": float(dp.mean()),
+                                 **dict(zip(("lo", "hi"), stats.ci((draws[m][ia] - draws[m][ib]).mean(0)))),
+                                 "same_sign": int(max((dp > 0).sum(), (dp < 0).sum())),
                                  "per_parent": " ".join(f"{x:+.4f}" for x in dp)})
+            if dev is None or not all(a in dev["labels"] and b in dev["labels"] for a, b in labs):
+                continue
+            ja, jb = [dev["labels"].index(a) for a, _ in labs], [dev["labels"].index(b) for _, b in labs]
+            for m, (p_, d_) in dev["values"].items():
+                dp = p_[ja] - p_[jb]
+                rows.append({"step": step, "arm": arm, "metric": m, "parents": len(dp), "diff": float(np.mean(dp)),
+                             **dict(zip(("lo", "hi"), stats.ci((d_[ja] - d_[jb]).mean(0)))),
+                             "same_sign": int(max((dp > 0).sum(), (dp < 0).sum())),
+                             "per_parent": " ".join(f"{x:+.4f}" for x in dp)})
     return pd.DataFrame(rows)
 
 
 def deviation_data(run: data.Run, selection, partial: bool, b: int, rng) -> dict | None:
-    """Per author of the run's deviation selection: deviation and deviation at typical length, points and draws."""
+    """Per author of the run's deviation selection: deviation, deviation at typical length and the share in layout
+    tokens, points and draws."""
     if selection is None and len(list((run.dir / "deviation").glob("*/selection.json"))) == 0:
         return None
     df, sel = data.deviation_table(run, data.deviation_selection(run, selection), partial)
@@ -170,7 +222,9 @@ def deviation_data(run: data.Run, selection, partial: bool, b: int, rng) -> dict
     return {"selection": sel, "labels": t.labels, "table": t,
             "values": {"deviation": (t.ratio(ones)[:, 0], t.ratio(w)),
                        "deviation_at_typical": (deviation.at_typical(t, typical, ones)[0][:, 0],
-                                                deviation.at_typical(t, typical, w)[0])}}
+                                                deviation.at_typical(t, typical, w)[0]),
+                       "deviation_in_layout": (t.layout_parts(ones)["layout_share"][:, 0],
+                                               t.layout_parts(w)["layout_share"])}}
 
 
 def deviation_rows(run, arms, dev) -> pd.DataFrame:
@@ -184,8 +238,9 @@ def deviation_rows(run, arms, dev) -> pd.DataFrame:
     for (arm, step), idx in sorted(groups.items()):
         row = {"arm": arm, "step": step, "members": len(idx)}
         for m, (p_, d_) in dev["values"].items():
-            row[m] = float(np.nanmean(p_[idx]))
-            row[f"{m}_lo"], row[f"{m}_hi"] = stats.ci(np.nanmean(d_[idx], 0))
+            row[m] = float(np.nanmean(p_[idx])) if np.isfinite(p_[idx]).any() else np.nan
+            row[f"{m}_lo"], row[f"{m}_hi"] = stats.ci(np.nanmean(d_[idx], 0)) if np.isfinite(d_[idx]).any() else (
+                np.nan, np.nan)
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -202,8 +257,7 @@ def practice_tables(run: data.Run, arms: dict[str, str]) -> tuple[pd.DataFrame, 
     """Source shares of every practising member per step, and the common share of their log-share movement."""
     rows, default = [], None
     for lid in arms:
-        lin = run.lineages[lid]
-        for line in run.history(lin)[1]:
+        for line in run.history(run.lineages[lid])[1]:
             if "practice" not in line:
                 continue
             if line["step"] == 0 and default is None:  # every average starts equal: the shares are the defaults
@@ -222,20 +276,21 @@ def practice_tables(run: data.Run, arms: dict[str, str]) -> tuple[pd.DataFrame, 
         c = x.mean(0).to_numpy()
         common.append({"step": step, "members": len(x), "total_ss": float((x.to_numpy() ** 2).sum()),
                        "common_share": common_share(x.to_numpy()), "independent": 1 / len(x),
-                       "largest_common": x.columns[np.argmax(np.abs(c))], "largest_common_ratio": float(np.exp(c[np.argmax(np.abs(c))]))})
+                       "largest_common": x.columns[np.argmax(np.abs(c))],
+                       "largest_common_ratio": float(np.exp(c[np.argmax(np.abs(c))]))})
     return shares, pd.DataFrame(common)
 
 
-def authorship_table(run, arms, subjects, grid, cap: int, taste: bool, b: int, rng) -> pd.DataFrame:
+def authorship_table(run, arms, subjects, grid, cap: int, clones: bool, b: int, rng) -> pd.DataFrame:
     """Per probe step and arm with two or more members, and over all arms' members together ("all"): the classifier
-    among them, raw and stripped. Taste arms keep the clones' first probes (at the clone step they are draws of the
-    parents, one per arm and parent; "all" then holds three draws of each parent and is left out); otherwise clones'
-    first probes are left out."""
+    among them, raw and stripped. For clone arms the clones' first probes are kept (at the clone step each arm holds
+    one draw of every parent; "all", which would hold several draws of each parent, is then left out); otherwise
+    clones' first probes are left out."""
     groups = {}
     for label, (lin, step) in subjects.items():
-        if lin is not None and lin.id in arms and (taste or not run.restart(lin, step)):
+        if lin is not None and lin.id in arms and (clones or not run.restart(lin, step)):
             groups.setdefault((step, arms[lin.id]), []).append(label)
-            if not (taste and run.restart(lin, step)):
+            if not (clones and run.restart(lin, step)):
                 groups.setdefault((step, "all"), []).append(label)
     rows = []
     for (step, arm), labels in sorted(groups.items()):
@@ -246,50 +301,90 @@ def authorship_table(run, arms, subjects, grid, cap: int, taste: bool, b: int, r
     return pd.DataFrame(rows)
 
 
-def windows(steps, probe_steps) -> dict[int, str]:
-    """step -> the window between probes it belongs to (e.g. 0-14)."""
-    edges = sorted(set(probe_steps))
-    out = {}
-    for s in steps:
-        lo = max([e for e in edges if e <= s], default=min(steps))
-        hi = min([e for e in edges if e > s], default=max(steps) + 1) - 1
-        out[s] = f"{lo}-{hi}"
-    return out
+def analyse(run: data.Run, census=None, selection=None, partial=False, b: int = 1000, cap: int = 150,
+            parents=None, arm_names=None, reference=None, rng=None) -> dict:
+    rng = rng or np.random.default_rng(0)
+    if parents:
+        arms, parent_of, waiting = explicit_arms(run, parents, arm_names, reference)
+    else:
+        arms, parent_of, waiting = rule_arms(run), {}, []
+    if not arms:
+        raise SystemExit(f"{run.name}: no committed lineage among the arms")
+    strata = data.census_strata(census) if census else None
+    res = {"arms": arms, "parent_of": parent_of, "waiting": waiting, "reference": reference}
+    long = history_long(run, arms)
+    res["history"], res["fields"] = history_table(long, arms)
+    probes = sorted({s for lid in arms for s in run.probe_steps(run.lineages[lid])})
+    res["window"] = windows(sorted(long["step"].unique()), probes) if len(long) else {}
+    res["history_pairs"] = (history_pairs(long, parent_of, reference, res["window"]) if parents and len(long)
+                            else pd.DataFrame())
+    subjects, grid, point, draws, ref = probe_data(run, arms, strata, b, rng)
+    res["probes"] = probe_table(run, arms, subjects, grid, point, draws, ref)
+    dev = deviation_data(run, selection, partial, b, rng)
+    res["deviation_selection"] = None if dev is None else dev["selection"].name
+    res["deviation"] = deviation_rows(run, arms, dev) if dev is not None else pd.DataFrame()
+    res["pairs"] = pair_table(run, arms, parent_of, reference, grid, point, draws, dev) if parents else pd.DataFrame()
+    res["practice"], res["practice_common"] = practice_tables(run, arms)
+    res["authorship"] = (authorship_table(run, arms, subjects, grid, cap, bool(parents), b, rng) if cap > 0
+                         else pd.DataFrame())
+    return res
 
 
-def report_lines(run, arms, taste, res) -> list[str]:
+def report_lines(run, res) -> list[str]:
+    arms, ref = res["arms"], res["reference"]
     n = pd.Series(list(arms.values())).value_counts()
-    lines = [f"arms {run.name}: " + ("taste-shaped reward clones paired by parent (own, neu, rev)" if taste
-                                     else "update rules of the trained lineages") + "; "
-             + ", ".join(f"{a} ({n[a]})" for a in sorted(n.index))]
-    h, f = res["history"], res["fields"]
+    lines = [f"arms {run.name}: " + (f"clones <parent>-<arm> of {', '.join(sorted(set(res['parent_of'].values())))}, "
+                                     f"paired by parent against {ref}" if ref else "update rules of the trained lineages")
+             + "; " + ", ".join(f"{a} ({n[a]})" for a in sorted(n.index))]
+    if res["waiting"]:
+        lines.append("left out: " + ", ".join(res["waiting"]))
+    h = res["history"]
     if len(h):
-        probes = sorted({s for lid in arms for s in run.probe_steps(run.lineages[lid])})
-        win = windows(sorted(h["step"].unique()), probes)
-        h = h.assign(window=h["step"].map(win))
-        show = [k for k in ("reward", "completion_tokens", "truncated", "groups", "adv_sequences", "si_sequences",
-                            "ex_sequences", "ex_loss") if (h["field"] == k).any()]
-        taste_fields = sorted(k for k in h["field"].unique() if "taste" in k)
+        h = h.assign(window=h["step"].map(res["window"]))
+        shown = [k for k in ("reward", "completion_tokens", "truncated", "groups", "adv_sequences", "si_sequences",
+                             "ex_sequences", "rp_sequences") + MECHANISM_SHOWN if (h["field"] == k).any()]
         lines += ["", "training history: means over members and the steps of each window between probes"]
         rows = []
         for (arm, w), g in h.groupby(["arm", "window"], sort=False):
             m = g.groupby("field")["mean"].mean()
             rows.append([arm, w, int(g["members"].max())] + [
-                num(m.get(k, np.nan), digits=0 if k in ("completion_tokens", "adv_sequences", "si_sequences", "ex_sequences")
-                    else 3) for k in show + taste_fields])
-        lines += render(["arm", "steps", "n"] + show + taste_fields, rows, 2)
-        absent = f[(~f["present"]) & f["field"].str.startswith("taste")]
-        if taste or len(absent) < len(f[f["field"].str.startswith("taste")]):
-            lines += ["  taste-shaped reward fields: " + (", ".join(taste_fields) if taste_fields else
-                                                          "absent from the history (expected: " + ", ".join(TASTE_EXPECTED) + ")")]
+                num(m.get(k, np.nan), digits=0 if k.endswith(("tokens", "sequences", "slots", "shortfall", "frontier",
+                                                               "shaped", "groups")) else 3) for k in shown])
+        lines += render(["arm", "steps", "n"] + shown, rows, 2)
+        hp = res["history_pairs"]
+        if len(hp):
+            lines += ["", f"training history, arm - {ref} of the same parent at the same step (mean over parents and "
+                          "steps, normal 95% interval over those cells); revisiting arms' reward includes the revisited "
+                          "prompts (compare revisit.stream_reward)"]
+            cell = {(r.arm, r.window, r.field): r for r in hp.itertuples()}
+            rows = []
+            for (arm, w) in dict.fromkeys(zip(hp["arm"], hp["window"])):
+                rows.append([arm, w] + [num(cell[(arm, w, k)].diff, cell[(arm, w, k)].lo, cell[(arm, w, k)].hi,
+                                            0 if k == "completion_tokens" else 3) if (arm, w, k) in cell else "-"
+                                        for k in PAIRED_HISTORY])
+            lines += render(["arm", "steps"] + list(PAIRED_HISTORY), rows, 2)
     else:
         lines += ["", "training history: no committed update yet (records past a lineage's last checkpoint are not read)"]
+    pa = res["pairs"]
+    if len(pa):
+        lines += ["", f"probes paired by parent: arm - {ref} averaged over parents, points [95% over items] (tokens in "
+                      "tokens, deviation in nats per token, its layout share in %); same: parents agreeing in sign; at "
+                      "the clone step the clones are one checkpoint (a null)"]
+        mets = [m for m in ("accuracy", "near", "far", "sweet", "frontier", "mastered", "heldout_complied", "tokens",
+                            "deviation", "deviation_at_typical", "deviation_in_layout") if (pa["metric"] == m).any()]
+        rows = []
+        for (step, arm), g in pa.groupby(["step", "arm"]):
+            m = g.set_index("metric")
+            rows.append([step, arm, int(m["parents"].iloc[0])] + [
+                (num(m.loc[k, "diff"], m.loc[k, "lo"], m.loc[k, "hi"], 0 if k == "tokens" else 3)
+                 if k in ("tokens", "deviation", "deviation_at_typical") else
+                 pci(m.loc[k, "diff"], m.loc[k, "lo"], m.loc[k, "hi"], 0 if k == "deviation_in_layout" else 1,
+                     sign=True)) + f" {int(m.loc[k, 'same_sign'])}" for k in mets])
+        lines += render(["step", "arm", "par"] + mets, rows, 2)
     pr = res["probes"]
-    if not len(pr):
-        lines += ["", "probes: none besides draws of the base weights"]
     if len(pr):
-        lines += ["", "probes: mean over members of (member - reference), percentage points [95% over items]; tokens "
-                      "and accuracy as values"]
+        lines += ["", "probes: mean over members of (member - reference = probes of the base weights), points "
+                      "[95% over items]; accuracy and tokens as values"]
         cols = [m for m in ("far", "near", "mastered", "frontier", "heldout_complied", "truncated") if (pr["metric"] == m).any()]
         rows = []
         for (arm, step), g in pr.groupby(["arm", "step"]):
@@ -297,26 +392,16 @@ def report_lines(run, arms, taste, res) -> list[str]:
             rows.append([arm, step, int(m["members"].iloc[0]), pct(m.loc["accuracy", "value"]), f"{m.loc['tokens', 'value']:.0f}"]
                         + [pci(m.loc[k, "diff"], m.loc[k, "lo"], m.loc[k, "hi"], sign=True) for k in cols])
         lines += render(["arm", "step", "n", "acc", "tokens"] + [f"{k} - ref" for k in cols], rows, 2)
-    pa = res.get("pairs", pd.DataFrame())
-    if len(pa):
-        lines += ["", "paired by parent: arm - neu averaged over parents (accuracy and the like in points, tokens, "
-                      "deviation in nats per token) [95% over items]; at the clone step the clones are one checkpoint"]
-        mets = [m for m in ("accuracy", "far", "frontier", "heldout_complied", "tokens", "deviation", "deviation_at_typical")
-                if (pa["metric"] == m).any()]
-        rows = []
-        for (step, arm), g in pa.groupby(["step", "arm"]):
-            m = g.set_index("metric")
-            rows.append([step, arm, int(m["parents"].iloc[0])] + [
-                (num(m.loc[k, "diff"], m.loc[k, "lo"], m.loc[k, "hi"], 0 if k == "tokens" else 3) if k in ("tokens", "deviation", "deviation_at_typical")
-                 else pci(m.loc[k, "diff"], m.loc[k, "lo"], m.loc[k, "hi"], sign=True)) for k in mets])
-        lines += render(["step", "arm", "parents"] + mets, rows, 2)
+    else:
+        lines += ["", "probes: none besides draws of the base weights and clones' first probes"]
     dv = res["deviation"]
     if len(dv):
-        lines += ["", f"deviation (nats per token; selection {res['deviation_selection']}): mean over members, and at the "
-                      "base model's typical length [95% over items]"]
-        lines += render(["arm", "step", "n", "deviation", "at typical length"],
+        lines += ["", f"deviation (nats per token; selection {res['deviation_selection']}): mean over members, at the base "
+                      "model's typical length, share in layout tokens [95% over items]"]
+        lines += render(["arm", "step", "n", "deviation", "at typical length", "in layout %"],
                         [[r.arm, r.step, r.members, num(r.deviation, r.deviation_lo, r.deviation_hi, 3),
-                          num(r.deviation_at_typical, r.deviation_at_typical_lo, r.deviation_at_typical_hi, 3)]
+                          num(r.deviation_at_typical, r.deviation_at_typical_lo, r.deviation_at_typical_hi, 3),
+                          num(100 * r.deviation_in_layout, 100 * r.deviation_in_layout_lo, 100 * r.deviation_in_layout_hi, 0)]
                          for r in dv.itertuples()], 1)
     elif res["deviation_selection"] is None:
         lines += ["", "deviation: no deviation selection (python -m evotaste.evaluate deviation)"]
@@ -343,30 +428,12 @@ def report_lines(run, arms, taste, res) -> list[str]:
     return lines
 
 
-def analyse(run: data.Run, census=None, selection=None, partial=False, b: int = 1000, cap: int = 150, rng=None) -> dict:
-    rng = rng or np.random.default_rng(0)
-    arms, taste = arms_of(run)
-    if not arms:
-        raise SystemExit(f"{run.name}: no committed lineage that trains")
-    strata = data.census_strata(census) if census else None
-    res = {}
-    res["history"], res["fields"] = history_table(run, arms)
-    subjects, grid, point, draws, ref = probe_data(run, arms, strata, b, rng)
-    res["probes"] = probe_table(run, arms, subjects, grid, point, draws, ref)
-    dev = deviation_data(run, selection, partial, b, rng)
-    res["deviation_selection"] = None if dev is None else dev["selection"].name
-    res["deviation"] = deviation_rows(run, arms, dev) if dev is not None else pd.DataFrame()
-    if taste:
-        pairs = taste_pairs(run, arms)
-        res["pairs"] = pair_table(run, pairs, grid, point, draws, dev) if pairs else pd.DataFrame()
-    res["practice"], res["practice_common"] = practice_tables(run, arms)
-    res["authorship"] = authorship_table(run, arms, subjects, grid, cap, taste, b, rng) if cap > 0 else pd.DataFrame()
-    return {"arms": arms, "taste": taste, **res}
-
-
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("run_dir", type=Path)
+    ap.add_argument("--parents", help="comma-separated parents whose clones <parent>-<arm> are the members")
+    ap.add_argument("--arms", help="comma-separated arm suffixes (with --parents)")
+    ap.add_argument("--reference", help="the arm every comparison is paired against (with --parents)")
     ap.add_argument("--census", help="census output directory (results/census/<name>) for the base model's strata")
     ap.add_argument("--deviation", type=Path, help="a deviation selection (default: the run's only one, if any)")
     ap.add_argument("--partial", action="store_true", help="read a deviation selection still being scored")
@@ -375,11 +442,15 @@ def main(argv=None) -> None:
                                                                       "authorship classifier (0: skip)")
     ap.add_argument("--out", type=Path)
     args = ap.parse_args(argv)
+    if bool(args.parents) != bool(args.arms) or bool(args.parents) != bool(args.reference):
+        raise SystemExit("--parents, --arms and --reference go together")
     run = data.Run(args.run_dir)
-    res = analyse(run, args.census, args.deviation, args.partial, args.boot, args.classifier_items)
-    lines = report_lines(run, res["arms"], res["taste"], res)
-    tables = {k: v for k, v in res.items() if isinstance(v, pd.DataFrame)}
-    write(args.out or Path("results") / run.name / "arms", tables, lines)
+    res = analyse(run, args.census, args.deviation, args.partial, args.boot, args.classifier_items,
+                  args.parents.split(",") if args.parents else None, args.arms.split(",") if args.arms else None,
+                  args.reference)
+    lines = report_lines(run, res)
+    write(args.out or Path("results") / run.name / "arms", {k: v for k, v in res.items() if isinstance(v, pd.DataFrame)},
+          lines)
 
 
 if __name__ == "__main__":

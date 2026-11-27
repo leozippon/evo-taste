@@ -49,6 +49,7 @@ def scalar_traits(grid: data.Grid, w: np.ndarray) -> dict[str, np.ndarray]:
     counted and layout trait over responses that have it."""
     m = health.metrics(grid, w)
     out = {k: m[k] for k in m if k == "accuracy" or k.startswith("domain_")} | health.length_metrics(grid, w)
+    out |= {f"profile_{k[7:]}": m[k] - m["accuracy"] for k in m if k.startswith("domain_")}  # relative to own mean
     for t in traits.COUNTED + traits.LAYOUT:
         if t in ("tokens", "program"):
             continue
@@ -138,6 +139,41 @@ def boot_means(d: np.ndarray, fam: np.ndarray, arm: np.ndarray, drawn: np.ndarra
     return (float(dd[same].mean()) if same.any() else np.nan, float(dd[other].mean()) if other.any() else np.nan)
 
 
+def separation_table(run: data.Run, grid: data.Grid, w: np.ndarray) -> pd.DataFrame:
+    """Functional distances of pairs under one rule at one step by how long they have been apart, on one distance
+    matrix of every evaluated member at every step (difficulty classes from all of them, so that steps compare):
+    clone pairs (one family: apart since their later clone point), common-start pairs (lineages of two different
+    unseeded roots, each trained from the base weights at step 0, which all unseeded members share: apart since step
+    0) and unrelated pairs (different roots, never one state). Mean distance over pairs with an interval over items."""
+    labels = [a for a in grid.labels if a != "base"]
+    sub = grid.take(labels)
+    y, v = stats.cells(sub.x["reward"])
+    classes = stats.difficulty_classes(y)
+    dp, dd = stats.distances(y, v, classes, stats.ones(y.shape[1]))[0], stats.distances(y, v, classes, w)
+    res = {label: run.resolve(label) for label in labels}
+    groups = {}
+    for i, a in enumerate(labels):
+        for j in range(i + 1, len(labels)):
+            (la, sa), (lb, sb) = res[a], res[labels[j]]
+            if sa != sb or la.arm != lb.arm:
+                continue
+            start = [lin.parent[1] if lin.parent else 0 for lin in (la, lb)]
+            if family_of(run, la) == family_of(run, lb):
+                kind, apart = "clone", sa - max(start)
+            elif run.root(la).seeding == "none" and run.root(lb).seeding == "none" and max(start) == 0:
+                kind, apart = "common start", sa
+            else:
+                kind, apart = "unrelated", None
+            groups.setdefault((sa, la.arm, kind, apart), []).append((i, j))
+    rows = []
+    for (step, rule, kind, apart), pairs in sorted(groups.items(), key=lambda kv: (kv[0][0], kv[0][1], kv[0][2])):
+        point = float(np.mean([dp[i, j] for i, j in pairs]))
+        draws = np.mean([dd[:, i, j] for i, j in pairs], 0)
+        rows.append({"step": step, "rule": rule, "pairs": kind, "apart": apart, "n": len(pairs), "d2": point,
+                     **dict(zip(("lo", "hi"), stats.ci(draws)))})
+    return pd.DataFrame(rows)
+
+
 def slope(x, y) -> float:
     x, y = np.asarray(x, float), np.asarray(y, float)
     sxx = ((x - x.mean()) ** 2).sum()
@@ -188,8 +224,9 @@ def analyse(run: data.Run, grid: data.Grid, null: data.Grid | None, rng, table: 
                                      estimator)
                 dist += r
                 pairs += p
+    sep = separation_table(run, grid, w) if grid.samples >= 2 else pd.DataFrame()
     return {"families": pd.DataFrame(families), "icc": pd.DataFrame(icc), "regression": pd.DataFrame(reg),
-            "distance": pd.DataFrame(dist), "pairs": pd.DataFrame(pairs)}
+            "distance": pd.DataFrame(dist), "pairs": pd.DataFrame(pairs), "separation": sep}
 
 
 def family_regression(run, grid, labels, fam, values, draws, values_all, draws_all, step, rng, b) -> list[dict]:
@@ -225,6 +262,9 @@ def report_lines(run, tag, grid, res, null_tag) -> list[str]:
     lines = [f"heritability {run.name}, selection {tag} ({grid.samples} samples per item): families are a root "
              "lineage's members under one update rule; [95% interval resampling families within rules and items "
              "within units]; p: permutation over family labels (relabellings = distinct partitions)"]
+    if grid.dropped:
+        lines.append(f"tags merged on the {len(grid.items)} items every label answered ({grid.dropped} items of some "
+                     f"labels only left out); dataset items {int((grid.items['unit'] != 'procedural').sum())}")
     fams = res["families"]
     multi = fams[fams["members"].str.contains(" ")] if len(fams) else fams
     lines += ["", "families with two or more evaluated members: " + ("; ".join(
@@ -254,6 +294,14 @@ def report_lines(run, tag, grid, res, null_tag) -> list[str]:
                           num(PP2 * r.null, digits=2)] for r in dist.itertuples()], 3)
     elif grid.samples < 2:
         lines += ["", "functional distance: needs an evaluation with two or more samples per item"]
+    sep = res["separation"]
+    if len(sep):
+        lines += ["", "distance by time apart, on one matrix of every evaluated member (classes from all of them), "
+                      "adjusted, pp^2: clone pairs (apart since the clone point), common-start pairs (two unseeded "
+                      "roots, apart since the base weights at step 0) and unrelated pairs (never one state)"]
+        lines += render(["step", "rule", "pairs", "steps apart", "n", "distance [95%]"],
+                        [[r.step, r.rule, r.pairs, "-" if pd.isna(r.apart) else int(r.apart), r.n,
+                          num(PP2 * r.d2, PP2 * r.lo, PP2 * r.hi, 1)] for r in sep.itertuples()], 3)
     return lines
 
 

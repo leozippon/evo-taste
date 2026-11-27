@@ -234,6 +234,19 @@ def test_common_share_of_practice_movement():
     assert abs(np.mean(shares) - 1 / 3) < 0.03
 
 
+def test_frontier_is_solved_at_least_once_in_fewer_than_three_quarters():
+    import pandas as pd
+
+    from evotaste.analysis import frontier
+
+    df = pd.DataFrame({"uid": ["a"] * 4 + ["b"] * 4 + ["c"] * 4 + ["d"] * 2 + ["e"] * 8,
+                       "reward": [1, 0, 0, 0] + [1, 1, 1, 0] + [0] * 4 + [1, 0] + [1, 1, 1, 1, 1, 0, 0, 0]})
+    rec = frontier.record(df)
+    assert list(frontier.frontier_of(rec, 4)) == ["a", "e"]  # b: 3 of 4; c: never; d: too few attempts; e: 5 of 8
+    assert frontier.parents_needed(np.array([1.0, 1.0, 1.0])) != frontier.parents_needed(np.array([1.0, 0.5, 1.5]))
+    assert frontier.parents_needed(np.array([0.2, 0.25, 0.3])) <= 3  # a consistent effect needs few parents
+
+
 def test_harvest_simulation_retains_a_real_lead_and_finds_none_in_the_null():
     """Members that differ in level keep part of the select-half lead on the test half; identical members keep
     none. Twenty units of 100 items in two domains, 14 members, two samples."""
