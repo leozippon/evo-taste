@@ -29,13 +29,10 @@ Two findings stand on their own. Unconstrained training costs every model about 
 
 ## Round 2
 
-The sections above describe Round 1. Round 2 keeps the paradigm and rebuilds what that result points at; the design is in [design/round-2.md](design/round-2.md).
+The sections above describe Round 1. Round 2 keeps the paradigm and has so far run as small pilots; the account is in [findings/round-2-pilots.md](findings/round-2-pilots.md).
 
-- **Environment.** Real datasets with automatic verification (math, unit-tested code, logic and science) replace the synthetic puzzles, filtered to problems the base model solves sometimes but not always.
-- **Reward.** Answers are verified by meaning, so notation cannot win. A share of prompts asks for a varying answer format to keep instruction-following rewarded, and a gentle slope near the token limit replaces the flat penalty for unfinished answers.
-- **Seeding.** A member's starting bias is distilled from an instruction that only a frozen teacher sees. Epistemic stances, such as trying to break every answer before accepting it, are compared with mechanical tactics on the same themes.
-- **Amplification.** The Round 1 update is compared with one in which a member also imitates its own successes, which makes accidents of sampling compound.
+- **Environment.** Real datasets with automatic verification (math, unit-tested code, logic and science) replace the synthetic puzzles, filtered to problems the base model solves sometimes but not always; answers are verified by meaning. In this environment members lose no format compliance, differ in which problems they solve, and keep about half of a selection lead on unseen sources.
+- **Seeding** ([design/round-2.md](design/round-2.md)). A bias distilled from an instruction survives training if it does not cost reward: small general dispositions persist, mechanical procedures that lower accuracy are gone within 30 steps.
+- **Amplification** ([design/amplification.md](design/amplification.md)). Six rules meant to make a member's own deviation from the base model grow were tried. Those that succeed in moving a member away produce a sharp, inherited, lineage-specific manner, not a different way of reasoning, and cost accuracy in proportion; the rule that pulls members back toward the base model does best.
 
-A second direction, in [design/amplification.md](design/amplification.md), no longer puts a bias in from outside. It looks for the training paradigm that makes a member's own deviation from the base model grow along its own direction: training a member toward an exaggerated version of itself on its successes, and letting it practise more of what it already solves best.
-
-Small pilots come first. They must show that members come to solve different problems, not just to write differently, and that two copies of a member trained further stay more alike than two unrelated members. A population run and the opening of the second blind vault, which stays sealed and is extended with new unseen sources, follow only then.
+No population run has been made in Round 2 and the second blind vault, extended with new unseen sources, is still sealed.
