@@ -44,7 +44,7 @@ Six rules were tried. Each adds one mechanism to plain training.
 | Scale the adapter by 1.5 or 2, without training | Accuracy fell from about 0.5 to 0.4 and 0.3 or lower, compliance fell and answers doubled in length. |
 | Practise more of the sources one solves best | The proportions of different members moved together (87 to 94% in common): this follows which sources are easy, not who the member is. |
 | Reward the most characteristic of one's correct answers | Deviation grew fivefold in 45 steps, each lineage in a direction of its own, and accuracy fell by 5 and 14 points in the two lineages tried. With the sign reversed, deviation shrank to a fifth and accuracy was 1 to 2 points above plain training. |
-| Revisit the hard problems one has cracked oneself | The revisited problems were solved more often (about 49% against 32% before). On held-out problems the in-run probes show no gain over plain training, and none over revisiting the problems another member cracked; the two-sample evaluation is being run. |
+| Revisit the hard problems one has cracked oneself | No gain on held-out problems over plain training (−0.3 points, interval −0.9 to +0.3, six lineages), and none over revisiting the problems another member cracked. The member's set of solved problems is kept no better than under plain training. |
 
 The fifth rule is the cleanest test, because it never pays for a wrong answer and its strength does not grow as the member moves. A reader compared the resulting members with their plain siblings on the same problems. The method of solution was the same wherever both solved a problem. What had changed was manner: one lineage opens two answers in three with the same phrase and reopens its first step repeatedly, the other writes hedged, compressed prose without any markup, and their changes in vocabulary are uncorrelated. The cost came from the working: the weaker lineage often no longer wrote a derivation before asserting an answer, and both began to leak fragments foreign to the base model's habits.
 
@@ -58,7 +58,7 @@ The fifth rule is the cleanest test, because it never pays for a wrong answer an
 ## Caveats
 
 - One base model of 1.7 billion parameters. A model with several ways of solving a problem could have something other than manner to amplify.
-- Pilots, not population runs: the taste-shaped reward rests on two lineages and the frontier rule on six, each compared within lineage against siblings from identical weights; effects are large against item-level intervals but cannot reach conventional significance across so few lineages.
+- Pilots, not population runs: the taste-shaped reward rests on two lineages and the frontier rule on six, each compared within lineage against siblings from identical weights. The effects of the taste-shaped reward are large against item-level intervals but cannot reach conventional significance across two lineages; the frontier rule's null is tight (±0.6 points).
 - Most accuracy figures for single members come from two samples on 1,840 problems (about ±2 points); in-run probes are single samples on about 360.
 - The verifiers credit an unevaluated arithmetic expression as its value. It occurs in about 1% of credited math answers, nearly all of them answers that are legitimately expressions.
 - The harvest simulation stays inside the selection suite. Nothing here has been tested on the blind vault.

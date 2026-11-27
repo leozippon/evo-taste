@@ -30,3 +30,19 @@ Two pilot C members at step 45 (`unseeded-adv`, `relations-adv`), each cloned in
 Across the 28 pilot C members at step 45, a member's deviation from the base model (0.06 to 0.28 nats per token) is negatively rank-correlated with what it gained: −0.43 with the gain on unseen sources, −0.50 on held-out items of the training sources, −0.58 on mastered items, and about zero (+0.13) with the gain on frontier items. The correlations have the same sign and similar size within each update rule (−0.47 to −0.65). The two unseeded members under the relative-only rule are the most deviated and the ones that gained nothing on unseen sources; the least deviated are members that started from a distilled adapter.
 
 So the interventions and the observational data agree. Members learn the frontier equally well whether they move little or much; what the extra movement buys is loss of what the base model could already do. A member's deviation is measurable without any task data, which makes it a candidate predictor of transfer at harvest time that owes nothing to the selection suite.
+
+## Pilot F: consolidating one's own frontier
+
+Six pilot C members at step 45, each cloned into revisits of its own frontier (a third of every batch), revisits of another member's frontier, and plain training; 45 further steps; evaluated at step 90 on the 1,840 real-data selection items with two samples.
+
+- **No gain on held-out problems.** Own-frontier revisits against plain training: −0.3 points overall (interval −0.9 to +0.3), −0.6 on held-out items of the training sources, −0.1 on unseen sources, +0.1 on frontier items, −0.5 on mastered items. Against revisiting another member's frontier: −0.5 (−1.1 to +0.1). Revisiting another member's frontier against plain: +0.2. The difficulty-matched control, run for one parent, is 1.5 points below plain.
+- **Revisited problems are solved more often, but so are the others.** The clone that revisits its frontier solves those training problems 48 to 53% of the time, against 34 to 37% for the parent before. The plain and other-frontier clones met only a handful of the same problems by chance and solved them 40 to 68% of the time, so most of the rise is selection (a frontier is defined by past partial success) and general improvement, not consolidation.
+- **The member's profile is not locked in.** In solve rates on held-out problems, the own-frontier clone is no closer to its parent at the clone point than the plain clone is (difference 15 pp², interval −61 to +88); the clone that followed another member's frontier is further (94 pp², 14 to 164). Own-frontier clones of different parents are somewhat further from one another than plain clones (398 against 295 pp², difference 103, interval −23 to 192); by likelihood there is no difference (0.163 against 0.166 nats per token).
+
+**Reading.** Practising one's own discoveries changes neither what a member can do on new problems nor how well it keeps what distinguishes it. With this, all six rules that were meant to make a member build on its own differences have been tried: none produced a useful, self-reinforcing difference, and those that amplified anything amplified manner or length at a cost in accuracy. The account is in `docs/findings/round-2-pilots.md`.
+
+## Under way
+
+- The reversed taste term on more lineages: clones of the six pilot F parents and of `unseeded-b-adv`, against their plain clones, 45 steps, on GPUs 2 and 7. With the two lineages of pilot E this gives nine paired comparisons of anchoring against plain training.
+- Cards: the owner's other project holds GPUs 0, 1, 3, 4, 5 and 6 for the next two and a half days by agreement; this project keeps to 2 and 7.
+- Noted and not yet fixed: the verifiers credit a boxed, unevaluated arithmetic expression as its value. In the step-45 evaluation 1.1% of credited math answers contain an operator, nearly all of them legitimately symbolic answers; it should be closed before any population run.
