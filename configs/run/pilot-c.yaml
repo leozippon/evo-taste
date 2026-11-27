@@ -143,3 +143,13 @@ members:
   - {id: small_case-adv-fro, parent: {member: small_case-adv, step: 45}, seed: 817, overrides: {amplification: {steps: 90, revisit: {share: 0.33, source: own}}}}
   - {id: small_case-adv-yok, parent: {member: small_case-adv, step: 45}, seed: 818, overrides: {amplification: {steps: 90, revisit: {share: 0.33, source: yoked, donor: {member: placebo-adv, step: 45}}}}}
   - {id: small_case-adv-pln, parent: {member: small_case-adv, step: 45}, seed: 819, overrides: {amplification: {steps: 90}}}
+  # Pilot F, three more parents (26 November, 22:30), same arms; donors in a cycle among the three.
+  - {id: observe-adv-fro, parent: {member: observe-adv, step: 45}, seed: 820, overrides: {amplification: {steps: 90, revisit: {share: 0.33, source: own}}}}
+  - {id: observe-adv-yok, parent: {member: observe-adv, step: 45}, seed: 821, overrides: {amplification: {steps: 90, revisit: {share: 0.33, source: yoked, donor: {member: verify-adv, step: 45}}}}}
+  - {id: observe-adv-pln, parent: {member: observe-adv, step: 45}, seed: 822, overrides: {amplification: {steps: 90}}}
+  - {id: verify-adv-fro, parent: {member: verify-adv, step: 45}, seed: 823, overrides: {amplification: {steps: 90, revisit: {share: 0.33, source: own}}}}
+  - {id: verify-adv-yok, parent: {member: verify-adv, step: 45}, seed: 824, overrides: {amplification: {steps: 90, revisit: {share: 0.33, source: yoked, donor: {member: procedure-adv, step: 45}}}}}
+  - {id: verify-adv-pln, parent: {member: verify-adv, step: 45}, seed: 825, overrides: {amplification: {steps: 90}}}
+  - {id: procedure-adv-fro, parent: {member: procedure-adv, step: 45}, seed: 826, overrides: {amplification: {steps: 90, revisit: {share: 0.33, source: own}}}}
+  - {id: procedure-adv-yok, parent: {member: procedure-adv, step: 45}, seed: 827, overrides: {amplification: {steps: 90, revisit: {share: 0.33, source: yoked, donor: {member: observe-adv, step: 45}}}}}
+  - {id: procedure-adv-pln, parent: {member: procedure-adv, step: 45}, seed: 828, overrides: {amplification: {steps: 90}}}
