@@ -93,7 +93,16 @@ So the starting point for amplification is better than assumed: independent memb
 - **The clones' solve profiles are being measured**: the fourteen clones that reached step 90 are evaluated on the 1,840 real-data selection items, so that the heritability of which problems a member solves can be read directly, next to the likelihood-based test.
 - **Next mechanism, in development**: a member revisits the hard problems it has itself solved but not mastered, against a control that revisits equally hard, equally familiar problems regardless of its own successes. It acts on which problems a member can solve and never on how an answer is written.
 
+## Pilot D stopped; clones inherit their parent's identity, 17:30
+
+- **Exaggerated self-imitation collapses at any strength tried.** In pilot D, at weight 0.01, both members were gone by step 15: 94 and 96% of their answers hit the token limit and training reward fell from 0.44 to 0.26. The exaggeration loss grew from 0.07 to 5 while it applied to a single eligible answer per step. At weight 0.5 the same took five steps. The mechanism is abandoned.
+- Pilot D was stopped at steps 10 to 16. Its practice arm follows the difficulty common to all members, and its unseeded baselines are no longer needed as parents. Its two cards went to pilot F.
+- **Two continuations of one member stay much closer than unrelated members.** Fourteen clones of seven pilot C members, 45 steps after cloning, scored by cross-likelihood on 80 probe items: the distance within a clone pair is 0.135 nats per token (interval 0.125 to 0.146) and between unrelated members under the same rule 0.310 (0.290 to 0.334), a ratio of 0.43 (permutation p = 0.001; relative-only 0.51, self-imitation 0.42). Unrelated members have been apart for 90 steps and clone pairs for 45, so part of the ratio is time since separation; the comparison still shows that what a member has become is carried forward and not re-drawn at every step.
+- Each member remains unmistakable: likelihood alone names the author of 99.6% of answers among the fourteen (chance 7%), twins included, in every domain. A text classifier reaches 72.5% and loses only 5% of its accuracy above chance when layout and notation are stripped. Differences in answer length explain about a third of the distances between members.
+- **Frontiers are individual.** Each relative-only pilot C member has solved at least once, but not mastered, 593 to 714 of the 2,160 training problems it has seen. Two members' frontiers overlap with a Jaccard index of 0.29 (0.24 to 0.33), where members with identical per-problem solve rates would overlap 0.37 by sampling alone.
+- **Pilot F** started: clones at step 45 of three pilot C members, each into revisits of its own frontier, revisits of the frontier of a different member (problems a comparable member cracked and this one did not), and no revisits. A control matched on difficulty instead is kept for one parent; it differs from the own-frontier arm in the member's prior success as well, which is why the other-member control was added.
+
 ## In progress
 
-- Pilot D (two cards, step 45 at about 20:00), pilot E (one card, overnight), the clones' evaluation and likelihood scoring (one card).
-- Engine work for consolidating one's own frontier, then pilot F.
+- Pilot E (taste-shaped reward, one card, to tomorrow morning) and pilot F (frontier consolidation, two cards, to tomorrow).
+- The evaluation of the fourteen step-90 clones on real-data selection items, for the heritability of which problems a member solves.
