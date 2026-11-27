@@ -362,6 +362,20 @@ def test_arms_paired_by_parent(run_dir, tmp_path):
         arms.main([str(run_dir), "--parents", "st", "--arms", "c1,si-c1", "--reference", "c1", "--out", str(tmp_path)])
 
 
+def test_paired_arms_across_tags(run_dir, tmp_path):
+    from evotaste.analysis import paired
+
+    paired.main([str(run_dir), "--tags", "par,sub", "--reference", "c1", "--arms", "c2", "--boot", "30",
+                 "--deviation", str(data.deviation_selection(data.Run(run_dir))), "--out", str(tmp_path)])
+    s = pd.read_csv(tmp_path / "summary.csv").set_index("metric")
+    grid = data.load_eval(data.Run(run_dir), "par,sub").real()
+    acc = grid.x["reward"].mean((1, 2))
+    assert s.loc["accuracy", "mean"] == pytest.approx(acc[grid.labels.index("st-c2@2")] - acc[grid.labels.index("st-c1@2")])
+    assert s.loc["accuracy", "parents"] == 1 and "deviation" in s.index  # ta and st-si have the reference only
+    with pytest.raises(SystemExit, match="reference clones"):  # ta-c1 would have no reference
+        paired.main([str(run_dir), "--tags", "sub", "--reference", "c2", "--arms", "c1", "--out", str(tmp_path)])
+
+
 def test_rule_names_name_every_computed_term():
     from evotaste.config import Amplification, Exaggeration, Practice, Revisit, Taste
 

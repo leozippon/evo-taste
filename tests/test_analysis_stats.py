@@ -247,6 +247,16 @@ def test_frontier_is_solved_at_least_once_in_fewer_than_three_quarters():
     assert frontier.parents_needed(np.array([0.2, 0.25, 0.3])) <= 3  # a consistent effect needs few parents
 
 
+def test_rank_association_has_the_exact_permutation_p():
+    from evotaste.analysis import paired
+
+    rng = np.random.default_rng(16)
+    rho, p, n = paired.rank_association(np.arange(5.0), np.arange(5.0) * 2, rng)
+    assert rho == pytest.approx(1) and n == 120 and p == pytest.approx(2 / 120)  # the two orderings with |rho| = 1
+    ps = np.array([paired.rank_association(rng.normal(size=6), rng.normal(size=6), rng)[1] for _ in range(200)])
+    assert np.mean(ps <= 0.05) <= 0.06 and np.mean(ps) > 0.4  # valid, conservative by discreteness at six points
+
+
 def test_harvest_simulation_retains_a_real_lead_and_finds_none_in_the_null():
     """Members that differ in level keep part of the select-half lead on the test half; identical members keep
     none. Twenty units of 100 items in two domains, 14 members, two samples."""
