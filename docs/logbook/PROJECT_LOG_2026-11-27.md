@@ -46,3 +46,11 @@ Six pilot C members at step 45, each cloned into revisits of its own frontier (a
 - The reversed taste term on more lineages: clones of the six pilot F parents and of `unseeded-b-adv`, against their plain clones, 45 steps, on GPUs 2 and 7. With the two lineages of pilot E this gives nine paired comparisons of anchoring against plain training.
 - Cards: the owner's other project holds GPUs 0, 1, 3, 4, 5 and 6 for the next two and a half days by agreement; this project keeps to 2 and 7.
 - Noted and not yet fixed: the verifiers credit a boxed, unevaluated arithmetic expression as its value. In the step-45 evaluation 1.1% of credited math answers contain an operator, nearly all of them legitimately symbolic answers; it should be closed before any population run.
+
+## Direction from the user, evening: a larger base model
+
+The user asked to switch to a larger base model, naming Qwen3.8-27B as a possibility. This addresses the main caveat of the pilots: a 1.7-billion-parameter model may simply have one way of solving a problem, leaving only manner to amplify.
+
+- A feasibility scout is taking inventory of the models on the machine and on the mirror, working out which layouts fit on 46 GB cards (sampler and trainer on one card as now, on separate cards, or spread over several), and will measure sampling and training speed, base accuracy on the probe set and sampler/trainer agreement once GPUs 2 and 7 are free.
+- Known constraints before any measurement: the engine keeps two copies of the model per card, which fits up to about 4 billion parameters; the 27B weights on the machine are a third-party FP8 copy that can be served but not trained on, so floating-point weights (about 54 GB) are needed, and one worker would then occupy three or four cards under a cap of four.
+- The anchoring test on the 1.7B model continues to its end on GPUs 2 and 7; it is the last piece of that account.
