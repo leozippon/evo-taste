@@ -49,8 +49,8 @@ A mechanism is worth a population run if it raises deviation and distinctness ab
 
 ## Pilots
 
-- **Pilot D** (running): eight unseeded lineages on two GPUs — relative-only, weak exaggerated self-imitation, and self-chosen practice — to characterise the undirected mechanisms at low strength and to add unseeded baselines.
-- **Pilot E** (running): two members of pilot C at step 45, each cloned into the taste-shaped reward toward its own direction, the neutral rule, and the reversed sign, for 45 further steps on one GPU.
-- **Pilot F**: members at step 45 cloned into consolidation of their own frontier, the matched control, and plain training.
+- **Pilot D**: eight unseeded lineages on two GPUs — relative-only, weak exaggerated self-imitation, and self-chosen practice — to characterise the undirected mechanisms at low strength and to add unseeded baselines.
+- **Pilot E**: two members of pilot C at step 45, each cloned into the taste-shaped reward toward its own direction, the neutral rule, and the reversed sign, for 45 further steps; the reversed sign was then repeated on seven more lineages.
+- **Pilot F**: six members at step 45 cloned into consolidation of their own frontier, the matched control, and plain training.
 
-Everything runs on at most four GPUs.
+Everything ran on at most four GPUs. The results are in [findings/round-2-pilots.md](../findings/round-2-pilots.md); none of the mechanisms met the criterion above on the 1.7B model, and the question is carried to a larger one in [scale.md](scale.md).
