@@ -155,7 +155,8 @@ def free_mib() -> int:
     return int(out.strip())
 
 
-def _records(part: str, job: CensusJob, samples, scores) -> list[dict]:
+def sample_records(part: str, job: CensusJob, samples, scores) -> list[dict]:
+    """The records of one job's samples and their scores (the census record shape, also the method census's)."""
     t = job.task
     return [{"part": part, "uid": t.uid, "family": t.family, "domain": t.domain, "kind": t.kind, "wrapper": t.wrapper,
              "context": job.context, "variant": job.variant, "sample": k,
@@ -163,6 +164,45 @@ def _records(part: str, job: CensusJob, samples, scores) -> list[dict]:
              "reward": sc.reward, "correct_any": sc.correct_any, "complied": sc.complied, "channel": sc.channel,
              "truncated": sc.truncated, "extracted": sc.extracted, "error": sc.error}
             for k, (s, sc) in enumerate(zip(samples, scores))]
+
+
+def run_chunks(path_of, todo: list[int], generate, score, timing: Path, meta: dict) -> None:
+    """Generate and score the chunks `todo` in order: generate(c) returns chunk c's generation results (the GPU's
+    work), score(c, results) its records (the CPU's). The next chunk generates while one is scored, two in flight. A
+    chunk's records are written atomically to path_of(c) once all of them are scored, so a restart skips finished
+    chunks; a chunk with more than MAX_DEATHS (or 1%) records whose verifier or scorer process died is refused. One
+    timing line per chunk, with `meta`, is appended to `timing`."""
+
+    def timed(c: int):
+        t0 = time.time()
+        return generate(c), t0, time.time()
+
+    pool = concurrent.futures.ThreadPoolExecutor(2)
+    try:
+        pending = collections.deque((c, pool.submit(timed, c)) for c in todo[:2])
+        queue = collections.deque(todo[2:])
+        while pending:
+            c, future = pending.popleft()
+            results, start, end = future.result()
+            if queue:
+                nxt = queue.popleft()
+                pending.append((nxt, pool.submit(timed, nxt)))
+            t0 = time.perf_counter()
+            records = score(c, results)
+            died = sum("process died" in (r.get("error") or "") for r in records)
+            if died > max(MAX_DEATHS, len(records) // 100):  # a broken verifier, not wrong answers
+                raise RuntimeError(f"chunk {c}: {died} of {len(records)} samples lost their verifier or scorer "
+                                   "process; not writing it")
+            write_jsonl_gz(path_of(c), records)
+            tokens = sum(r["completion_tokens"] for r in records)
+            line = {"time": now(), **meta, "chunk": c, "pid": os.getpid(), "samples": len(records), "tokens": tokens,
+                    "start": round(start, 1), "end": round(end, 1), "score_s": round(time.perf_counter() - t0, 1)}
+            with open(timing, "a") as f:
+                f.write(json.dumps(line) + "\n")
+            log.info("chunk %d: %d records, %d tokens, generated in %.0f s (overlapping the next chunk), scored in "
+                     "%.0f s", c, len(records), tokens, end - start, line["score_s"])
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)  # an error stops the run now, not after the chunk in flight
 
 
 def run_part(config: Path, part: str, shard: str, limit: int | None, attach: str | None, server: dict) -> None:
@@ -203,47 +243,27 @@ def run_part(config: Path, part: str, shard: str, limit: int | None, attach: str
         srv = Server(cfg["model"], settings, 32, base / "logs" / f"vllm-{part}-{os.getpid()}.log")
         srv.start()
     sampler = None
-    pool = concurrent.futures.ThreadPoolExecutor(2)  # the next chunk generates while one is scored
     try:
         if srv:
             srv.wait_ready()
         sampler = Sampler(srv.url if srv else attach, cfg["model"], f"census-{cfg['name']}")
 
         def generate(c: int):
-            reqs = [Request(cfg["model"], prompt_ids(tok, j.task.question, context=contexts.get(j.context)),
-                            j.samples, cfg["max_tokens"], stable_seed("census", part, j.task.uid, j.variant))
-                    for j in all_chunks[c]]
-            t0 = time.time()
-            return sampler.generate(reqs), t0, time.time()
+            return sampler.generate([Request(cfg["model"], prompt_ids(tok, j.task.question,
+                                                                      context=contexts.get(j.context)),
+                                             j.samples, cfg["max_tokens"],
+                                             stable_seed("census", part, j.task.uid, j.variant))
+                                     for j in all_chunks[c]])
 
-        pending = collections.deque((c, pool.submit(generate, c)) for c in todo[:2])
-        queue = collections.deque(todo[2:])
-        while pending:
-            c, future = pending.popleft()
-            results, start, end = future.result()
-            if queue:
-                nxt = queue.popleft()
-                pending.append((nxt, pool.submit(generate, nxt)))
-            t0 = time.perf_counter()
+        def score(c: int, results) -> list[dict]:
             flat = [(j.task, s.text, s.finish_reason) for j, group in zip(all_chunks[c], results) for s in group]
             scores = iter(score_many(flat))
-            records = [r for j, group in zip(all_chunks[c], results)
-                       for r in _records(part, j, group, [next(scores) for _ in group])]
-            died = sum("process died" in (r["error"] or "") for r in records)
-            if died > max(MAX_DEATHS, len(records) // 100):  # a broken verifier, not wrong answers
-                raise RuntimeError(f"chunk {c}: {died} of {len(records)} samples lost their verifier or scorer "
-                                   "process; not writing it")
-            write_jsonl_gz(chunk_path(base, part, c), records)
-            tokens = sum(r["completion_tokens"] for r in records)
-            timing = {"time": now(), "part": part, "chunk": c, "shard": shard, "pid": os.getpid(),
-                      "samples": len(records), "tokens": tokens, "start": round(start, 1), "end": round(end, 1),
-                      "score_s": round(time.perf_counter() - t0, 1)}
-            with open(base / part / "timing.jsonl", "a") as f:
-                f.write(json.dumps(timing) + "\n")
-            log.info("chunk %d: %d samples, %d tokens, generated in %.0f s (overlapping the next chunk), scored in "
-                     "%.0f s", c, len(records), tokens, end - start, timing["score_s"])
+            return [r for j, group in zip(all_chunks[c], results)
+                    for r in sample_records(part, j, group, [next(scores) for _ in group])]
+
+        run_chunks(lambda c: chunk_path(base, part, c), todo, generate, score, base / part / "timing.jsonl",
+                   {"part": part, "shard": shard})
     finally:
-        pool.shutdown(wait=False, cancel_futures=True)  # an error stops the run now, not after the chunk in flight
         if sampler:
             sampler.close()
         if srv:

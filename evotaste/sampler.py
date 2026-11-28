@@ -38,10 +38,14 @@ def _die_with_parent():  # runs in the child before exec: SIGTERM it when the wo
 
 
 class Server:
-    """A vLLM OpenAI-compatible server on the visible GPU, owned by this process."""
+    """A vLLM OpenAI-compatible server on the visible GPU(s), owned by this process. `max_lora_rank` None serves the
+    base model without adapter support; `extra_args` are further `vllm serve` flags (tensor parallelism, a
+    language-model-only switch, a reasoning parser), passed as given."""
 
-    def __init__(self, model: str, server_cfg, max_lora_rank: int, log_path: Path):
+    def __init__(self, model: str, server_cfg, max_lora_rank: int | None, log_path: Path, *,
+                 max_model_len: int = 8192, extra_args: tuple[str, ...] = ()):
         self.model, self.cfg, self.rank, self.log_path = model, server_cfg, max_lora_rank, log_path
+        self.max_model_len, self.extra_args = max_model_len, tuple(extra_args)
         self.proc: subprocess.Popen | None = None
         self.url = ""
 
@@ -54,12 +58,14 @@ class Server:
         self.url = f"http://127.0.0.1:{port}"
         cmd = [str(Path(sys.executable).with_name("vllm")), "serve", self.model, "--host", "127.0.0.1",
                "--port", str(port), "--kv-cache-memory-bytes", self.cfg.kv_cache,
-               "--gpu-memory-utilization", str(self.cfg.gpu_memory_utilization), "--max-model-len", "8192",
-               "--generation-config", "vllm", "--enable-prompt-tokens-details",
-               "--enable-lora", "--max-lora-rank", str(self.rank), "--max-loras", str(self.cfg.max_loras),
-               "--max-cpu-loras", str(max(64, 2 * self.cfg.max_loras)),
-               "--max-num-seqs", str(self.cfg.max_num_seqs),
-               "--max-num-batched-tokens", str(self.cfg.max_num_batched_tokens)]
+               "--gpu-memory-utilization", str(self.cfg.gpu_memory_utilization),
+               "--max-model-len", str(self.max_model_len), "--generation-config", "vllm",
+               "--enable-prompt-tokens-details"]
+        if self.rank is not None:
+            cmd += ["--enable-lora", "--max-lora-rank", str(self.rank), "--max-loras", str(self.cfg.max_loras),
+                    "--max-cpu-loras", str(max(64, 2 * self.cfg.max_loras))]
+        cmd += ["--max-num-seqs", str(self.cfg.max_num_seqs),
+                "--max-num-batched-tokens", str(self.cfg.max_num_batched_tokens), *self.extra_args]
         env = {**os.environ, "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "True"}
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.log_path, "ab") as out:
@@ -100,6 +106,8 @@ class Request:
     n: int
     max_tokens: int
     seed: int  # sampling seed; vLLM gives the k-th of the n samples seed + k and draws by (seed, position)
+    temperature: float = 1.0  # 0 is greedy decoding
+    json_schema: dict | None = None  # constrain the completion to one compact JSON object of this schema
 
 
 @dataclass
@@ -107,7 +115,7 @@ class Sample:
     text: str
     token_ids: list[int]
     finish_reason: str
-    token_logprobs: list[float]  # sampler log-probability of each sampled token (full softmax, temperature 1)
+    token_logprobs: list[float]  # log-probability of each sampled token under the model's full softmax (temperature 1)
 
     @property
     def logprob(self) -> float:
@@ -115,8 +123,8 @@ class Sample:
 
 
 class Sampler:
-    """Client of one server: seeded generation at temperature 1, and adapter versions under a private /dev/shm
-    directory."""
+    """Client of one server: seeded generation (at temperature 1 unless a request says otherwise), and adapter
+    versions under a private /dev/shm directory."""
 
     def __init__(self, url: str, base_model: str, run_name: str):
         self.url, self.base_model = url, base_model
@@ -195,7 +203,9 @@ class Sampler:
 
     async def _one(self, client, slots, req: Request) -> list[Sample]:
         body = {"model": req.model, "prompt": req.prompt, "n": req.n, "max_tokens": req.max_tokens, "seed": req.seed,
-                "temperature": 1.0, "top_p": 1.0, "logprobs": 0, "return_token_ids": True}
+                "temperature": req.temperature, "top_p": 1.0, "logprobs": 0, "return_token_ids": True}
+        if req.json_schema is not None:  # vLLM structured outputs; with a reasoning parser, only after the reasoning
+            body["structured_outputs"] = {"json": req.json_schema, "disable_any_whitespace": True}
         async with slots:
             for attempt in range(RETRIES + 1):
                 try:
