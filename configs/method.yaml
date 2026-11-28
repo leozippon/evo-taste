@@ -24,16 +24,16 @@ models:                   # the subject models (label: weights and vLLM server);
       max_num_batched_tokens: 8192
       max_model_len: 16384  # an alternatives prompt holds a problem and a whole attempt, then 4,096 new tokens
       args: []
-  27b:                    # PROVISIONAL: the form (FP8 or bf16) and the settings follow the scout (docs/dev/SCALE_SCOUT.md)
+  27b:                    # FP8 on one card, no adapters (docs/dev/SCALE_NOTES.md, "Serving the 27B")
     model: /Data2/lzp/models/Qwen3.8-27B-FP8
-    need_free_mib: 42000
+    need_free_mib: 41000
     server:
-      kv_cache: 8G
-      gpu_memory_utilization: 0.92
-      max_num_seqs: 128
+      kv_cache: 10G       # shared by attention tokens and the DeltaNet states (one ~52 MB block per 16 layers per sequence)
+      gpu_memory_utilization: 0.88
+      max_num_seqs: 64
       max_num_batched_tokens: 8192
       max_model_len: 16384
-      args: [--language-model-only]
+      args: [--language-model-only, --no-enable-prefix-caching]  # without prefix caching no state checkpoints
 
 attempts:                 # the training prompt, sampled as in training (temperature 1, top-p 1)
   samples: 8
@@ -64,7 +64,8 @@ pairs:
 
 judge:
   model: 27b              # a label of models: the same weights and server
-  thinking: false         # or low / medium / xhigh (needs --reasoning-parser qwen3 in the server args)
+  args: []                # further server flags for the judge only
+  thinking: false         # or low / medium / xhigh (needs --reasoning-parser qwen3 in args)
   max_tokens: 256         # per reply; a reply that does not parse is asked for once more with twice this
   solution_tokens: 1500   # each solution cut to this many judge tokens, two thirds from its start, one third from its end
   chunk_pairs: 512

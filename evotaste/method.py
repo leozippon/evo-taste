@@ -88,9 +88,9 @@ def load_config(path: str | Path) -> dict:
         raise ValueError(f"{path}: judge.model {j['model']!r} is not a label of models")
     if j["thinking"] not in (False, *EFFORTS):
         raise ValueError(f"{path}: judge.thinking must be false or one of {EFFORTS}")
-    if j["thinking"] and "--reasoning-parser" not in cfg["models"][j["model"]]["server"]["args"]:
-        raise ValueError(f"{path}: a thinking judge needs '--reasoning-parser qwen3' in its server args, so that the "
-                         "JSON constraint starts after the reasoning")
+    if j["thinking"] and "--reasoning-parser" not in j["args"]:
+        raise ValueError(f"{path}: a thinking judge needs '--reasoning-parser qwen3' in judge.args, so that the JSON "
+                         "constraint starts after the reasoning")
     if set(j["method"]) != set(DOMAINS):
         raise ValueError(f"{path}: judge.method must define the method for each of {DOMAINS}")
     _fields(cfg["alternatives"]["prompt"], {"problem", "solution", "instruction"}, f"{path}: alternatives.prompt")
@@ -676,7 +676,8 @@ def run_judge(config: Path, shard: str, limit: int | None, attach: str | None, o
              len(todo))
     thinking = bool(j["thinking"])
     if todo:
-        with serving(m, "judge", base, attach, overrides) as sampler:
+        served = m | {"server": m["server"] | {"args": [*m["server"]["args"], *j["args"]]}}
+        with serving(served, "judge", base, attach, overrides) as sampler:
             def request(i: int, attempt: int) -> Request:
                 return Request(m["model"], prompts[i], 1, j["max_tokens"] * attempt,
                                stable_seed("method", "judge", pairs[i]["id"], attempt), temperature=0.0,
