@@ -105,3 +105,22 @@ def test_run_is_resumable_and_sharded(chdir_results, monkeypatch):
     assert sorted(t["chunk"] for t in timing) == list(range(n_chunks))
     with pytest.raises(SystemExit, match="incomplete"):
         census.read_part(base, "train", 1)
+
+
+def test_records_under_other_or_unknown_verifier_rules_are_not_continued(chdir_results, monkeypatch):
+    import evotaste.sampler
+    from evotaste.verify import RULES_VERSION
+
+    monkeypatch.setattr(evotaste.sampler, "Sampler", FakeSampler)
+    cfg_path = config(chdir_results, selection={"samples": 1, "per_family": 1})
+    base = census.out_dir(census.load_config(cfg_path), 2)
+    census.run_part(cfg_path, "selection", "0/2", 2, "http://unused", {})
+    assert (base / "verifier_rules").read_text() == RULES_VERSION + "\n"
+    written = sorted((base / "selection").glob("chunk-*.jsonl.gz"))
+    (base / "verifier_rules").write_text("2026-11-25.audit-2\n")
+    with pytest.raises(SystemExit, match="scored under verifier rules 2026-11-25.audit-2"):
+        census.run_part(cfg_path, "selection", "1/2", 2, "http://unused", {})
+    (base / "verifier_rules").unlink()  # a census from before the rules were recorded
+    with pytest.raises(SystemExit, match="unknown verifier rules"):
+        census.run_part(cfg_path, "selection", "1/2", 2, "http://unused", {})
+    assert written and sorted((base / "selection").glob("chunk-*.jsonl.gz")) == written  # nothing was added

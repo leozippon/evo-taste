@@ -12,7 +12,10 @@ Parts, each a fixed list of jobs (task, samples, context) cut into chunks of `ch
 Generation is at temperature 1 with `max_tokens`, each request seeded by (part, uid, variant). A chunk's records are
 written atomically once all of its jobs are scored, so a restart skips finished chunks; shard i of n takes the chunks
 whose index is i mod n, so shards run on several GPUs at once and may be re-sharded between runs. Each process uses
-the one GPU in CUDA_VISIBLE_DEVICES and refuses to start unless it has `need_free_mib` free.
+the one GPU in CUDA_VISIBLE_DEVICES and refuses to start unless it has `need_free_mib` free. The verifier's
+RULES_VERSION is recorded in the output directory (`verifier_rules`) before its first record, and `run` refuses a
+directory scored under other rules, or under unknown ones (records but no recorded version, as in censuses made before
+it was recorded): such records can still be summarized and their strata table read, but never continued or mixed.
 
 The census reads items only through the open accessors (`Suites.items` of train and selection, the probe set) and
 never holds a blind receipt, so it cannot reach the vault; every job's uid is also checked against the open parts.
@@ -146,6 +149,27 @@ def read_part(base: Path, part: str, n_chunks: int) -> list[dict]:
 # Running a part
 
 
+def claim_rules(base: Path) -> None:
+    """Record the verifier's RULES_VERSION in a census directory that has no records yet, or check the recorded one;
+    records scored under other or unknown rules are refused."""
+    from evotaste.verify import RULES_VERSION
+
+    path = base / "verifier_rules"
+    if path.exists():
+        recorded = path.read_text().strip()
+        if recorded != RULES_VERSION:
+            raise SystemExit(f"{base} was scored under verifier rules {recorded}, the verifier now has "
+                             f"{RULES_VERSION}; its records cannot be continued or mixed (use a new name)")
+        return
+    if any(base.glob("*/chunk-*.jsonl.gz")):
+        raise SystemExit(f"{base} holds records scored under unknown verifier rules (none recorded); they cannot be "
+                         "continued or mixed (use a new name)")
+    base.mkdir(parents=True, exist_ok=True)
+    tmp = base / f".verifier_rules.{os.getpid()}"
+    tmp.write_text(RULES_VERSION + "\n")
+    os.replace(tmp, path)  # concurrent shards write the same content
+
+
 def free_mib() -> int:
     gpu = os.environ.get("CUDA_VISIBLE_DEVICES", "")
     if not gpu or "," in gpu:
@@ -219,6 +243,7 @@ def run_part(config: Path, part: str, shard: str, limit: int | None, attach: str
     stray = sum(j.task.uid not in allowed for j in jobs)
     if stray:  # a count only: a stray uid could be a vault item
         raise RuntimeError(f"{stray} census jobs are outside the open parts")
+    claim_rules(base)
     index, count = (int(x) for x in shard.split("/"))
     all_chunks = chunks(jobs, cfg["chunk_items"])
     todo = [c for c in range(index, len(all_chunks), count) if not chunk_path(base, part, c).exists()]
