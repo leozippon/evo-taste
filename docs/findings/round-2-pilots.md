@@ -63,7 +63,7 @@ The reversed rule was first tried on the same two lineages, where it came out 1 
 - One base model of 1.7 billion parameters. A model with several ways of solving a problem could have something other than manner to amplify; the next stage tests this on a much larger model ([design/scale.md](../design/scale.md)).
 - Pilots, not population runs: the taste-shaped reward toward a member's own direction rests on two lineages, its reverse on nine and the frontier rule on six, each compared within lineage against siblings from identical weights. The effects of the forward rule are large against item-level intervals but cannot reach conventional significance across two lineages; the nulls of the reversed rule and of the frontier rule are tight (±1.5 and ±0.6 points).
 - Most accuracy figures for single members come from two samples on 1,840 problems (about ±2 points); in-run probes are single samples on about 360.
-- The verifiers credit an unevaluated arithmetic expression as its value. It occurs in about 1% of credited math answers, nearly all of them answers that are legitimately expressions.
+- During the pilots the verifiers credited an unevaluated arithmetic expression as its value (about 1% of credited math answers contained an operator, nearly all of them legitimately expressions); this has since been closed.
 - The harvest simulation stays inside the selection suite. Nothing here has been tested on the blind vault.
 
 ## Where the evidence is
