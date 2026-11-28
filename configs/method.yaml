@@ -1,0 +1,106 @@
+# Method census (docs/design/scale.md, questions 1 and 2; docs/dev/SCALE_SPEC.md, WP-M; evotaste/method.py).
+# Outputs, outside git: results/method/<name>/ (docs/dev/SCALE_NOTES.md). Every stage records the settings below
+# that its records depend on and refuses records made under others: change a setting under a new name.
+name: method-1
+suites: configs/suites-r2.yaml
+census:                   # the 1.7B census whose train part stratifies the item draw (frontier 0, sweet 1-6, mastered 7-8 of 8)
+  strata: results/census/census-r2/strata.tsv
+  sha256: 1291ab8ea23b92030d178bfa844cc6125308a4bd9a0b6b20b46c884b1844b31c
+items:
+  seed: 20261128
+  targets:                # train items per domain and census stratum, spread over sources in proportion to availability
+    math: {mastered: 150, sweet: 450, frontier: 300}
+    code: {mastered: 100, sweet: 300, frontier: 200}
+    logic: {mastered: 50, sweet: 150, frontier: 100}
+
+models:                   # the subject models (label: weights and vLLM server); the judge is one of them
+  1.7b:
+    model: Qwen/Qwen3-1.7B
+    need_free_mib: 20000  # refuse to start on a card with less free memory
+    server:               # kv_cache, gpu_memory_utilization, max_num_seqs, max_num_batched_tokens, max_model_len
+      kv_cache: 12G       # change only memory and speed; `args` are recorded with the records
+      gpu_memory_utilization: 0.42
+      max_num_seqs: 512
+      max_num_batched_tokens: 8192
+      max_model_len: 16384  # an alternatives prompt holds a problem and a whole attempt, then 4,096 new tokens
+      args: []
+  27b:                    # PROVISIONAL: the form (FP8 or bf16) and the settings follow the scout (docs/dev/SCALE_SCOUT.md)
+    model: /Data2/lzp/models/Qwen3.8-27B-FP8
+    need_free_mib: 42000
+    server:
+      kv_cache: 8G
+      gpu_memory_utilization: 0.92
+      max_num_seqs: 128
+      max_num_batched_tokens: 8192
+      max_model_len: 16384
+      args: [--language-model-only]
+
+attempts:                 # the training prompt, sampled as in training (temperature 1, top-p 1)
+  samples: 8
+  max_tokens: 4096
+  chunk_items: 64         # items per chunk: the unit of resumption and sharding
+
+alternatives:             # for every item with a correct attempt: the first one shown, another method asked for
+  samples: 2
+  max_tokens: 4096
+  chunk_items: 128
+  prompt: |-
+    {problem}
+
+    Here is a correct solution to this problem:
+
+    <solution>
+    {solution}
+    </solution>
+
+    Solve the problem again by a genuinely different method. The method is the idea that produces the answer: the mathematical technique, the algorithm and data structures of a program, or the line of argument of a reasoning problem. Wording, layout, the order of the steps, the level of detail and whether the answer is checked are not the method, so a solution that differs from the one above only in these does not count as a different method. Carry out your new method on its own and in full, without relying on the solution above.
+
+    {instruction}
+
+pairs:
+  seed: 20261128
+  spontaneous: 2          # disjoint pairs of correct attempts per item and model, at most
+  repeats: 200            # spontaneous pairs judged a second time with the sides swapped
+
+judge:
+  model: 27b              # a label of models: the same weights and server
+  thinking: false         # or low / medium / xhigh (needs --reasoning-parser qwen3 in the server args)
+  max_tokens: 256         # per reply; a reply that does not parse is asked for once more with twice this
+  solution_tokens: 1500   # each solution cut to this many judge tokens, two thirds from its start, one third from its end
+  chunk_pairs: 512
+  reader_sample: 160      # pairs for independent readers, spread over kind, subject model, domain and verdict
+  system: You compare solutions to mathematics, programming and reasoning problems and judge whether they use the same method.
+  method:                 # what counts as the method, per domain (shown to the judge and to the readers)
+    math: >-
+      The method is the mathematical idea that produces the answer: the technique, theorem, identity, construction or kind of argument that carries the solution, for example setting up and solving equations, counting, a geometric or symmetry argument, a substitution, a known formula, or testing the answer options. Solving the same equations by substitution in one solution and by elimination in the other is a variant; solving the equations in one and testing each option in the other is different.
+    code: >-
+      The method is the algorithm and the data structures the program relies on, for example sorting against hashing, recursion against an explicit loop or stack, a single pass with two pointers against nested loops, or dynamic programming against search. Names, comments, formatting, input checks, how the code is split into functions, and equivalent ways of writing the same computation (a loop or a comprehension, a counting dictionary or Counter) are not the method. A library routine in place of the same computation written out by hand is a variant.
+    logic: >-
+      The method is the line of argument that reaches the answer, for example deriving the answer from the premises and then matching it to an option, checking each option against the premises and eliminating the wrong ones, chaining rules forward from the facts or backward from the question, a case analysis, or recalling a known fact rather than reasoning it out. Going through the same options or rules in another order is the same method.
+  relations: |-
+    - "same": the same key idea and the same main steps; the solutions differ only in wording, layout, order, level of detail or checking.
+    - "variant": the same key idea, carried out through materially different intermediate steps.
+    - "different": a different key idea, technique, algorithm or line of argument.
+  prompt: |-
+    Below are a problem and two solutions to it. Both solutions reach the correct answer. Decide whether they solve the problem by the same method.
+
+    What counts as the method: {method}
+
+    Not part of the method: wording, layout and formatting, notation and names, the order in which steps are presented, the level of detail, and whether or how the answer is checked at the end. Judge only the method each solution actually uses, not its quality, length or style.
+
+    The relation between the two solutions is one of:
+    {relations}
+
+    <problem>
+    {problem}
+    </problem>
+
+    <solution_a>
+    {a}
+    </solution_a>
+
+    <solution_b>
+    {b}
+    </solution_b>
+
+    Reply with a JSON object with three keys in this order: "approach_a", the method of solution A in at most 15 words; "approach_b", the method of solution B in at most 15 words; and "relation", one of "same", "variant" or "different". Name both approaches before you decide the relation.
