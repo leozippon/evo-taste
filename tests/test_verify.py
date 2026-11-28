@@ -119,6 +119,27 @@ def test_a_reference_written_as_an_expression_takes_any_rewriting(gold, answer):
     assert equivalent(answer, gold)
 
 
+# Colon notation (a time or a ratio) and lists of statement labels are matched as written: 6:00 is no 6/0 (so every
+# h:00 was equal), (2)(3) no sum (so 5 and (1)(4) answered it).
+@pytest.mark.parametrize("gold,answer,ok", [
+    ("6:00", "6:00", True), ("6:00", "06:00", True), ("05\\!:\\!00", "5:00", True), ("6:00", "4:00", False),
+    ("6:00", "6", False), ("3:30 PM", "3:30 \\text{ PM}", True), ("4:40 a.m.", "4:40 AM", True),
+    ("3:30 PM", "1:10 PM", False), ("10:40", "\\frac{1}{4}", False), ("4 : 13", "AB : BD = 4 : 13", True),
+    ("4 : 13", "8 : 26", False), ("3 : 4 : 5", "3 : 20", False),
+    # a two-term ratio whose second term is no minutes keeps its value
+    ("2 : 5", "\\frac{2}{5}", True), ("2: 1", "2", True), ("2 : 5", "4 : 10", True), ("2 : 5", "5 : 2", False),
+    ("(2)(3)", "(2)(3)", True), ("(2)(3)", "(2), (3)", True), ("(2)(3)", "2, 3", True), ("(3)", "3", True),
+    ("(2)(3)", "5", False), ("(2)(3)", "(1)(4)", False), ("(2)(3)", "(2)", False), ("(3)", "3.0", False),
+])
+def test_times_ratios_and_statement_labels_are_matched_as_written(gold, answer, ok):
+    assert equivalent(answer, gold) == ok
+
+
+@pytest.mark.parametrize("gold,answer", [("1000", "1\\,000"), ("1234567", "1\\,234\\,567"), ("1000.5", "1\\,000.5")])
+def test_thin_spaces_between_digit_groups_are_thousands_separators(gold, answer):
+    assert equivalent(answer, gold) and not equivalent(answer, "0")
+
+
 # -- wrappers -------------------------------------------------------------------------------------------------------
 
 def test_wrapper_sets():
@@ -439,7 +460,8 @@ def test_gold_check_refuses_ambiguous_references(gold, reason):
 
 @pytest.mark.parametrize("gold", ["[0, 1)", "(-\\infty, 2]", "\\{1, 2\\}", "\\log 1", "\\log_2 8", "\\ln 2",
                                   {"answer": "1, 2", "type": "list"}, {"answer": "(1, 2)", "type": "interval"},
-                                  {"answer": "[0.333, 0.25]", "type": "tuple"}, {"answer": "7", "type": "number"}])
+                                  {"answer": "[0.333, 0.25]", "type": "tuple"}, {"answer": "7", "type": "number"},
+                                  "6:00", "4:40 a.m.", "(1)(2)(4)"])
 def test_gold_check_accepts_unambiguous_and_typed_references(gold):
     assert gold_ok("open", gold)
 

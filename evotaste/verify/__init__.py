@@ -21,7 +21,7 @@ from evotaste.verify.wrappers import DEFAULT, HELDOUT_WRAPPERS, TRAIN_WRAPPERS, 
 
 # Bump on every change to a rule that can change a verdict or a gold_check result (stored verdicts and suites built
 # under another version are stale).
-RULES_VERSION = "2026-11-28.final-form"
+RULES_VERSION = "2026-11-28.literal-forms"
 
 __all__ = ["CODE_TIME_LIMIT_S", "DEFAULT", "HELDOUT_WRAPPERS", "Job", "LETTERS", "RULES_VERSION", "Result",
            "TRAIN_WRAPPERS", "Verdict", "WRAPPERS", "Wrapper", "gold_check", "gold_ok", "is_undecided", "run_python",

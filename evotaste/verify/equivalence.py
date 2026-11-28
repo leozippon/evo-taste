@@ -31,6 +31,11 @@ carried out: an answer that is not a numeral (17 \\cdot 23 + 4, 2^{10}, 8!, \\sq
 value. A decimal reference stands for a rounded value, so it still takes an exact form that sympy does not find
 rational (\\pi for 3.14, \\frac{1+\\sqrt{5}}{2} for 1.618), which no numeral could write. A reference that is itself an
 expression takes any rewriting of its value, as before.
+
+Two kinds of reference have no arithmetic reading that grades them soundly, so they are matched as written
+(`_literal`): colon notation that may be a time (6:00 is no 6/0; 10:40 could be a ratio too) or is a ratio of three or
+more terms, by its compact text (a two-term ratio whose second term is not written as minutes, 2 : 5, keeps its value
+a/b); and a list of statement labels ((1)(2)(4), which is no sum), by the set of labels.
 """
 
 from __future__ import annotations
@@ -79,6 +84,12 @@ _POW10 = r"10\^(?:\{[+-]?\d+\}|\d)"
 _NUMBER = rf"(?:{_DEC}{_SP}(?:\\times|\\cdot|\*){_SP}{_POW10}|{_POW10}|(?:\d+{_SP})?{_FRAC}|{_DEC})"
 _SIGNED = rf"{_SP}[+-]?{_SP}{_NUMBER}{_SP}(?:\\?%|\^\\circ|\^\{{\\circ\}}|°)?{_SP}"
 NUMERAL = re.compile(rf"{_SIGNED}|{_SP}\({_SIGNED}\){_SP}")
+_THIN_THOUSANDS = re.compile(r"(?<=\d)\\,(?=\d{3}(?!\d))")  # 1\,000: a thin space between digit groups
+_SPACING = re.compile(r"\s+|\\[,;! ]|~|\\(?:left|right)(?![A-Za-z])")
+_COLON = re.compile(r"(?<!\\):")
+_MINUTES = re.compile(r"\d{2}(?!\d)")  # how a time writes the term after its colon
+_LABELS = re.compile(r"(?:\(\d+\))+")  # statement labels, as references write them
+_LABEL_ANSWER = re.compile(r"(?:\(\d+\)|\d+)(?:,?(?:\(\d+\)|\d+))*")  # and as answers may: (1)(4), (1), (4), 1, 4
 _OPEN, _CLOSE = "([{", ")]}"
 _X = sympy.Symbol("x")
 
@@ -108,8 +119,8 @@ def reference(gold) -> tuple[str, str | None]:
 
 def _strip(s: str) -> str:
     """Surrounding math delimiters, markdown emphasis and backticks, a \\text-like command around the whole answer,
-    and a trailing period removed."""
-    s = s.strip().replace("−", "-")
+    and a trailing period removed; thin spaces between digit groups joined (1\\,000 is 1000)."""
+    s = _THIN_THOUSANDS.sub("", s.strip().replace("−", "-"))
     prev = None
     while s != prev:
         prev = s
@@ -342,9 +353,40 @@ def _unwrap(g, a):
     return g, a
 
 
+def _compact(s: str) -> str:
+    """The content without spacing, \\left and \\right, and of an equation only its last right-hand side."""
+    return _SPACING.sub("", _strip(s)).rsplit("=", 1)[-1]
+
+
+def _colon_text(s: str) -> str:
+    """Colon notation as written: compact, text commands unwrapped, case, a leading zero and the dots of a.m. and
+    p.m. ignored (05:00 PM, 5:00\\text{ pm} and 5:00 p.m. are one form)."""
+    t = re.sub(r"\\(?:text|mathrm)\{([^{}]*)\}", r"\1", _compact(s)).lower()
+    return re.sub(r"(?<=\d)([ap])\.?m\.?", r"\1m", re.sub(r"^0+(?=\d)", "", t))
+
+
+def _literal(answer: str, gold: str) -> bool | None:
+    """Whether the answer matches a reference that is matched as written, or None if the reference has an arithmetic
+    reading. Colon notation is a ratio with the value a/b when it has two terms and the second is not written as
+    minutes (2 : 5, 7:6); any other (6:00, 10:40, 3:30 PM, which may be times, and 3 : 4 : 5) matches by
+    `_colon_text`. A list of statement labels ((1)(2)(4)) matches by its set of labels, which the answer may write
+    with or without parentheses and commas."""
+    ref = _compact(gold)
+    if _COLON.search(ref):
+        terms = _COLON.split(ref)
+        return _colon_text(answer) == _colon_text(gold) if len(terms) != 2 or _MINUTES.match(terms[1]) else None
+    if _LABELS.fullmatch(ref):
+        got = _compact(answer)
+        return bool(_LABEL_ANSWER.fullmatch(got)) and set(re.findall(r"\d+", got)) == set(re.findall(r"\d+", ref))
+    return None
+
+
 def _whole(answer: str, gold: str, program: bool) -> bool:
-    """A program's output line counts in its LaTeX reading or, failing that, its Python reading (E is a label in
-    the first and Euler's number in the second; pi/4 is only meaningful in the second)."""
+    """A reference matched as written (`_literal`) is matched so. Otherwise a program's output line counts in its
+    LaTeX reading or, failing that, its Python reading (E is a label in the first and Euler's number in the second;
+    pi/4 is only meaningful in the second)."""
+    if (matched := _literal(answer, gold)) is not None:
+        return matched
     ref = parse_gold(gold)
     return any(got is not None and _compare(ref, got)
                for got in (parse_answer(answer, python) for python in ((False, True) if program else (False,))))

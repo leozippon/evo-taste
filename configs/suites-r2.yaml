@@ -13,9 +13,9 @@ generated:
     max_gold_chars: 40
     max_prompt_tokens: 3500
     tokenizer: Qwen/Qwen3-1.7B
-    verifier_rules: 2026-11-28.final-form
+    verifier_rules: 2026-11-28.literal-forms
 totals:
-  train: 79006
+  train: 79008
   selection: 19299
   blind2: 17385
 units:
@@ -237,8 +237,8 @@ parts:
       sha256: 64b82749db14f1b358b633103617af8f8a23210f2f61a299dd5765ebf67ea2c3
   deepscaler:
     train:
-      items: 27596
-      sha256: 9b157a6f0aebe8e9cb57e454d9276f42edc17aaceb5b1bc3237540a361ef8892
+      items: 27598
+      sha256: 7dbd86f831388d7d46fc22b7fab8e673b80559d9fc8ba0006308451f99770fab
     selection:
       items: 1411
       sha256: a74b0e2f4af5538252fe76378189f47fb28eedc9c025074c96b77e53d48e587e
@@ -440,7 +440,7 @@ dropped:
     'train: copy in selection': 242
     'train: copy in the same part': 9016
     'train: free-text gold': 257
-    'train: gold rejected': 152
+    'train: gold rejected': 150
   aqua:
     'blind2: gold rejected': 3
     'selection: gold rejected': 1
@@ -560,7 +560,6 @@ gold_failed:
   - '25232'
   - '25405'
   - '2574'
-  - '2624'
   - '2684'
   - '27641'
   - '27791'
@@ -641,7 +640,6 @@ gold_failed:
   - '5806'
   - '5808'
   - '5816'
-  - '5876'
   - '5955'
   - '5963'
   - '5974'
