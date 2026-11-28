@@ -121,8 +121,10 @@ def manifest(cfg: dict, stage: str, label: str | None = None, limit: int | None 
         own = {"suites": cfg["suites"], "suites_sha256": hashlib.sha256(Path(cfg["suites"]).read_bytes()).hexdigest(),
                "census": cfg["census"], "items": cfg["items"], "limit": limit}
         up = []
-    elif stage in ("attempts", "alternatives"):
-        own = {"model": model(label), stage: cfg[stage]}
+    elif stage in ("attempts", "alternatives"):  # scored here: records under other verifier rules are not comparable
+        from evotaste.verify import RULES_VERSION
+
+        own = {"model": model(label), stage: cfg[stage], "verifier_rules": RULES_VERSION}
         up = [("items", None) if stage == "attempts" else ("attempts", label)]
     elif stage == "pairs":
         own = {"subjects": list(cfg["models"]), "pairs": cfg["pairs"]}
@@ -706,7 +708,7 @@ def run_judge(config: Path, shard: str, limit: int | None, attach: str | None, o
 
 
 def main(argv=None) -> None:
-    from evotaste.worker import logged, server_options, server_overrides, setup_logging
+    from evotaste.worker import log_uncommitted_changes, logged, server_options, server_overrides, setup_logging
 
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("stage", choices=STAGES)
@@ -722,6 +724,7 @@ def main(argv=None) -> None:
     name = load_config(args.config)["name"] + (f"-limit{args.limit}" if args.limit else "")
     label = "-".join(x for x in (args.stage, args.model, args.shard.replace("/", "of")) if x)
     setup_logging(f"method-{name}", label)
+    log_uncommitted_changes(f"method-{name}")  # verifier processes run whatever code is on disk
     if args.stage == "items":
         logged(run_items, args.config, args.limit)
     elif args.stage == "pairs":
