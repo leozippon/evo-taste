@@ -13,7 +13,7 @@ generated:
     max_gold_chars: 40
     max_prompt_tokens: 3500
     tokenizer: Qwen/Qwen3-1.7B
-    verifier_rules: 2026-11-25.audit-2
+    verifier_rules: 2026-11-28.final-form
 totals:
   train: 79006
   selection: 19299

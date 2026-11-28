@@ -24,6 +24,13 @@ Numeric rules (|.| is the complex modulus, g the reference value, a the answer v
   evaluation, simplification or its minimal polynomial; anything undecided is not equal);
 - a zero reference against a decimal: |a| <= 1e-12.
 A percentage X% has the value X/100 and also matches X (math-verify's convention).
+
+A reference written as a numeral (NUMERAL: an integer, decimal or fraction of integers, signed, as a percentage or in
+scientific notation, with the units and other decorations math-verify drops) wants an answer with its arithmetic
+carried out: an answer that is not a numeral (17 \\cdot 23 + 4, 2^{10}, 8!, \\sqrt{4}) does not answer it, whatever its
+value. A decimal reference stands for a rounded value, so it still takes an exact form that sympy does not find
+rational (\\pi for 3.14, \\frac{1+\\sqrt{5}}{2} for 1.618), which no numeral could write. A reference that is itself an
+expression takes any rewriting of its value, as before.
 """
 
 from __future__ import annotations
@@ -36,6 +43,7 @@ import warnings
 from dataclasses import dataclass
 
 import sympy
+from latex2sympy2_extended.math_normalization import normalize_latex
 from math_verify import LatexExtractionConfig, parse, verify
 from sympy.core.relational import Relational
 
@@ -59,6 +67,18 @@ _IMAGINARY = re.compile(r"(?<=\d)i\b")
 _LONE_I = re.compile(r"(?<![A-Za-z\\])i(?![A-Za-z])")  # i as a token of its own, not inside a word such as sin
 _THOUSANDS = re.compile(r"[+-]?\d{1,3}(?:,\d{3})+(?:\.\d+)?")
 _LOG = re.compile(r"\\log(?![_A-Za-z])")
+# How a final answer writes a number, matched on the content as math-verify normalizes it (units, \text, currency
+# and \left, \right removed): an integer (with thousands separators or a base subscript, 2003_6), a decimal, a
+# fraction of two integers (\frac, \dfrac, \tfrac, a/b, a:b) or a mixed number, m \times 10^k or 10^k; signed, as a
+# percentage or in degrees, possibly in parentheses.
+_SP = r"(?:\\[,;:! ]|~|\s)*"
+_INT = r"(?:\d{1,3}(?:(?:,|\{,\})\d{3})+|\d+)"
+_DEC = rf"(?:{_INT}(?:\.\d*)?(?:_(?:\d|\{{\(?\d+\)?\}}))?|\.\d+)"
+_FRAC = rf"(?:\\[dt]?frac\s*\{{\s*[+-]?\d+\s*\}}\s*\{{\s*[+-]?\d+\s*\}}|\d+{_SP}[/:]{_SP}\d+)"
+_POW10 = r"10\^(?:\{[+-]?\d+\}|\d)"
+_NUMBER = rf"(?:{_DEC}{_SP}(?:\\times|\\cdot|\*){_SP}{_POW10}|{_POW10}|(?:\d+{_SP})?{_FRAC}|{_DEC})"
+_SIGNED = rf"{_SP}[+-]?{_SP}{_NUMBER}{_SP}(?:\\?%|\^\\circ|\^\{{\\circ\}}|°)?{_SP}"
+NUMERAL = re.compile(rf"{_SIGNED}|{_SP}\({_SIGNED}\){_SP}")
 _OPEN, _CLOSE = "([{", ")]}"
 _X = sympy.Symbol("x")
 
@@ -72,6 +92,7 @@ class Parsed:
     expr: object  # sympy expression, set, interval, relation or matrix; decimals as exact rationals
     decimal: bool  # written with a decimal literal (a point, or e-notation)
     sig: int | None  # significant digits of the least precise decimal literal
+    numeral: bool  # written as a NUMERAL (an equation: its last right-hand side)
 
 
 def reference(gold) -> tuple[str, str | None]:
@@ -173,11 +194,12 @@ def parse_answer(s: str, python: bool = False) -> Parsed | None:
     s = _strip(s)
     if not s or len(s) > MAX_CHARS:
         return None
+    latex = _latex(s)
     if python:
         if (expr := _python_reading(s)) is None:
             return None
     else:
-        found = parse(f"\\boxed{{{_latex(s)}}}", extraction_config=_CONFIG, fallback_mode="no_fallback",
+        found = parse(f"\\boxed{{{latex}}}", extraction_config=_CONFIG, fallback_mode="no_fallback",
                       extraction_mode="first_match", parsing_timeout=None)
         exprs = [e for e in found if isinstance(e, (sympy.Basic, sympy.MatrixBase))]
         if not exprs:
@@ -193,7 +215,9 @@ def parse_answer(s: str, python: bool = False) -> Parsed | None:
         expr = expr.xreplace({f: sympy.Rational(str(f)) for f in floats})
     mantissas = _DECIMAL.findall(s) + [m.group(1) for m in [_LONE_SCIENTIFIC.fullmatch(s)] if m]
     sig = min(map(_significant, mantissas)) if mantissas else None
-    return Parsed(expr, bool(mantissas or floats), sig)
+    written = latex.rsplit("=", 1)[-1] if isinstance(expr, sympy.Eq) else latex
+    numeral = bool(NUMERAL.fullmatch(normalize_latex(written, _CONFIG[0].normalization_config)))
+    return Parsed(expr, bool(mantissas or floats), sig, numeral)
 
 
 @functools.lru_cache(maxsize=4096)
@@ -326,10 +350,19 @@ def _whole(answer: str, gold: str, program: bool) -> bool:
                for got in (parse_answer(answer, python) for python in ((False, True) if program else (False,))))
 
 
+def _unevaluated(ref: Parsed, got: Parsed, a) -> bool:
+    """The answer `a` still has arithmetic to carry out for a reference written as a numeral: it is no numeral, and
+    the reference is exact or `a` is rational (a decimal reference, a rounded value, takes exact forms that no
+    numeral could write, such as pi for 3.14)."""
+    if not ref.numeral or got.numeral:
+        return False
+    return not ref.decimal or (isinstance(a, sympy.Expr) and bool(a.doit().is_rational))
+
+
 def _compare(ref: Parsed, got: Parsed) -> bool:
     g, a = _unwrap(ref.expr, got.expr)
     if _numbers(g) and _numbers(a):
-        return _same(g, a, ref, ref.decimal, got.decimal)
+        return not _unevaluated(ref, got, a) and _same(g, a, ref, ref.decimal, got.decimal)
     if _numbers(g) or _numbers(a):  # a number against something with variables
         return False
     return bool(verify(g, a, timeout_seconds=None))

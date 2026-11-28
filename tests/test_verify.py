@@ -25,7 +25,7 @@ def open_job(text, gold, wrapper="box", channels=("direct",)):
 
 @pytest.mark.parametrize("gold,answer", [
     ("\\frac{1}{2}", "0.5"), ("0.5", "\\frac{1}{2}"), ("0.5", "1/2"), ("17", "17.0"), ("17", "16.999999999999996"),
-    ("18", "\\$18"), ("12", "12 \\text{ cm}"), ("5", "x = 5"), ("5", "2 + 3"), ("x^2+2x+1", "(x+1)^2"),
+    ("18", "\\$18"), ("12", "12 \\text{ cm}"), ("5", "x = 5"), ("5", "2 + 3 = 5"), ("x^2+2x+1", "(x+1)^2"),
     ("x^2+1", "x**2 + 1"), ("\\frac{\\sqrt{2}}{2}", "0.7071067811865476"), ("\\frac{\\sqrt{2}}{2}", "sqrt(2)/2"),
     ("2\\sqrt{3}", "\\sqrt{12}"), ("\\{1,2\\}", "\\{2,1\\}"), ("(1,2)", "(1, 2)"), ("[0,1)", "[0, 1)"),
     ("50", "50\\%"), ("0.125", "12.5\\%"), ("3.2\\times 10^{-19}", "3.2e-19"), ("10", "1e1"), ("0", "1e-15"),
@@ -40,10 +40,10 @@ def open_job(text, gold, wrapper="box", channels=("direct",)):
     ("1,000", "1000"), ("10,\\!000", "10000"),
     # exact values written differently
     ("\\frac{1}{\\sqrt{2}}", "\\frac{\\sqrt{2}}{2}"), ("\\sqrt{5+2\\sqrt{6}}", "\\sqrt{2}+\\sqrt{3}"),
-    ("1024", "2^{10}"), ("120", "5!"), ("10", "\\binom{5}{2}"), ("3", "\\log_2 8"),
-    ("\\frac{\\pi}{2}", "\\frac{2\\pi}{4}"), ("2", "\\sqrt[3]{8}"),
+    ("2^{10}", "1024"), ("5!", "120"), ("\\binom{5}{2}", "10"), ("\\log_2 8", "3"),
+    ("\\frac{\\pi}{2}", "\\frac{2\\pi}{4}"), ("\\sqrt[3]{8}", "2"),
     ("3+2\\sqrt{2}", "(1+\\sqrt{2})^2"), ("4^{1006}", "2^{2012}"), ("100\\cdot 99!", "100!"), ("2i", "(1+i)^2"),
-    ("\\frac{2012\\cdot 2011}{2}", "\\binom{2012}{2}"), ("\\sqrt{2}-1", "\\frac{1}{1+\\sqrt{2}}"), ("9", "e^{2\\ln 3}"),
+    ("\\frac{2012\\cdot 2011}{2}", "\\binom{2012}{2}"), ("\\sqrt{2}-1", "\\frac{1}{1+\\sqrt{2}}"), ("e^{2\\ln 3}", "9"),
 ])
 def test_equal_values_in_other_notation_are_accepted(gold, answer):
     assert equivalent(answer, gold)
@@ -77,6 +77,46 @@ def test_equal_values_in_other_notation_are_accepted(gold, answer):
 ])
 def test_wrong_answers_are_rejected(gold, answer):
     assert not equivalent(answer, gold)
+
+
+# A reference written as a number wants the arithmetic carried out: under training, an expression whose value is
+# right would be a shortcut past the final computation.
+@pytest.mark.parametrize("gold,answer", [
+    ("395", "17 \\cdot 23 + 4"), ("5", "2 + 3"), ("395", "x = 17 \\cdot 23 + 4"), ("4086462", "2021 \\times 2022"),
+    ("1024", "2^{10}"), ("120", "5!"), ("10", "\\binom{5}{2}"), ("3", "\\log_2 8"), ("2", "\\sqrt{4}"),
+    ("2", "\\sqrt[3]{8}"), ("9", "e^{2\\ln 3}"), ("2", "4 \\div 2"), ("2", "0.5 \\cdot 4"), ("18", "\\$3 \\cdot 6"),
+    ("\\frac{3}{4}", "\\frac{1}{2} + \\frac{1}{4}"), ("-\\frac{2}{39203}", "-\\frac{2}{199 \\cdot 197}"),
+    ("900900", "\\frac{16!}{4! \\cdot 4! \\cdot 8!}"), ("90", "\\int_{0}^{6} 15 \\, dy"),
+    ("0.0000001024", "\\frac{1}{5^{10}}"), ("1.33", "1 + \\frac{1}{3}"), ("50\\%", "25 \\cdot 2\\%"),
+])
+def test_an_expression_still_to_be_evaluated_does_not_answer_a_number(gold, answer):
+    assert not equivalent(answer, gold)
+
+
+def test_an_unevaluated_element_or_printed_expression_does_not_answer_a_number():
+    assert not equivalent("17 \\cdot 23 + 4, 2", "2, 395") and equivalent("395, 2", "2, 395")
+    assert open_job("\\boxed{(17 \\cdot 23 + 4, 2)}", {"answer": "(395, 2)", "type": "tuple"}).reward == 0.0
+    v = open_job("```python\nprint('17*23+4')\n```", "395", channels=BOTH)
+    assert (v.channel, v.reward) == ("program", 0.0)
+
+
+@pytest.mark.parametrize("gold,answer", [
+    ("0.75", "\\frac{3}{4}"), ("\\frac{3}{4}", "3/4"), ("\\frac{3}{4}", "\\dfrac{6}{8}"), ("0.75", "\\tfrac34"),
+    ("3.5", "3\\frac{1}{2}"), ("-0.75", "-\\frac{3}{4}"), ("-3", "(-3)"), ("300000", "3 \\times 10^{5}"),
+    ("3.2\\times 10^{-19}", "3.2 \\cdot 10^{-19}"), ("0.00001", "1e-05"), ("1234567", "1,234,567"),
+    ("10000", "10,\\!000"), ("0.5", "50\\%"), ("18", "\\$18.00"), ("12", "12 \\text{ cm}"), ("30", "30^\\circ"),
+    ("2003", "2003_6"), ("3:7", "3 : 7"), ("5", "2 + 3 = 5"),
+    # a decimal reference stands for a rounded value: an exact irrational form still answers it
+    ("3.14", "\\pi"), ("1.618", "\\frac{1 + \\sqrt{5}}{2}"), ("1.41", "\\sqrt{2}"), ("3.7", "\\log_2 13"),
+])
+def test_a_number_in_final_form_answers_a_number(gold, answer):
+    assert equivalent(answer, gold)
+
+
+@pytest.mark.parametrize("gold,answer", [("2^{10}", "4^{5}"), ("5!", "2 \\cdot 3 \\cdot 4 \\cdot 5"),
+                                         ("\\sqrt{12}", "2\\sqrt{3}")])
+def test_a_reference_written_as_an_expression_takes_any_rewriting(gold, answer):
+    assert equivalent(answer, gold)
 
 
 # -- wrappers -------------------------------------------------------------------------------------------------------
@@ -343,12 +383,13 @@ def test_verify_many_keeps_order_and_matches_judge():
 def test_a_comparison_that_exhausts_its_cpu_budget_is_decided_not_verified():
     """Census answers (math_train/intermediate_algebra/1209) and the form behind the selection census's undecided
     verdicts: power towers that sympy computes in C, where no signal reaches. The budget is CPU time, so the verdict
-    does not depend on the machine's load."""
+    does not depend on the machine's load. (Against their numeral references the towers are now rejected unevaluated,
+    so an expression reference makes the comparison run.)"""
     pool = Pool(2)
     try:
         pool.run([Job("open", "\\boxed{1}", "1", "box")] * 2)  # start both processes (imports take seconds)
-        out = pool.run([Job("open", "So \\boxed{\\frac{2}{2^{2^{2007}} + 1}}", "2", "box"),
-                        Job("open", "\\boxed{10^{10^{9}}}", "1", "box"), Job("open", "\\boxed{1}", "1", "box")])
+        out = pool.run([Job("open", "So \\boxed{\\frac{2}{2^{2^{2007}} + 1}}", "\\sqrt{2}", "box"),
+                        Job("open", "\\boxed{10^{10^{9}}}", "\\sqrt{2}", "box"), Job("open", "\\boxed{1}", "1", "box")])
         for v, extracted in zip(out[:2], ["\\frac{2}{2^{2^{2007}} + 1}", "10^{10^{9}}"]):
             assert v == Verdict(0.0, False, True, "direct", extracted, f"comparison exceeded its CPU budget "
                                 f"({COMPARISON_CPU_S} s)") and not is_undecided(v.error)
@@ -362,7 +403,7 @@ def test_a_wall_clock_deadline_with_cpu_budget_to_spare_is_undecided():
     pool = Pool(1)
     try:
         pool.run([Job("open", "\\boxed{1}", "1", "box")])
-        v = pool.run([Job("open", "\\boxed{10^{10^{10}}}", "1", "box")], timeout=2)[0]
+        v = pool.run([Job("open", "\\boxed{10^{10^{10}}}", "\\sqrt{2}", "box")], timeout=2)[0]
         assert is_undecided(v.error) and "starved" in v.error and v.reward == 0.0
     finally:
         pool.close()
